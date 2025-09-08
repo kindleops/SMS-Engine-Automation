@@ -1,99 +1,72 @@
-import os
-from datetime import datetime
+from fastapi import APIRouter, Request, HTTPException
 from pyairtable import Table
+import os
 from sms.textgrid_sender import send_message
+from sms.autoresponder import classify_reply  # reuse same classifier
+
+router = APIRouter()
 
 # Airtable setup
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
-UNPROCESSED_VIEW = os.getenv("UNPROCESSED_VIEW", "Unprocessed Inbounds")
 
 convos = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, CONVERSATIONS_TABLE)
 leads = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, LEADS_TABLE)
 
-# Expanded classification
-def classify_reply(body: str) -> str:
-    b = (body or "").lower()
 
-    if any(x in b for x in [
-        "wrong", "not me", "who is this", "who are you", "don’t own", "dont own",
-        "i rent", "tenant", "landlord", "this isn’t mine", "this is not mine"
-    ]):
-        return "WRONG"
+@router.post("/webhook")
+async def inbound_webhook(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    if any(x in b for x in [
-        "stop", "unsubscribe", "quit", "end", "cancel", "no thanks",
-        "not interested", "leave me alone", "do not contact", "remove me",
-        "don’t text", "dont text"
-    ]):
-        return "NO"
+    from_number = payload.get("from")
+    to_number = payload.get("to")
+    message_body = payload.get("body")
 
-    if any(x in b for x in [
-        "yes", "maybe", "depends", "what’s the offer", "whats the offer",
-        "offer", "price", "how much", "interested", "thinking about it",
-        "make me an offer", "what would you pay", "send me an offer",
-        "possibly", "potentially", "numbers", "give me a price"
-    ]):
-        return "YES"
+    if not from_number or not message_body:
+        raise HTTPException(status_code=422, detail="Missing 'from' or 'body' in payload")
 
-    if any(x in b for x in [
-        "not now", "later", "call me later", "maybe in future",
-        "check back", "not right now", "thinking", "not selling yet"
-    ]):
-        return "LATER"
+    # Save inbound conversation
+    record = convos.create({
+        "phone": from_number,
+        "to_number": to_number,
+        "message": message_body,
+        "direction": "IN",
+        "status": "NEW"
+    })
 
-    return "UNKNOWN"
+    print(f"📩 Inbound SMS from {from_number}: {message_body}")
 
-def run_autoresponder(limit=50, view=UNPROCESSED_VIEW):
-    records = convos.all(view=view)[:limit]
-    processed = 0
+    # Classify and generate reply (same as autoresponder)
+    intent = classify_reply(message_body)
+    if intent == "WRONG":
+        reply = "Thanks for letting me know—I’ll remove this number."
+    elif intent == "NO":
+        reply = "All good—thanks for confirming. I’ll mark our files. If anything changes, text me anytime."
+    elif intent == "YES":
+        reply = "Great — are you open to a cash offer if the numbers make sense?"
+    elif intent == "LATER":
+        reply = "Totally fine—I’ll check back later. If timing changes sooner, just shoot me a text."
+    else:
+        reply = "Thanks for the response. Just to clarify—are you the owner of the property and open to hearing an offer if the numbers work?"
 
-    for r in records:
-        try:
-            fields = r.get("fields", {})
-            msg = fields.get("message", "")
-            phone = fields.get("phone")
-            lead_id = fields.get("lead_id")
-            intent = classify_reply(msg)
+    # Send SMS
+    send_message(from_number, reply)
 
-            if not phone:
-                continue
+    # Update conversation status
+    convos.update(record["id"], {
+        "status": f"PROCESSED-{intent}"
+    })
 
-            if intent == "WRONG":
-                reply = "Thanks for letting me know—I’ll remove this number."
-            elif intent == "NO":
-                reply = "All good—thanks for confirming. I’ll mark our files. If anything changes, text me anytime."
-            elif intent == "YES":
-                reply = "Got it—are you the decision-maker for this property, and open to an offer if the numbers make sense?"
-            elif intent == "LATER":
-                reply = "Totally fine—I’ll make a note to check back with you down the road. If timing changes sooner, just shoot me a text."
-            else:
-                reply = "Thanks for the response. Just to clarify—are you the owner of the property and open to hearing an offer if the numbers work?"
+    # Update linked lead if available
+    lead_id = record["fields"].get("lead_id")
+    if lead_id:
+        leads.update_by_fields({"property_id": lead_id}, {"intent": intent})
 
-            # Send reply
-            send_message(phone, reply)
+    print(f"🤖 Replied to {from_number}: {intent} → {reply}")
 
-            # Update Conversations
-            convos.update(r["id"], {
-                "status": f"PROCESSED-{intent}",
-                "processed_at": str(datetime.utcnow())
-            })
-
-            # Update Leads (if available)
-            if lead_id:
-                leads.update_by_fields({"property_id": lead_id}, {"intent": intent})
-
-            print(f"🤖 Reply to {phone}: {intent} → {reply}")
-            processed += 1
-
-        except Exception as e:
-            print(f"❌ Error processing record {r.get('id')}: {e}")
-            continue
-
-    print(f"📊 Autoresponder finished — processed {processed} messages")
-    return {"processed": processed}
-
-if __name__ == "__main__":
-    run_autoresponder()
+    return {"status": "ok", "intent": intent, "reply": reply}

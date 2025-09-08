@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Header, HTTPException
 from sms.outbound_batcher import send_batch
 from sms.autoresponder import run_autoresponder
-from sms.inbound.webhook import router as inbound_router
+from sms.inbound_webhook import router as inbound_router
 import os
 
 app = FastAPI()
