@@ -5,11 +5,14 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
-    runtime: python-3.11  # ✅ Force Render to use 3.11
     envVars:
       - key: AIRTABLE_API_KEY
         sync: false
-      - key: AIRTABLE_BASE_ID
+      - key: AIRTABLE_LEADS_CONVOS_BASE_ID
+        sync: false
+      - key: AIRTABLE_CAMPAIGN_CONTROL_BASE_ID
+        sync: false
+      - key: AIRTABLE_PERFORMANCE_BASE_ID
         sync: false
       - key: TEXTGRID_API_KEY
         sync: false
@@ -18,7 +21,41 @@ services:
       - key: CRON_TOKEN
         sync: false
 
-  # 🔄 Retry runner — every 30 minutes
+cronjobs:
+  # 🚀 Outbound batches (3x daily across campaigns)
+  - name: send-batch-1
+    schedule: "0 15 * * *" # 10 AM CST
+    command: |
+      curl -X POST "https://rei-sms-engine.onrender.com/send" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  - name: send-batch-2
+    schedule: "0 19 * * *" # 2 PM CST
+    command: |
+      curl -X POST "https://rei-sms-engine.onrender.com/send" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  - name: send-batch-3
+    schedule: "0 23 * * *" # 6 PM CST
+    command: |
+      curl -X POST "https://rei-sms-engine.onrender.com/send" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  # 🔄 Autoresponder (always on, every 10 min)
+  - name: run-autoresponder
+    schedule: "*/10 * * * *"
+    command: |
+      curl -X POST "https://rei-sms-engine.onrender.com/autoresponder" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  # Update metrics every 30 minutes
+  - name: update-metrics
+    schedule: "*/30 * * * *" # every 30 minutes
+    command: |
+      curl -X POST https://rei-sms-engine.onrender.com/metrics \
+        -H "x-cron-token: $CRON_TOKEN"
+
+    # 🔄 Retry runner — every 30 minutes
   - type: cron
     name: sms-retry-runner
     schedule: "*/30 * * * *"
@@ -28,31 +65,3 @@ services:
       curl -sS -X POST
       -H "X-Cron-Token: $CRON_TOKEN"
       https://rei-sms-engine.onrender.com/retry
-
-  # 🚀 Outbound batcher — daily 10:00 AM CST (UTC-5 => 15:00 UTC)
-cronjobs:
-  # Outbound batches across multiple campaigns
-  - name: send-batch-1
-    schedule: "0 15 * * *" # 10 AM CST
-    command: |
-      curl -X POST "https://rei-sms-engine.onrender.com/send?view=Send%20View%20%E2%80%93%20Sniper%20750" \
-        -H "x-cron-token: $CRON_TOKEN"
-
-  - name: send-batch-2
-    schedule: "0 19 * * *" # 2 PM CST
-    command: |
-      curl -X POST "https://rei-sms-engine.onrender.com/send?view=Send%20View%20%E2%80%93%20Bulk%205k" \
-        -H "x-cron-token: $CRON_TOKEN"
-
-  - name: send-batch-3
-    schedule: "0 23 * * *" # 6 PM CST
-    command: |
-      curl -X POST "https://rei-sms-engine.onrender.com/send?view=Send%20View%20%E2%80%93%20Probate" \
-        -H "x-cron-token: $CRON_TOKEN"
-
-  # Autoresponder always on
-  - name: run-autoresponder
-    schedule: "*/10 * * * *" # every 10 minutes
-    command: |
-      curl -X POST https://rei-sms-engine.onrender.com/autoresponder \
-        -H "x-cron-token: $CRON_TOKEN"
