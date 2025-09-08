@@ -1,69 +1,72 @@
-import os, random
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from pyairtable import Table
-from textgrid_sender import send_message
-from templates import ownership_templates
+from sms.textgrid_sender import send_message
 
-# Env vars
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+PROPERTIES_TABLE = os.getenv("PROPERTIES_TABLE", "Properties")
+CAMPAIGNS_TABLE = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
 
-# Default tables/views (can override per run)
-DEFAULT_PROPERTIES_TABLE = os.getenv("PROPERTIES_TABLE", "Properties")
-DEFAULT_CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-DEFAULT_SEND_VIEW = os.getenv("SEND_VIEW", "Send View")
+properties = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, PROPERTIES_TABLE)
+campaigns = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, CAMPAIGNS_TABLE)
 
-def run_batch(
-    limit=100,
-    table_name=DEFAULT_PROPERTIES_TABLE,
-    view=DEFAULT_SEND_VIEW,
-    conversations_table=DEFAULT_CONVERSATIONS_TABLE
-):
-    properties = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, table_name)
-    convos = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, conversations_table)
+def get_campaigns():
+    """Fetch campaign configs from Airtable Campaigns table."""
+    return campaigns.all()
 
-    records = properties.all(view=view)[:limit]
-    sent_count, skipped = 0, 0
+def send_batch():
+    """Send outbound SMS in batches across all campaigns."""
+    all_campaigns = get_campaigns()
+    if not all_campaigns:
+        return {"error": "❌ No campaigns defined in Airtable"}
 
-    for r in records:
-        f = r.get("fields", {})
-        phone = f.get("phone")
-        owner = f.get("owner_name", "Owner")
-        address = f.get("address", "your property")
-        lead_id = f.get("property_id")
+    results = []
+    total_sent = 0
 
-        if not phone:
-            skipped += 1
+    for camp in all_campaigns:
+        fields = camp.get("fields", {})
+        view_name = fields.get("view_name")
+        batch_limit = int(fields.get("batch_limit", 50))
+
+        if not view_name:
             continue
 
-        try:
-            # Pick random ownership template
-            template = random.choice(ownership_templates)
-            body = template.format(First=owner, Address=address)
+        # Grab records from this campaign's Airtable view
+        records = properties.all(view=view_name)[:batch_limit]
 
-            # Send SMS via Textgrid
+        sent_count = 0
+        for r in records:
+            phone = r["fields"].get("phone")
+            owner = r["fields"].get("owner_name", "Owner")
+            address = r["fields"].get("address", "your property")
+
+            if not phone:
+                continue
+
+            body = f"Hi {owner}, quick question—are you the owner of {address}?"
+
             send_message(phone, body)
+            sent_count += 1
+            total_sent += 1
 
-            # Log to Conversations
-            convos.create({
-                "lead_id": lead_id,
-                "owner_name": owner,
+            results.append({
+                "campaign": view_name,
                 "phone": phone,
-                "direction": "OUT",
                 "message": body,
-                "status": "SENT",
-                "timestamp": str(datetime.utcnow())
+                "sent_at": datetime.now(timezone.utc).isoformat()
             })
 
-            print(f"✅ Sent to {phone}: {body}")
-            sent_count += 1
+        # Update metadata for campaign
+        campaigns.update(camp["id"], {
+            "last_sent_at": datetime.now(timezone.utc).isoformat(),
+            "last_index": sent_count
+        })
 
-        except Exception as e:
-            print(f"❌ Error sending to {phone}: {e}")
-            skipped += 1
+        print(f"✅ Sent {sent_count} messages from {view_name}")
 
-    print(f"📊 Outbound batch complete — Sent: {sent_count}, Skipped: {skipped}")
-    return {"sent": sent_count, "skipped": skipped}
-
-if __name__ == "__main__":
-    run_batch(limit=50)
+    return {
+        "status": f"✅ Outbound batches sent across {len(all_campaigns)} campaigns",
+        "total_sent": total_sent,
+        "results": results
+    }
