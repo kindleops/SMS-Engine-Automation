@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 from pyairtable import Table
-from textgrid_sender import send_message
+from sms.textgrid_sender import send_message
 
 # Airtable setup
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
