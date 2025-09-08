@@ -16,26 +16,3 @@ services:
         sync: false
       - key: CRON_TOKEN
         sync: false
-
-jobs:
-  - name: send-daily-9am-ct
-    type: cron
-    schedule: "0 14 * * *"   # 14:00 UTC = 9am CT
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: >
-      curl -s -X POST
-      -H "X-CRON-TOKEN: ${CRON_TOKEN}"
-      https://rei-sms-engine.onrender.com/send
-
-  - name: autoresponder-every-5m
-    type: cron
-    schedule: "*/5 * * * *"
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: >
-      curl -s -X POST
-      -H "X-CRON-TOKEN: ${CRON_TOKEN}"
-      https://rei-sms-engine.onrender.com/autoresponder
