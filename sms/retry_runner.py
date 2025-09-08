@@ -5,10 +5,10 @@ from pyairtable import Table
 from sms.textgrid_sender import send_message
 
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_LEADS_CONVOS_BASE_ID = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
-convos = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, CONVERSATIONS_TABLE)
+convos = Table(AIRTABLE_API_KEY, AIRTABLE_LEADS_CONVOS_BASE_ID, CONVERSATIONS_TABLE)
 
 # Airtable formula for a "Needs Retry" pull if you don't want to use a View:
 FORMULA = """

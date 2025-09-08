@@ -6,12 +6,12 @@ from sms.textgrid_sender import send_message
 
 # --- ENV CONFIG ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVO_BASE = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+AIRTABLE_LEADS_CONVO_BASE_ID = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 PERFORMANCE_BASE = os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
 
 # --- Airtable Tables ---
-convos = Table(AIRTABLE_API_KEY, LEADS_CONVO_BASE, "Conversations")
-leads = Table(AIRTABLE_API_KEY, LEADS_CONVO_BASE, "Leads")
+convos = Table(AIRTABLE_API_KEY, AIRTABLE_LEADS_CONVO_BASE_ID, "Conversations")
+leads = Table(AIRTABLE_API_KEY, AIRTABLE_LEADS_CONVO_BASE_ID, "Leads")
 runs = Table(AIRTABLE_API_KEY, PERFORMANCE_BASE, "Runs/Logs")
 
 UNPROCESSED_VIEW = os.getenv("UNPROCESSED_VIEW", "Unprocessed Inbounds")
