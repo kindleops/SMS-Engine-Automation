@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: rei-sms-engine
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
+    envVars:
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      - key: TEXTGRID_API_KEY
+        sync: false
+      - key: TEXTGRID_CAMPAIGN_ID
+        sync: false
+      - key: CRON_TOKEN
+        sync: false
+
+cronJobs:
+  - name: send-daily-9am-ct
+    schedule: "0 14 * * *"    # 14:00 UTC = 9am CT
+    command: >
+      curl -s -X POST
+      -H "X-CRON-TOKEN: ${CRON_TOKEN}"
+      https://rei-sms-engine.onrender.com/send
+
+  - name: autoresponder-every-5m
+    schedule: "*/5 * * * *"
+    command: >
+      curl -s -X POST
+      -H "X-CRON-TOKEN: ${CRON_TOKEN}"
+      https://rei-sms-engine.onrender.com/autoresponder

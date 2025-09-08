@@ -1,0 +1,23 @@
+# Core web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Airtable SDK
+pyairtable==2.3.3
+
+# HTTP requests
+requests==2.32.3
+
+# Env loader
+python-dotenv==1.0.1
+
+# Data & validation
+pydantic==2.9.2
+pydantic-core==2.23.4
+
+# Data handling (for property CSVs)
+pandas==2.2.2
+
+# Scraper stack
+selenium==4.24.0
+webdriver-manager==4.0.2
