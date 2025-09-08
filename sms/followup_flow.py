@@ -4,10 +4,10 @@ from pyairtable import Table
 from sms.textgrid_sender import send_message
 
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-AIRTABLE_LEADS_CONVOS_BASE_ID = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+LEADS_CONVOS_BASE = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 DRIP_QUEUE_TABLE = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 
-queue = Table(AIRTABLE_API_KEY, AIRTABLE_LEADS_CONVOS_BASE_ID, DRIP_QUEUE_TABLE)
+queue = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
 
 def run_followups():
     today = datetime.utcnow().date().isoformat()

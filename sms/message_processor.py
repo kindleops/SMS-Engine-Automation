@@ -5,12 +5,12 @@ from sms.textgrid_sender import send_message
 from sms.utils.retry_handler import handle_retry
 
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-AIRTABLE_LEADS_CONVOS_BASE_ID = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+LEADS_CONVOS_BASE = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
 
-convos = Table(AIRTABLE_API_KEY, AIRTABLE_LEADS_CONVOS_BASE_ID, CONVERSATIONS_TABLE)
-leads = Table(AIRTABLE_API_KEY, AIRTABLE_LEADS_CONVOS_BASE_ID, LEADS_TABLE)
+convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
+leads = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE)
 
 
 class MessageProcessor:
