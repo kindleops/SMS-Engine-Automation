@@ -1,17 +1,20 @@
+# sms/autoresponder.py
 import os
 from datetime import datetime, timezone
 from pyairtable import Table
 from sms.textgrid_sender import send_message
 
-# Airtable setup
+# --- ENV CONFIG ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
-UNPROCESSED_VIEW = os.getenv("UNPROCESSED_VIEW", "Unprocessed Inbounds")
+LEADS_CONVO_BASE = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+PERFORMANCE_BASE = os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
 
-convos = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, CONVERSATIONS_TABLE)
-leads = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, LEADS_TABLE)
+# --- Airtable Tables ---
+convos = Table(AIRTABLE_API_KEY, LEADS_CONVO_BASE, "Conversations")
+leads = Table(AIRTABLE_API_KEY, LEADS_CONVO_BASE, "Leads")
+runs = Table(AIRTABLE_API_KEY, PERFORMANCE_BASE, "Runs/Logs")
+
+UNPROCESSED_VIEW = os.getenv("UNPROCESSED_VIEW", "Unprocessed Inbounds")
 
 # --- Classification logic ---
 def classify_reply(body: str) -> str:
@@ -50,6 +53,7 @@ def classify_reply(body: str) -> str:
 def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
     records = convos.all(view=view)[:limit]
     processed = 0
+    intents_count = {"YES": 0, "NO": 0, "WRONG": 0, "LATER": 0, "UNKNOWN": 0}
 
     for r in records:
         try:
@@ -70,7 +74,7 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
             elif intent == "YES":
                 reply = "Great — are you open to a cash offer if the numbers make sense?"
             elif intent == "LATER":
-                reply = "Totally fine—I’ll check back later. If timing changes sooner, just shoot me a text."
+                reply = "Totally fine—I’ll make a note to check back with you down the road. If timing changes sooner, just shoot me a text."
             else:
                 reply = "Thanks for the response. Just to clarify—are you the owner of the property and open to hearing an offer if the numbers work?"
 
@@ -89,10 +93,23 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
 
             print(f"🤖 Reply to {phone}: {intent} → {reply}")
             processed += 1
+            intents_count[intent] += 1
 
         except Exception as e:
             print(f"❌ Error processing {r.get('id')}: {e}")
             continue
 
+    # --- Log run into Performance Base ---
+    run_record = runs.create({
+        "run_type": "autoresponder",
+        "processed_count": processed,
+        "yes_count": intents_count["YES"],
+        "no_count": intents_count["NO"],
+        "wrong_count": intents_count["WRONG"],
+        "later_count": intents_count["LATER"],
+        "unknown_count": intents_count["UNKNOWN"],
+        "run_at": datetime.now(timezone.utc).isoformat()
+    })
+
     print(f"📊 Autoresponder finished — processed {processed} messages")
-    return {"processed": processed}
+    return {"processed": processed, "log_id": run_record["id"]}

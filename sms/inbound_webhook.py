@@ -1,20 +1,21 @@
 from fastapi import APIRouter, Request, HTTPException
 from pyairtable import Table
 import os
+
 from sms.textgrid_sender import send_message
-from sms.autoresponder import classify_reply  # reuse same classifier
+from sms.autoresponder import classify_reply
 
 router = APIRouter()
 
 # Airtable setup
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
+LEADS_CONVOS_BASE = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CAMPAIGN_CONTROL_BASE = os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
 
-convos = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, CONVERSATIONS_TABLE)
-leads = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, LEADS_TABLE)
-
+convos   = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, "Conversations")
+leads    = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, "Leads")
+numbers  = Table(AIRTABLE_API_KEY, CAMPAIGN_CONTROL_BASE, "Numbers")
+campaigns = Table(AIRTABLE_API_KEY, CAMPAIGN_CONTROL_BASE, "Campaigns")
 
 @router.post("/webhook")
 async def inbound_webhook(request: Request):
@@ -25,48 +26,44 @@ async def inbound_webhook(request: Request):
 
     from_number = payload.get("from")
     to_number = payload.get("to")
-    message_body = payload.get("body")
+    body = payload.get("body")
 
-    if not from_number or not message_body:
-        raise HTTPException(status_code=422, detail="Missing 'from' or 'body' in payload")
+    if not from_number or not body:
+        raise HTTPException(status_code=422, detail="Missing 'from' or 'body'")
 
-    # Save inbound conversation
+    # Try to resolve campaign based on "to_number"
+    campaign_id = None
+    for n in numbers.all():
+        if n["fields"].get("Number") == to_number:
+            campaign_id = n["fields"].get("Campaign")[0]
+            break
+
+    # Save inbound
     record = convos.create({
         "phone": from_number,
         "to_number": to_number,
-        "message": message_body,
+        "message": body,
         "direction": "IN",
-        "status": "NEW"
+        "status": "NEW",
+        "campaign_id": campaign_id
     })
 
-    print(f"📩 Inbound SMS from {from_number}: {message_body}")
-
-    # Classify and generate reply (same as autoresponder)
-    intent = classify_reply(message_body)
+    # Classify and reply
+    intent = classify_reply(body)
     if intent == "WRONG":
         reply = "Thanks for letting me know—I’ll remove this number."
     elif intent == "NO":
         reply = "All good—thanks for confirming. I’ll mark our files. If anything changes, text me anytime."
     elif intent == "YES":
-        reply = "Great — are you open to a cash offer if the numbers make sense?"
+        reply = "Got it—are you open to a cash offer if the numbers make sense?"
     elif intent == "LATER":
-        reply = "Totally fine—I’ll check back later. If timing changes sooner, just shoot me a text."
+        reply = "Totally fine—I’ll make a note to check back later. If timing changes sooner, just shoot me a text."
     else:
-        reply = "Thanks for the response. Just to clarify—are you the owner of the property and open to hearing an offer if the numbers work?"
+        reply = "Thanks for the response. Are you the property owner and open to an offer if the numbers work?"
 
-    # Send SMS
     send_message(from_number, reply)
 
-    # Update conversation status
-    convos.update(record["id"], {
-        "status": f"PROCESSED-{intent}"
-    })
-
-    # Update linked lead if available
-    lead_id = record["fields"].get("lead_id")
-    if lead_id:
-        leads.update_by_fields({"property_id": lead_id}, {"intent": intent})
+    convos.update(record["id"], {"status": f"PROCESSED-{intent}"})
 
     print(f"🤖 Replied to {from_number}: {intent} → {reply}")
-
     return {"status": "ok", "intent": intent, "reply": reply}
