@@ -3,7 +3,7 @@ services:
     name: rei-sms-engine
     env: python
     plan: free
-    pythonVersion: 3.11
+    pythonVersion: 3.11.9   # ✅ Force Render to use 3.11
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
     envVars:
