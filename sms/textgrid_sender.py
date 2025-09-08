@@ -1,20 +1,32 @@
-import os, requests
+# sms/textgrid_sender.py
+import os
+import httpx
 
 TEXTGRID_API_KEY = os.getenv("TEXTGRID_API_KEY")
 TEXTGRID_CAMPAIGN_ID = os.getenv("TEXTGRID_CAMPAIGN_ID")
-TEXTGRID_URL = "https://api.textgrid.com/v1/messages/send"
 
-def send_message(to_number, body, from_number=None):
-    headers = {"Authorization": f"Bearer {TEXTGRID_API_KEY}"}
-    data = {
+BASE_URL = "https://api.textgrid.com/v1/messages"
+
+def send_message(to: str, body: str) -> dict:
+    """Send a single SMS message via TextGrid API."""
+    if not TEXTGRID_API_KEY or not TEXTGRID_CAMPAIGN_ID:
+        raise RuntimeError("❌ TEXTGRID_API_KEY or TEXTGRID_CAMPAIGN_ID not set")
+
+    payload = {
+        "to": to,
         "campaign_id": TEXTGRID_CAMPAIGN_ID,
-        "to": to_number,
-        "body": body,
+        "body": body
     }
-    if from_number:
-        data["from"] = from_number
+    headers = {
+        "Authorization": f"Bearer {TEXTGRID_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-    r = requests.post(TEXTGRID_URL, json=data, headers=headers)
-    if r.status_code != 200:
-        print("❌ Error sending:", r.text)
-    return r.json()
+    try:
+        resp = httpx.post(BASE_URL, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        print(f"📤 Sent SMS → {to}: {body}")
+        return resp.json()
+    except Exception as e:
+        print(f"❌ Failed to send SMS to {to}: {e}")
+        return {"error": str(e), "to": to, "body": body}

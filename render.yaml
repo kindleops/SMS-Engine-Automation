@@ -3,9 +3,9 @@ services:
     name: rei-sms-engine
     env: python
     plan: free
-    pythonVersion: 3.11.9   # ✅ Force Render to use 3.11
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
+    runtime: python-3.11  # ✅ Force Render to use 3.11
     envVars:
       - key: AIRTABLE_API_KEY
         sync: false
@@ -17,3 +17,42 @@ services:
         sync: false
       - key: CRON_TOKEN
         sync: false
+
+  # 🔄 Retry runner — every 30 minutes
+  - type: cron
+    name: sms-retry-runner
+    schedule: "*/30 * * * *"
+    env: python
+    buildCommand: ""
+    startCommand: >
+      curl -sS -X POST
+      -H "X-Cron-Token: $CRON_TOKEN"
+      https://rei-sms-engine.onrender.com/retry
+
+  # 🚀 Outbound batcher — daily 10:00 AM CST (UTC-5 => 15:00 UTC)
+cronjobs:
+  # Outbound batches across multiple campaigns
+  - name: send-batch-1
+    schedule: "0 15 * * *" # 10 AM CST
+    command: |
+      curl -X POST "https://rei-sms-engine.onrender.com/send?view=Send%20View%20%E2%80%93%20Sniper%20750" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  - name: send-batch-2
+    schedule: "0 19 * * *" # 2 PM CST
+    command: |
+      curl -X POST "https://rei-sms-engine.onrender.com/send?view=Send%20View%20%E2%80%93%20Bulk%205k" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  - name: send-batch-3
+    schedule: "0 23 * * *" # 6 PM CST
+    command: |
+      curl -X POST "https://rei-sms-engine.onrender.com/send?view=Send%20View%20%E2%80%93%20Probate" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  # Autoresponder always on
+  - name: run-autoresponder
+    schedule: "*/10 * * * *" # every 10 minutes
+    command: |
+      curl -X POST https://rei-sms-engine.onrender.com/autoresponder \
+        -H "x-cron-token: $CRON_TOKEN"
