@@ -1,89 +1,69 @@
+# sms/outbound_batcher.py
 import os
 from datetime import datetime, timezone
-from sms.airtable_client import leads_table, campaign_table
 from sms.textgrid_sender import send_message
+from sms.airtable_client import get_leads_table, get_campaigns_table
 
-# Airtable tables
-leads_tbl   = leads_table("Leads")
-convos_tbl  = leads_table("Conversations")
-campaigns   = campaign_table("Campaigns")
-numbers_tbl = campaign_table("Numbers")
-
-DEFAULT_BATCH_LIMIT = int(os.getenv("DEFAULT_BATCH_LIMIT", "50"))
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+LEADS_TABLE         = os.getenv("LEADS_TABLE", "Leads")
+CAMPAIGNS_TABLE     = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
 
 def get_campaigns():
-    return campaigns.all()
-
-def pick_number_for_campaign(campaign_id: str) -> str | None:
-    # Choose any Active number linked to this campaign
-    recs = numbers_tbl.all()
-    for r in recs:
-        f = r.get("fields", {})
-        linked = f.get("Campaign")
-        status = (f.get("Status") or "").lower()
-        if status == "active" and (
-            (isinstance(linked, list) and campaign_id in linked)
-            or linked == campaign_id
-        ):
-            return f.get("Number") or f.get("number")
-    return None
+    tbl = get_campaigns_table(CAMPAIGNS_TABLE)
+    return tbl.all()
 
 def send_batch():
-    all_campaigns = get_campaigns()
+    try:
+        leads_tbl   = get_leads_table(LEADS_TABLE)
+        convos_tbl  = get_leads_table(CONVERSATIONS_TABLE)
+        camp_tbl    = get_campaigns_table(CAMPAIGNS_TABLE)
+    except Exception as e:
+        # Don’t crash the server; return a clear payload
+        return {"error": f"Airtable config error: {e}"}
+
+    all_campaigns = camp_tbl.all()
     if not all_campaigns:
-        return {"error": "❌ No campaigns defined in Airtable"}
+        return {"error": "No campaigns defined in Airtable"}
 
     results, total_sent = [], 0
-
     for camp in all_campaigns:
-        cf = camp.get("fields", {})
-        campaign_id = camp.get("id")
-        view_name   = cf.get("view_name") or cf.get("View Name") or cf.get("view")
-        batch_limit = int(cf.get("batch_limit") or DEFAULT_BATCH_LIMIT)
-
+        fields = camp.get("fields", {})
+        view_name   = fields.get("view_name")
+        batch_limit = int(fields.get("batch_limit", 50))
         if not view_name:
             continue
 
-        from_number = pick_number_for_campaign(campaign_id)  # optional
+        # pull from Leads by view
         records = leads_tbl.all(view=view_name)[:batch_limit]
-
         sent_count = 0
+
         for r in records:
-            f = r["fields"]
-            phone   = f.get("phone") or f.get("Phone")
-            owner   = f.get("owner_name") or f.get("Owner") or "Owner"
-            address = f.get("address") or f.get("Address") or "your property"
+            f = r.get("fields", {})
+            phone   = f.get("Phone") or f.get("phone")
+            owner   = f.get("Owner Name") or f.get("owner_name") or "Owner"
+            address = f.get("Address") or f.get("address") or "your property"
             if not phone:
                 continue
 
             body = f"Hi {owner}, quick question—are you the owner of {address}?"
-            send_message(phone, body, from_number=from_number)
-
-            # Log an outbound in Conversations (optional but nice to have)
-            convos_tbl.create({
-                "phone": phone,
-                "to_number": from_number,
-                "message": body,
-                "direction": "OUT",
-                "status": "SENT",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-
+            send_message(phone, body)
             sent_count += 1
             total_sent += 1
+
             results.append({
                 "campaign": view_name,
                 "phone": phone,
                 "message": body,
-                "from": from_number,
-                "sent_at": datetime.now(timezone.utc).isoformat()
+                "sent_at": datetime.now(timezone.utc).isoformat(),
             })
 
-        campaigns.update(camp["id"], {
+        camp_tbl.update(camp["id"], {
             "last_sent_at": datetime.now(timezone.utc).isoformat(),
-            "last_count": sent_count
+            "last_index": sent_count,
         })
-        print(f"✅ Sent {sent_count} from {view_name}")
 
-    return {"status": f"✅ Sent across {len(all_campaigns)} campaigns",
-            "total_sent": total_sent, "results": results}
+    return {
+        "status": f"Sent across {len(all_campaigns)} campaigns",
+        "total_sent": total_sent,
+        "results": results,
+    }
