@@ -163,7 +163,7 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
             if not phone or not isinstance(phone, str):
                 # Nothing to reply to — mark as processed OTHER so it leaves the view
                 convos.update(r["id"], {
-                    STATUS_FIELD: "Processed",
+                    STATUS_FIELD: "PROCESSED",
                     INTENT_FIELD: "OTHER",
                     "processed_at": datetime.now(timezone.utc).isoformat(),
                 })
@@ -178,7 +178,7 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
 
             # Mark processed in Conversations
             convos.update(r["id"], {
-                STATUS_FIELD: "Processed",
+                STATUS_FIELD: "PROCESSED",
                 INTENT_FIELD: intent,
                 "processed_at": datetime.now(timezone.utc).isoformat(),
             })
