@@ -2,39 +2,36 @@
 import os
 import traceback
 from datetime import datetime, timezone
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request, Query
 from pyairtable import Table
 
 from sms.outbound_batcher import send_batch
 from sms.autoresponder import run_autoresponder
+from sms.templates import TEMPLATES
+from sms.quota_reset import reset_daily_quotas
 
 app = FastAPI()
 
 # --- ENV CONFIG ---
 CRON_TOKEN = os.getenv("CRON_TOKEN")
 
+# Airtable (Conversations base for inbound)
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+
 # Performance base can be set by either name
 PERF_BASE = (
     os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
     or os.getenv("PERFORMANCE_BASE")
 )
-
-# Prefer the reporting key for performance (falls back to the general key)
 PERF_KEY = (
     os.getenv("AIRTABLE_REPORTING_KEY")
     or os.getenv("AIRTABLE_API_KEY")
 )
 
-def check_token(x_cron_token: str | None):
-    if CRON_TOKEN and x_cron_token != CRON_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
+# --- Airtable tables ---
 def get_perf_tables():
-    """
-    Lazily create Performance tables if envs exist.
-    Returns (runs, kpis) or (None, None) if not configured.
-    Never raises at import/startup.
-    """
     if not PERF_KEY or not PERF_BASE:
         return None, None
     try:
@@ -42,10 +39,13 @@ def get_perf_tables():
         kpis = Table(PERF_KEY, PERF_BASE, "KPIs")
         return runs, kpis
     except Exception:
-        # Log but don't crash the app
         print("⚠️ Failed to init Performance tables:")
         traceback.print_exc()
         return None, None
+
+def check_token(x_cron_token: str | None):
+    if CRON_TOKEN and x_cron_token != CRON_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 @app.get("/health")
 def health():
@@ -53,12 +53,13 @@ def health():
 
 # --- Outbound Batch Endpoint ---
 @app.post("/send")
-async def send_endpoint(x_cron_token: str | None = Header(None)):
+async def send_endpoint(
+    x_cron_token: str | None = Header(None),
+    template: str = Query("intro", description="Which template to use: intro, followup_yes, followup_no, followup_wrong")
+):
     check_token(x_cron_token)
+    result = send_batch(template_key=template)   # pass template to batcher
 
-    result = send_batch()
-
-    # Try to log; if not configured, skip silently
     runs, kpis = get_perf_tables()
     if runs:
         try:
@@ -78,7 +79,6 @@ async def send_endpoint(x_cron_token: str | None = Header(None)):
         except Exception:
             print("⚠️ Failed to write to Performance base:")
             traceback.print_exc()
-
     return result
 
 # --- Autoresponder Endpoint ---
@@ -89,7 +89,6 @@ async def autoresponder_endpoint(
     x_cron_token: str | None = Header(None)
 ):
     check_token(x_cron_token)
-
     result = run_autoresponder(limit=limit, view=view)
 
     runs, kpis = get_perf_tables()
@@ -114,5 +113,46 @@ async def autoresponder_endpoint(
         except Exception:
             print("⚠️ Failed to write to Performance base:")
             traceback.print_exc()
-
     return result
+
+# --- Inbound Webhook (TextGrid callback) ---
+@app.post("/inbound")
+async def inbound_endpoint(request: Request):
+    """
+    Webhook for TextGrid inbound SMS -> stores in Airtable Conversations.
+    """
+    try:
+        data = await request.json()
+        print("📩 Inbound SMS:", data)
+
+        from_number = data.get("from")
+        to_number   = data.get("to")
+        message     = data.get("message")
+        msg_id      = data.get("id")
+
+        if not (AIRTABLE_API_KEY and LEADS_CONVOS_BASE):
+            print("⚠️ Airtable not configured for inbound logging")
+            return {"ok": False, "error": "Airtable not configured"}
+
+        convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
+        convos.create({
+            "From Number": from_number,
+            "To Number": to_number,
+            "Message": message,
+            "Status": "UNPROCESSED",
+            "Direction": "IN",
+            "TextGrid ID": msg_id,
+            "Received At": datetime.now(timezone.utc).isoformat()
+        })
+
+        return {"ok": True}
+    except Exception as e:
+        print("❌ Error in inbound handler:", e)
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}
+    
+    @app.post("/reset-quotas")
+    async def reset_quotas_endpoint(x_cron_token: str | None = Header(None)):
+        check_token(x_cron_token)
+        result = reset_daily_quotas()
+        return result

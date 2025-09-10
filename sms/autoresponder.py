@@ -7,6 +7,7 @@ from typing import Dict, Tuple
 
 from pyairtable import Table
 from sms.textgrid_sender import send_message
+from sms.quota_reset import reset_daily_quotas, ensure_today_rows
 
 # ── Airtable keys & base IDs (each base can have a different key) ──────────────
 ACQ_KEY   = os.getenv("AIRTABLE_ACQUISITIONS_KEY") or os.getenv("AIRTABLE_API_KEY")   # Leads & Conversations
@@ -118,6 +119,7 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
     for r in records:
         try:
             f = r.get("fields", {})
+            print("DEBUG fields received:", f)
             msg   = f.get(MSG_FIELD, "") or f.get("message", "")
             phone = f.get(FROM_FIELD)    or f.get("phone")
 
@@ -158,4 +160,27 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
             continue
 
     print(f"📊 Autoresponder finished — processed {processed} | {breakdown}")
+    return {"processed": processed, "breakdown": breakdown}
+
+def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
+    """
+    Pull records from Conversations view, classify, reply, and mark processed.
+    Returns: {"processed": n, "breakdown": {...}}
+    """
+    # Ensure quotas reset for today
+    ensure_today_rows()
+
+    # Existing logic...
+    records = convos.all(view=view)[:limit]
+    processed = 0
+    breakdown = {"OPTOUT": 0, "WRONG": 0, "YES": 0, "NO": 0, "LATER": 0, "OTHER": 0}
+
+    for r in records:
+        try:
+            # your classification + reply logic here
+            pass
+        except Exception as e:
+            print(f"❌ Error processing {r.get('id')}: {e}")
+            continue
+
     return {"processed": processed, "breakdown": breakdown}

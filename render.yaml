@@ -65,3 +65,10 @@ cronjobs:
       curl -sS -X POST
       -H "X-Cron-Token: $CRON_TOKEN"
       https://rei-sms-engine.onrender.com/retry
+
+cronjobs:
+  - name: reset-daily-quotas
+    schedule: "0 0 * * *" # midnight UTC (adjust if you want a different local time)
+    command: |
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/reset-quotas" \
+        -H "x-cron-token: $CRON_TOKEN"

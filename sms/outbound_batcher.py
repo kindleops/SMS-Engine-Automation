@@ -1,69 +1,50 @@
 # sms/outbound_batcher.py
 import os
 from datetime import datetime, timezone
-from sms.textgrid_sender import send_message
-from sms.airtable_client import get_leads_table, get_campaigns_table
+from pyairtable import Table
+from sms.quota_reset import reset_daily_quotas
 
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE         = os.getenv("LEADS_TABLE", "Leads")
-CAMPAIGNS_TABLE     = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+# Airtable setup
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
+NUMBERS_TABLE = "Numbers"
 
-def get_campaigns():
-    tbl = get_campaigns_table(CAMPAIGNS_TABLE)
-    return tbl.all()
+numbers = Table(AIRTABLE_API_KEY, CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
 
-def send_batch():
-    try:
-        leads_tbl   = get_leads_table(LEADS_TABLE)
-        convos_tbl  = get_leads_table(CONVERSATIONS_TABLE)
-        camp_tbl    = get_campaigns_table(CAMPAIGNS_TABLE)
-    except Exception as e:
-        # Don’t crash the server; return a clear payload
-        return {"error": f"Airtable config error: {e}"}
+# --- Daily quota reset safeguard ---
+_last_reset_date = None
 
-    all_campaigns = camp_tbl.all()
-    if not all_campaigns:
-        return {"error": "No campaigns defined in Airtable"}
+def ensure_today_rows():
+    global _last_reset_date
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _last_reset_date != today:
+        print(f"⚡ Auto-resetting quotas for {today}")
+        reset_daily_quotas()
+        _last_reset_date = today
 
-    results, total_sent = [], 0
-    for camp in all_campaigns:
-        fields = camp.get("fields", {})
-        view_name   = fields.get("view_name")
-        batch_limit = int(fields.get("batch_limit", 50))
-        if not view_name:
-            continue
+# --- Example send_batch loop ---
+def send_batch(limit: int = 50):
+    ensure_today_rows()  # 👈 always refresh quotas once per day
 
-        # pull from Leads by view
-        records = leads_tbl.all(view=view_name)[:batch_limit]
-        sent_count = 0
+    # Your normal batching logic (pick numbers, decrement quota, send SMS)
+    results = []
+    sent = 0
 
-        for r in records:
-            f = r.get("fields", {})
-            phone   = f.get("Phone") or f.get("phone")
-            owner   = f.get("Owner Name") or f.get("owner_name") or "Owner"
-            address = f.get("Address") or f.get("address") or "your property"
-            if not phone:
-                continue
+    # Example: fetch pool of active numbers
+    available = numbers.all(max_records=limit)
 
-            body = f"Hi {owner}, quick question—are you the owner of {address}?"
-            send_message(phone, body)
-            sent_count += 1
-            total_sent += 1
+    for n in available:
+        f = n["fields"]
+        remaining = f.get("Remaining", 0)
+        phone = f.get("Number")
 
-            results.append({
-                "campaign": view_name,
-                "phone": phone,
-                "message": body,
-                "sent_at": datetime.now(timezone.utc).isoformat(),
+        if remaining > 0:
+            # decrement and mark use
+            numbers.update(n["id"], {
+                "Remaining": remaining - 1,
+                "Last Used": datetime.now(timezone.utc).isoformat()
             })
+            sent += 1
+            results.append({"number": phone, "status": "sent"})
 
-        camp_tbl.update(camp["id"], {
-            "last_sent_at": datetime.now(timezone.utc).isoformat(),
-            "last_index": sent_count,
-        })
-
-    return {
-        "status": f"Sent across {len(all_campaigns)} campaigns",
-        "total_sent": total_sent,
-        "results": results,
-    }
+    return {"total_sent": sent, "results": results}
