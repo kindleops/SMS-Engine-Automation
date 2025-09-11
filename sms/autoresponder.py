@@ -8,14 +8,14 @@ from typing import Dict, Tuple
 from pyairtable import Table
 from sms.textgrid_sender import send_message
 
-# ── Airtable keys & base IDs (each base can have a different key) ──────────────
+# ── Airtable keys & base IDs ────────────────────────────────────────────────
 ACQ_KEY   = os.getenv("AIRTABLE_ACQUISITIONS_KEY") or os.getenv("AIRTABLE_API_KEY")   # Leads & Conversations
 DISPO_KEY = os.getenv("AIRTABLE_DISPO_KEY")        or os.getenv("AIRTABLE_API_KEY")   # Campaign Control
 
 LEADS_CONVOS_BASE     = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID") or os.getenv("LEADS_CONVOS_BASE")
 CAMPAIGN_CONTROL_BASE = os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID") or os.getenv("CAMPAIGN_CONTROL_BASE")
 
-# Table/view names (override via env if your Airtable labels differ)
+# Table/view names (override via env if needed)
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 UNPROCESSED_VIEW    = os.getenv("UNPROCESSED_VIEW", "Unprocessed Inbounds")
 OPTOUTS_TABLE       = os.getenv("OPTOUTS_TABLE", "Opt-Outs")
@@ -27,11 +27,11 @@ MSG_FIELD    = os.getenv("CONV_MESSAGE_FIELD", "Message")
 INTENT_FIELD = os.getenv("CONV_INTENT_FIELD",  "Intent")
 STATUS_FIELD = os.getenv("CONV_STATUS_FIELD",  "Status")
 
-# ── Tables (use per-base keys!) ────────────────────────────────────────────────
+# ── Tables ──────────────────────────────────────────────────────────────────
 convos  = Table(ACQ_KEY,   LEADS_CONVOS_BASE,     CONVERSATIONS_TABLE)
 optouts = Table(DISPO_KEY, CAMPAIGN_CONTROL_BASE, OPTOUTS_TABLE) if CAMPAIGN_CONTROL_BASE else None
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────────
 def _normalize(text: str) -> str:
     if not text:
         return ""
@@ -44,7 +44,7 @@ def _normalize(text: str) -> str:
 def _regex_set(patterns) -> re.Pattern:
     return re.compile("|".join(patterns), re.IGNORECASE)
 
-# ── Advanced intent classifier ────────────────────────────────────────────────
+# ── Advanced intent classifier ─────────────────────────────────────────────
 OPTOUT = _regex_set([
     r"\bstop\b", r"\bunsubscribe\b", r"\bquit\b", r"\bend\b", r"\bcancel\b",
     r"\bdo not (text|message|contact)\b", r"\bremove me\b", r"\bdnc\b",
@@ -110,6 +110,7 @@ REPLIES = {
     "OTHER": "Thanks for the response. Are you the owner and open to an offer if the numbers work?",
 }
 
+# ── Autoresponder ───────────────────────────────────────────────────────────
 def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
     records = convos.all(view=view)[:limit]
     processed = 0
@@ -126,7 +127,7 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
                 convos.update(r["id"], {
                     STATUS_FIELD: "PROCESSED",
                     INTENT_FIELD: "OTHER",
-                    "processed_at": datetime.now(timezone.utc).isoformat(),
+                    "processed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 })
                 breakdown["OTHER"] += 1
                 continue
@@ -159,24 +160,4 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
             continue
 
     print(f"📊 Autoresponder finished — processed {processed} | {breakdown}")
-    return {"processed": processed, "breakdown": breakdown}
-
-def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
-    """
-    Pull records from Conversations view, classify, reply, and mark processed.
-    Returns: {"processed": n, "breakdown": {...}}
-    """
-    # Existing logic...
-    records = convos.all(view=view)[:limit]
-    processed = 0
-    breakdown = {"OPTOUT": 0, "WRONG": 0, "YES": 0, "NO": 0, "LATER": 0, "OTHER": 0}
-
-    for r in records:
-        try:
-            # your classification + reply logic here
-            pass
-        except Exception as e:
-            print(f"❌ Error processing {r.get('id')}: {e}")
-            continue
-
     return {"processed": processed, "breakdown": breakdown}
