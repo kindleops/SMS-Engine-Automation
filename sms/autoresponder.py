@@ -7,7 +7,6 @@ from typing import Dict, Tuple
 
 from pyairtable import Table
 from sms.textgrid_sender import send_message
-from sms.quota_reset import reset_daily_quotas, ensure_today_rows
 
 # ── Airtable keys & base IDs (each base can have a different key) ──────────────
 ACQ_KEY   = os.getenv("AIRTABLE_ACQUISITIONS_KEY") or os.getenv("AIRTABLE_API_KEY")   # Leads & Conversations
@@ -167,9 +166,7 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
     Pull records from Conversations view, classify, reply, and mark processed.
     Returns: {"processed": n, "breakdown": {...}}
     """
-    # Ensure quotas reset for today
-    ensure_today_rows()
-
+    
     # Existing logic...
     records = convos.all(view=view)[:limit]
     processed = 0
