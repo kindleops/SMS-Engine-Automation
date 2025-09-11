@@ -27,6 +27,10 @@ MSG_FIELD    = os.getenv("CONV_MESSAGE_FIELD", "Message")
 INTENT_FIELD = os.getenv("CONV_INTENT_FIELD",  "Intent")
 STATUS_FIELD = os.getenv("CONV_STATUS_FIELD",  "Status")
 
+# Who/what processed the record
+PROCESSED_BY_FIELD = os.getenv("CONV_PROCESSED_BY_FIELD", "Processed By")
+PROCESSED_BY_LABEL = os.getenv("PROCESSED_BY_LABEL", "Autoresponder")
+
 # ── Tables ──────────────────────────────────────────────────────────────────
 convos  = Table(ACQ_KEY,   LEADS_CONVOS_BASE,     CONVERSATIONS_TABLE)
 optouts = Table(DISPO_KEY, CAMPAIGN_CONTROL_BASE, OPTOUTS_TABLE) if CAMPAIGN_CONTROL_BASE else None
@@ -134,7 +138,7 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
                     STATUS_FIELD: "PROCESSED",
                     INTENT_FIELD: "OTHER",
                     "processed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "Processed By": "Autoresponder"
+                    PROCESSED_BY_FIELD: PROCESSED_BY_LABEL,
                 })
                 breakdown["OTHER"] += 1
                 continue
@@ -147,7 +151,7 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
                 STATUS_FIELD: "PROCESSED",
                 INTENT_FIELD: intent,
                 "processed_at": datetime.now(timezone.utc).isoformat(),
-                "Processed By": "Autoresponder"
+                PROCESSED_BY_FIELD: PROCESSED_BY_LABEL,
             })
 
             if intent == "OPTOUT" and optouts is not None:

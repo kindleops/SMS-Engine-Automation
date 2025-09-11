@@ -9,6 +9,7 @@ from sms.outbound_batcher import send_batch
 from sms.autoresponder import run_autoresponder
 from sms.templates import TEMPLATES
 from sms.quota_reset import reset_daily_quotas
+from sms import autoresponder
 
 app = FastAPI()
 
@@ -89,7 +90,30 @@ async def autoresponder_endpoint(
     x_cron_token: str | None = Header(None)
 ):
     check_token(x_cron_token)
+    os.environ["PROCESSED_BY_LABEL"] = "Autoresponder"
     result = run_autoresponder(limit=limit, view=view)
+
+# AI Closer
+@app.post("/ai-closer")
+async def ai_closer_endpoint(
+    limit: int = 50,
+    view: str = "Unprocessed Inbounds",
+    x_cron_token: str | None = Header(None)
+):
+    check_token(x_cron_token)
+    os.environ["PROCESSED_BY_LABEL"] = "AI Closer"
+    return run_autoresponder(limit=limit, view=view)
+
+# Manual QA
+@app.post("/manual-qa")
+async def manual_qa_endpoint(
+    limit: int = 50,
+    view: str = "Unprocessed Inbounds",
+    x_cron_token: str | None = Header(None)
+):
+    check_token(x_cron_token)
+    os.environ["PROCESSED_BY_LABEL"] = "Manual QA"
+    return run_autoresponder(limit=limit, view=view)
 
     runs, kpis = get_perf_tables()
     if runs:
