@@ -120,6 +120,12 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
         try:
             f = r.get("fields", {})
             print("DEBUG fields received:", f)
+
+            # Safety filter: only process unprocessed
+            if f.get(STATUS_FIELD) != "UNPROCESSED":
+                print(f"⏭️ Skipping {r['id']} (already processed)")
+                continue
+
             msg   = f.get(MSG_FIELD, "") or f.get("message", "")
             phone = f.get(FROM_FIELD)    or f.get("phone")
 
