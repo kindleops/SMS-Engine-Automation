@@ -134,6 +134,7 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
                     STATUS_FIELD: "PROCESSED",
                     INTENT_FIELD: "OTHER",
                     "processed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "Processed By": "Autoresponder"
                 })
                 breakdown["OTHER"] += 1
                 continue
@@ -146,6 +147,7 @@ def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
                 STATUS_FIELD: "PROCESSED",
                 INTENT_FIELD: intent,
                 "processed_at": datetime.now(timezone.utc).isoformat(),
+                "Processed By": "Autoresponder"
             })
 
             if intent == "OPTOUT" and optouts is not None:
