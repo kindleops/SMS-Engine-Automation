@@ -2,8 +2,9 @@
 import os
 from datetime import datetime, timezone
 from pyairtable import Table
+import traceback
 
-# ENV
+# --- ENV CONFIG ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 CAMPAIGN_CONTROL_BASE = (
     os.getenv("CAMPAIGN_CONTROL_BASE")
@@ -13,58 +14,78 @@ NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "750"))
 
+# --- Helpers ---
 def _iso_date():
-    # Store date only (Airtable “Date” field recommended as Date type, time disabled)
+    """Return today’s date in YYYY-MM-DD format (UTC)."""
     return datetime.now(timezone.utc).date().isoformat()
 
+def _init_table():
+    if not (AIRTABLE_API_KEY and CAMPAIGN_CONTROL_BASE):
+        print("⚠️ Missing Airtable env for Numbers table")
+        return None
+    try:
+        return Table(AIRTABLE_API_KEY, CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
+    except Exception:
+        print("❌ Failed to init Numbers table")
+        traceback.print_exc()
+        return None
+
+# --- Main Reset Function ---
 def reset_daily_quotas():
     """
-    For every distinct Number in Numbers table, ensure there's a row for TODAY.
-    If today's row is missing, create it with Count=0, Remaining=DAILY_LIMIT.
-    If it exists, reset Count to 0 and Remaining back to DAILY_LIMIT.
+    Reset or create daily quota rows in Numbers table.
+
+    - Ensures each Number has a row for TODAY.
+    - If missing → creates a row with Count=0, Remaining=DAILY_LIMIT.
+    - If exists → resets Count=0 and Remaining=DAILY_LIMIT.
     """
-    if not (AIRTABLE_API_KEY and CAMPAIGN_CONTROL_BASE):
+    tbl = _init_table()
+    if not tbl:
         return {"ok": False, "error": "Airtable env missing"}
 
-    tbl = Table(AIRTABLE_API_KEY, CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
     today = _iso_date()
-
-    # 1) Pull all rows (you can scope this to a view like “Active Numbers” if you prefer)
-    rows = tbl.all()
-    # Build a set of known numbers (and remember their latest Market if present)
-    by_number = {}
-    for r in rows:
-        f = r.get("fields", {})
-        num = f.get("Number")
-        if not num:
-            continue
-        # Prefer a specific “Market” if you have it
-        if num not in by_number:
-            by_number[num] = f.get("Market")
-
     created = 0
     updated = 0
 
-    for number, market in by_number.items():
-        # 2) Does a row for TODAY already exist for this number?
-        # NOTE: filterByFormula must escape quotes; we assume Number is a plain string like +18325551234
-        formula = f"AND({{Number}}='{number}', {{Date}}='{today}')"
-        today_rows = tbl.all(formula=formula)
+    try:
+        # 1) Pull all rows (scope to “Active Numbers” view if needed)
+        rows = tbl.all()
+        by_number = {}
 
-        if not today_rows:
-            # Create fresh daily row
-            tbl.create({
-                "Number": number,
-                "Market": market,
-                "Date": today,
-                "Count": 0,
-                "Remaining": DAILY_LIMIT,
-            })
-            created += 1
-        else:
-            # Normalize today’s row to Count=0, Remaining=limit
-            rec = today_rows[0]
-            tbl.update(rec["id"], {"Count": 0, "Remaining": DAILY_LIMIT})
-            updated += 1
+        # Build dictionary { number: market }
+        for r in rows:
+            f = r.get("fields", {})
+            num = f.get("Number")
+            if not num:
+                continue
+            if num not in by_number:  # don’t overwrite if already stored
+                by_number[num] = f.get("Market")
 
-    return {"ok": True, "created": created, "updated": updated, "date": today}
+        # 2) Ensure each number has today’s row
+        for number, market in by_number.items():
+            formula = f"AND({{Number}}='{number}', {{Last Used}}='{today}')"
+            today_rows = tbl.all(formula=formula)
+
+            if not today_rows:
+                # Create fresh daily row
+                tbl.create({
+                    "Name": f"{number} - {today}",   # ✅ Primary field
+                    "Number": number,
+                    "Market": market,
+                    "Last Used": today,
+                    "Count": 0,
+                    "Remaining": DAILY_LIMIT,
+                })
+                created += 1
+            else:
+                # Reset today’s row
+                rec = today_rows[0]
+                tbl.update(rec["id"], {"Count": 0, "Remaining": DAILY_LIMIT})
+                updated += 1
+
+        return {"ok": True, "date": today, "created": created, "updated": updated}
+
+    except Exception as e:
+        print("❌ Error in reset_daily_quotas:", e)
+        traceback.print_exc()
+        return {"ok": False, "error": str(e), "date": today, "created": created, "updated": updated}

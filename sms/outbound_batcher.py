@@ -4,42 +4,62 @@ from datetime import datetime, timezone
 from pyairtable import Table
 from sms.quota_reset import reset_daily_quotas
 
-# Airtable setup
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
-NUMBERS_TABLE = "Numbers"
+# --- Config ---
+NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 
-numbers = Table(AIRTABLE_API_KEY, CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
+_last_reset_date = None  # safeguard for daily quota reset
 
-# --- Daily quota reset safeguard ---
-_last_reset_date = None
+
+def get_numbers_table() -> Table:
+    """
+    Lazy initializer for the Airtable Numbers table.
+    Throws RuntimeError if env vars aren't set.
+    """
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
+
+    if not api_key or not base_id:
+        raise RuntimeError("⚠️ Missing Airtable config: AIRTABLE_API_KEY or CAMPAIGN_CONTROL_BASE")
+
+    return Table(api_key, base_id, NUMBERS_TABLE)
+
 
 def ensure_today_rows():
+    """
+    Auto-reset daily quotas once per day across all numbers.
+    """
     global _last_reset_date
     today = datetime.now(timezone.utc).date().isoformat()
+
     if _last_reset_date != today:
         print(f"⚡ Auto-resetting quotas for {today}")
         reset_daily_quotas()
         _last_reset_date = today
 
-# --- Example send_batch loop ---
-def send_batch(limit: int = 50):
-    ensure_today_rows()  # 👈 always refresh quotas once per day
 
-    # Your normal batching logic (pick numbers, decrement quota, send SMS)
+def send_batch(limit: int = 50):
+    """
+    Main outbound batching loop:
+    - Ensures quotas are reset for the day
+    - Pulls Numbers table
+    - Decrements Remaining quota for each number used
+    """
+    ensure_today_rows()
+    numbers = get_numbers_table()
+
     results = []
     sent = 0
 
-    # Example: fetch pool of active numbers
+    # Fetch pool of available numbers
     available = numbers.all(max_records=limit)
 
     for n in available:
-        f = n["fields"]
+        f = n.get("fields", {})
         remaining = f.get("Remaining", 0)
         phone = f.get("Number")
 
-        if remaining > 0:
-            # decrement and mark use
+        if remaining and remaining > 0:
+            # Decrement and mark usage
             numbers.update(n["id"], {
                 "Remaining": remaining - 1,
                 "Last Used": datetime.now(timezone.utc).isoformat()
