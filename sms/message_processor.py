@@ -1,53 +1,76 @@
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pyairtable import Table
 from sms.textgrid_sender import send_message
 from sms.utils.retry_handler import handle_retry
 
+# --- Airtable Config ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE_ID")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
 
 convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
-leads = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE)
+leads  = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE)
 
 
 class MessageProcessor:
     """Unified handler for sending, logging, and retrying SMS messages."""
 
     @staticmethod
-    def send(phone: str, body: str, lead_id: str = None, direction: str = "OUT"):
+    def send(phone: str, body: str, lead_id: str = None, direction: str = "OUT", processed_by: str = "MessageProcessor"):
         """
         Attempt to send an SMS. Logs to Conversations and pushes to retry if needed.
         """
         if not phone or not body:
             return {"status": "skipped", "reason": "missing phone or body"}
 
+        ts = datetime.now(timezone.utc).isoformat()
+
         try:
-            # Try sending
+            # --- Try sending ---
             send_message(phone, body)
 
-            # Log success
+            # --- Log success in Conversations ---
             convos.create({
-                "phone": phone,
-                "lead_id": lead_id,
-                "direction": direction,
-                "message": body,
-                "status": "SENT",
-                "sent_at": str(datetime.utcnow())
+                "From Number" if direction == "IN" else "To Number": phone,
+                "Message": body,
+                "Direction": direction,
+                "Status": "SENT",
+                "Lead": [lead_id] if lead_id else None,
+                "Sent At": ts,
+                "Processed By": processed_by,
             })
 
+            # --- Update linked Lead ---
             if lead_id:
-                leads.update_by_fields({"property_id": lead_id}, {"last_contacted": str(datetime.utcnow())})
+                try:
+                    leads.update(lead_id, {"Last Contacted": ts})
+                except Exception as e:
+                    print(f"⚠️ Failed to update lead {lead_id}: {e}")
 
-            print(f"📤 {direction} to {phone}: {body}")
-            return {"status": "sent", "phone": phone, "body": body}
+            print(f"📤 {direction} → {phone}: {body}")
+            return {"status": "sent", "phone": phone, "body": body, "timestamp": ts}
 
         except Exception as e:
-            # Handle retry
+            # --- Log failure in Conversations ---
+            convos.create({
+                "To Number": phone,
+                "Message": body,
+                "Direction": direction,
+                "Status": "FAILED",
+                "Error": str(e),
+                "Lead": [lead_id] if lead_id else None,
+                "Sent At": ts,
+                "Processed By": processed_by,
+            })
+
+            # --- Push to retry handler ---
             if lead_id:
-                handle_retry(lead_id, str(e))
+                try:
+                    handle_retry(lead_id, str(e))
+                except Exception as re:
+                    print(f"⚠️ Retry handler failed for {lead_id}: {re}")
 
             print(f"❌ Failed sending to {phone}: {e}")
-            return {"status": "failed", "phone": phone, "error": str(e)}
+            return {"status": "failed", "phone": phone, "error": str(e), "timestamp": ts}

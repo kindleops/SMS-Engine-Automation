@@ -1,4 +1,3 @@
-# sms/metrics_tracker.py
 import os
 from datetime import datetime, timezone, timedelta
 from pyairtable import Table
@@ -8,15 +7,14 @@ import traceback
 
 # --- Airtable Config ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-PERFORMANCE_BASE = os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
-LEADS_CONVOS_BASE = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-CAMPAIGN_CONTROL_BASE = os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
+PERFORMANCE_BASE = os.getenv("PERFORMANCE_BASE") or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
 
-# Table names
+# Tables
 CAMPAIGNS_TABLE = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
-# Init tables safely
 def _init_table(api_key, base, table_name):
     if not api_key or not base:
         print(f"⚠️ Missing Airtable env for {table_name}")
@@ -24,7 +22,7 @@ def _init_table(api_key, base, table_name):
     try:
         return Table(api_key, base, table_name)
     except Exception:
-        print(f"❌ Failed to init {table_name}")
+        print(f"❌ Failed to init table {table_name}")
         traceback.print_exc()
         return None
 
@@ -34,8 +32,8 @@ campaigns = _init_table(AIRTABLE_API_KEY, CAMPAIGN_CONTROL_BASE, CAMPAIGNS_TABLE
 convos    = _init_table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
 
 # --- Alerts Config ---
-ALERT_PHONE = os.getenv("ALERT_PHONE")  # +1XXXXXXXXXX
-ALERT_EMAIL_WEBHOOK = os.getenv("ALERT_EMAIL_WEBHOOK")  # Slack/MS Teams webhook
+ALERT_PHONE = os.getenv("ALERT_PHONE")             # SMS alert
+ALERT_EMAIL_WEBHOOK = os.getenv("ALERT_EMAIL_WEBHOOK")  # Slack/Teams webhook
 THRESHOLD = float(os.getenv("OPT_OUT_ALERT_THRESHOLD", "2.5"))
 COOLDOWN_HOURS = int(os.getenv("OPT_OUT_ALERT_COOLDOWN_HOURS", "24"))
 
@@ -49,6 +47,7 @@ def _parse_dt(s: str | None):
         return None
 
 def _should_alert(last_alert_at_iso: str | None, rate: float) -> bool:
+    """Decide if an alert should be fired based on threshold + cooldown."""
     if rate < THRESHOLD:
         return False
     if not last_alert_at_iso:
@@ -60,7 +59,7 @@ def _should_alert(last_alert_at_iso: str | None, rate: float) -> bool:
 
 def _notify(campaign: str, rate: float, sent: int, optouts: int):
     msg = (
-        f"⚠️ Opt-out rate high for '{campaign}': {rate:.2f}% "
+        f"⚠️ High opt-out rate for '{campaign}': {rate:.2f}% "
         f"(opt-outs {optouts}/{sent}). Threshold {THRESHOLD:.2f}%."
     )
     if ALERT_PHONE:
@@ -94,27 +93,24 @@ def update_metrics():
 
         # Count OUTBOUND sent
         sent_records = convos.all(
-            formula="AND({Direction} = 'OUT', {Campaign} = '{}')".format(
-                view_name.replace("'", "\\'")
-            )
+            formula=f"AND({{Direction}} = 'OUT', {{Campaign}} = '{view_name.replace("'", "''")}')"
         )
         total_sent = len(sent_records)
 
         # Count opt-outs (NO + WRONG)
         neg_records = convos.all(
-            formula="AND({Campaign} = '{}', OR(LEFT({Status}, 12) = 'PROCESSED-NO', LEFT({Status}, 15) = 'PROCESSED-WRONG'))".format(
-                view_name.replace("'", "\\'")
-            )
+            formula=f"AND({{Campaign}} = '{view_name.replace("'", "''")}', "
+                    f"OR(LEFT({{Status}}, 12) = 'PROCESSED-NO', LEFT({{Status}}, 15) = 'PROCESSED-WRONG'))"
         )
         total_opt_outs = len(neg_records)
 
         rate = round((total_opt_outs / total_sent * 100), 2) if total_sent else 0.0
 
-        # Accumulate global totals
+        # Accumulate totals
         global_sent += total_sent
         global_optouts += total_opt_outs
 
-        # Update campaign row in Campaigns table
+        # Update campaign row
         try:
             campaigns.update(camp["id"], {
                 "total_sent": total_sent,
@@ -125,7 +121,7 @@ def update_metrics():
             print(f"⚠️ Failed to update Campaign row for {view_name}")
             traceback.print_exc()
 
-        # Alert if needed
+        # Alerts
         if _should_alert(last_alert_at, rate):
             _notify(view_name, rate, total_sent, total_opt_outs)
             try:
@@ -133,34 +129,39 @@ def update_metrics():
             except Exception:
                 pass
 
-        # Insert campaign KPIs
+        # KPIs
         if kpis:
-            try:
-                kpis.create({"Campaign": view_name, "Metric": "TOTAL_SENT", "Value": total_sent, "Date": today})
-                kpis.create({"Campaign": view_name, "Metric": "TOTAL_OPTOUTS", "Value": total_opt_outs, "Date": today})
-                kpis.create({"Campaign": view_name, "Metric": "OPTOUT_RATE", "Value": rate, "Date": today})
-            except Exception as e:
-                print(f"❌ Failed to write KPIs for {view_name}: {e}")
-                traceback.print_exc()
+            for metric, value in [
+                ("TOTAL_SENT", total_sent),
+                ("TOTAL_OPTOUTS", total_opt_outs),
+                ("OPTOUT_RATE", rate),
+            ]:
+                try:
+                    kpis.create({"Campaign": view_name, "Metric": metric, "Value": value, "Date": today})
+                except Exception as e:
+                    print(f"❌ Failed to write KPI {metric} for {view_name}: {e}")
+                    traceback.print_exc()
 
         summary.append({"campaign": view_name, "sent": total_sent, "optouts": total_opt_outs, "rate": rate})
 
-    # --- 🌍 Global totals ---
+    # Global totals
     global_rate = round((global_optouts / global_sent * 100), 2) if global_sent else 0.0
     if kpis:
-        try:
-            kpis.create({"Campaign": "ALL", "Metric": "TOTAL_SENT", "Value": global_sent, "Date": today})
-            kpis.create({"Campaign": "ALL", "Metric": "TOTAL_OPTOUTS", "Value": global_optouts, "Date": today})
-            kpis.create({"Campaign": "ALL", "Metric": "OPTOUT_RATE", "Value": global_rate, "Date": today})
-        except Exception as e:
-            print(f"❌ Failed to write global KPIs: {e}")
-            traceback.print_exc()
+        for metric, value in [
+            ("TOTAL_SENT", global_sent),
+            ("TOTAL_OPTOUTS", global_optouts),
+            ("OPTOUT_RATE", global_rate),
+        ]:
+            try:
+                kpis.create({"Campaign": "ALL", "Metric": metric, "Value": value, "Date": today})
+            except Exception as e:
+                print(f"❌ Failed to write global KPI {metric}: {e}")
+                traceback.print_exc()
 
-    # --- 📝 Log Run in Runs/Logs ---
+    # Log run
     if runs:
         try:
             run_record = runs.create({
-                "Name": f"METRICS_UPDATE - {datetime.now(timezone.utc).isoformat()}",
                 "Type": "METRICS_UPDATE",
                 "Processed": global_sent,
                 "Breakdown": str(summary),
@@ -172,12 +173,11 @@ def update_metrics():
             print(f"❌ Failed to log run")
             traceback.print_exc()
 
-    print("📊 Metrics updated:", summary, "🌍 Global Totals:", {
-        "sent": global_sent, "optouts": global_optouts, "rate": global_rate
-    })
+    print("📊 Metrics updated:", summary, "🌍 Global Totals:",
+          {"sent": global_sent, "optouts": global_optouts, "rate": global_rate})
 
     return {
         "summary": summary,
         "global": {"sent": global_sent, "optouts": global_optouts, "rate": global_rate},
-        "run_id": run_id
+        "run_id": run_id,
     }

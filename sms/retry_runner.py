@@ -1,59 +1,88 @@
 # sms/retry_runner.py
-import os, time
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from pyairtable import Table
 from sms.textgrid_sender import send_message
 
+# --- Airtable Config ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE = os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+
+if not AIRTABLE_API_KEY or not LEADS_CONVOS_BASE:
+    raise RuntimeError("⚠️ Missing Airtable env for Conversations table")
 
 convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
 
-# Airtable formula for a "Needs Retry" pull if you don't want to use a View:
-FORMULA = """
+# --- Config ---
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
+
+# --- Formula (fallback if no Airtable View) ---
+FORMULA = f"""
 AND(
-  {direction} = 'OUT',
-  OR({status} = 'FAILED', {status} = 'DELIVERY_FAILED', {status} = 'THROTTLED'),
-  OR({retry_count} = BLANK(), {retry_count} < 3),
-  OR({retry_after} = BLANK(), DATETIME_PARSE({retry_after}) <= NOW())
+  {{Direction}} = 'OUT',
+  OR({{Status}} = 'FAILED', {{Status}} = 'DELIVERY_FAILED', {{Status}} = 'THROTTLED'),
+  OR({{Retry Count}} = BLANK(), {{Retry Count}} < {MAX_RETRIES}),
+  OR({{Retry After}} = BLANK(), {{Retry After}} <= NOW())
 )
 """
 
+def _backoff_delay(retry_count: int) -> timedelta:
+    """Exponential backoff: 30m, 60m, 120m, ..."""
+    return timedelta(minutes=BASE_BACKOFF_MINUTES * (2 ** (retry_count - 1)))
+
 def run_retry(limit: int = 100, view: str | None = None):
-    records = []
+    """
+    Retry previously failed outbound SMS:
+    - Fetches rows from Conversations marked for retry
+    - Attempts resend
+    - Updates Airtable with retry_count, status, and backoff
+    """
     if view:
-        # Preferred: drive from a curated Airtable View named "Needs Retry"
         records = convos.all(view=view)[:limit]
     else:
-        # Fallback: use formula if you didn't make the view
         records = convos.all(formula=FORMULA)[:limit]
 
     retried = 0
+    failed = 0
+
     for r in records:
         f = r.get("fields", {})
         phone = f.get("phone")
         body  = f.get("message")
+        retry_count = f.get("Retry Count", 0) or 0
+
         if not phone or not body:
             continue
 
         try:
             send_message(phone, body)
             convos.update(r["id"], {
-                "status": "RETRIED",
-                "retry_count": (f.get("retry_count") or 0) + 1,
-                "retried_at": datetime.now(timezone.utc).isoformat()
+                "Status": "RETRIED",
+                "Retry Count": retry_count + 1,
+                "Retried At": datetime.now(timezone.utc).isoformat()
             })
             retried += 1
-        except Exception as e:
-            convos.update(r["id"], {
-                "status": "FAILED",
-                "retry_count": (f.get("retry_count") or 0) + 1,
-                "last_error": str(e),
-                # back off 30 min
-                "retry_after": (datetime.now(timezone.utc)
-                                .replace(microsecond=0)).isoformat()
-            })
+            print(f"📤 Retried → {phone} | Retry #{retry_count + 1}")
 
-    print(f"🔁 Retry runner processed {retried} messages")
-    return {"retried": retried}
+        except Exception as e:
+            new_count = retry_count + 1
+            update = {
+                "Retry Count": new_count,
+                "Last Error": str(e),
+            }
+            if new_count >= MAX_RETRIES:
+                update["Status"] = "GAVE_UP"
+                print(f"🚨 Giving up on {phone} after {new_count} retries: {e}")
+            else:
+                backoff = _backoff_delay(new_count)
+                update["Retry After"] = (datetime.now(timezone.utc) + backoff).isoformat()
+                update["Status"] = "NEEDS_RETRY"
+                print(f"⚠️ Retry failed → {phone} | Will retry after {backoff}: {e}")
+
+            convos.update(r["id"], update)
+            failed += 1
+
+    print(f"🔁 Retry runner finished | ✅ Retried: {retried} | ❌ Still failing: {failed}")
+    return {"retried": retried, "failed": failed, "limit": limit}
