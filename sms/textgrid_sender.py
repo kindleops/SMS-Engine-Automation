@@ -51,8 +51,8 @@ def send_message(to: str, body: str, from_number: str | None = None, retries: in
                 try:
                     convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
                     convos.create({
-                        "phone": to,
-                        "to_number": from_number or "TEXTGRID",
+                        "phone": to,                           # recipient
+                        "to_number": from_number or "TEXTGRID", # sender number
                         "message": body,
                         "status": "SENT",
                         "direction": "OUT",
