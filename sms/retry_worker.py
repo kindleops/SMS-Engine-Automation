@@ -49,7 +49,7 @@ def retry_failed(limit: int = 50, view: str | None = None):
         f = r.get("fields", {})
         phone = f.get("phone")
         body = f.get("message")
-        retry_count = f.get("Retry Count", 0) or 0
+        retry_count = f.get("retry_count", 0) or 0
 
         if not phone or not body:
             continue
@@ -57,9 +57,9 @@ def retry_failed(limit: int = 50, view: str | None = None):
         try:
             send_message(phone, body)
             convos.update(r["id"], {
-                "Status": "RETRIED-SUCCESS",
-                "Retry Count": retry_count + 1,
-                "Retried At": datetime.now(timezone.utc).isoformat()
+                "status": "RETRIED-SUCCESS",
+                "retry_count": retry_count + 1,
+                "last_retry_at": datetime.now(timezone.utc).isoformat()
             })
             retried += 1
             print(f"📤 Retried → {phone} | Retry #{retry_count + 1}")
@@ -67,18 +67,18 @@ def retry_failed(limit: int = 50, view: str | None = None):
         except Exception as e:
             new_count = retry_count + 1
             update = {
-                "Retry Count": new_count,
-                "Last Error": str(e),
-                "Retried At": datetime.now(timezone.utc).isoformat(),
+                "retry_count": new_count,
+                "last_retry_error": str(e),
+                "last_retry_at": datetime.now(timezone.utc).isoformat(),
             }
 
             if new_count >= MAX_RETRIES:
-                update["Status"] = "GAVE_UP"
+                update["status"] = "GAVE_UP"
                 print(f"🚨 Giving up on {phone} after {new_count} retries: {e}")
             else:
                 backoff = _backoff_delay(new_count)
-                update["Retry After"] = (datetime.now(timezone.utc) + backoff).isoformat()
-                update["Status"] = "RETRY"
+                update["retry_after"] = (datetime.now(timezone.utc) + backoff).isoformat()
+                update["status"] = "RETRY"
                 print(f"⚠️ Retry failed → {phone} | Will retry after {backoff}: {e}")
 
             convos.update(r["id"], update)

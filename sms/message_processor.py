@@ -33,13 +33,13 @@ class MessageProcessor:
 
             # --- Log success in Conversations ---
             convos.create({
-                "From Number" if direction == "IN" else "To Number": phone,
-                "Message": body,
-                "Direction": direction,
-                "Status": "SENT",
-                "Lead": [lead_id] if lead_id else None,
-                "Sent At": ts,
-                "Processed By": processed_by,
+                "phone" if direction == "IN" else "To Number": phone,
+                "message": body,
+                "direction": direction,
+                "status": "SENT",
+                "lead_id": [lead_id] if lead_id else None,
+                "sent_at": ts,
+                "processed_by": processed_by,
             })
 
             # --- Update linked Lead ---
@@ -55,14 +55,14 @@ class MessageProcessor:
         except Exception as e:
             # --- Log failure in Conversations ---
             convos.create({
-                "To Number": phone,
-                "Message": body,
-                "Direction": direction,
-                "Status": "FAILED",
+                "to_number": phone,
+                "message": body,
+                "direction": direction,
+                "status": "FAILED",
                 "Error": str(e),
-                "Lead": [lead_id] if lead_id else None,
-                "Sent At": ts,
-                "Processed By": processed_by,
+                "lead_id": [lead_id] if lead_id else None,
+                "sent_at": ts,
+                "processed_by": processed_by,
             })
 
             # --- Push to retry handler ---

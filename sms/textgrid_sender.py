@@ -52,11 +52,11 @@ def send_message(to: str, body: str, from_number: str | None = None, retries: in
                     convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
                     convos.create({
                         "phone": to,
-                        "from_number": from_number or "TEXTGRID",
+                        "to_number": from_number or "TEXTGRID",
                         "message": body,
                         "status": "SENT",
                         "direction": "OUT",
-                        "textgrid_id": msg_id,
+                        "TextGrid ID": msg_id,
                         "sent_at": datetime.now(timezone.utc).isoformat()
                     })
                 except Exception as log_err:

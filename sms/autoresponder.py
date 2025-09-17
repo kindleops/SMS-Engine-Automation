@@ -20,11 +20,11 @@ UNPROCESSED_VIEW    = os.getenv("UNPROCESSED_VIEW", "Unprocessed Inbounds")
 OPTOUTS_TABLE       = os.getenv("OPTOUTS_TABLE", "Opt-Outs")
 
 # Fields
-FROM_FIELD   = os.getenv("CONV_FROM_FIELD",    "From Number")
-TO_FIELD     = os.getenv("CONV_TO_FIELD",      "To Number")
-MSG_FIELD    = os.getenv("CONV_MESSAGE_FIELD", "Message")
-INTENT_FIELD = os.getenv("CONV_INTENT_FIELD",  "Intent")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD",  "Status")
+FROM_FIELD   = os.getenv("CONV_FROM_FIELD",    "phone")
+TO_FIELD     = os.getenv("CONV_TO_FIELD",      "to_number")
+MSG_FIELD    = os.getenv("CONV_MESSAGE_FIELD", "message")
+INTENT_FIELD = os.getenv("CONV_INTENT_FIELD",  "intent")
+STATUS_FIELD = os.getenv("CONV_STATUS_FIELD",  "status")
 
 PROCESSED_BY_FIELD = os.getenv("CONV_PROCESSED_BY_FIELD", "Processed By")
 PROCESSED_BY_LABEL = os.getenv("PROCESSED_BY_LABEL", "Autoresponder")

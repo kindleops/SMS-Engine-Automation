@@ -9,10 +9,12 @@ from sms.outbound_batcher import send_batch
 from sms.autoresponder import run_autoresponder
 from sms.quota_reset import reset_daily_quotas
 from sms.metrics_tracker import update_metrics
+from sms.inbound_webhook import router as inbound_router
 
 # Load environment variables
 load_dotenv()
 app = FastAPI()
+app.include_router(inbound_router)
 
 # --- ENV CONFIG ---
 CRON_TOKEN = os.getenv("CRON_TOKEN")
@@ -191,13 +193,13 @@ async def inbound_endpoint(request: Request):
 
         convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
         convos.create({
-            "From Number": from_number,
-            "To Number": to_number,
-            "Message": message,
-            "Status": "UNPROCESSED",
-            "Direction": "IN",
+            "phone": from_number,
+            "to_number": to_number,
+            "message": message,
+            "status": "UNPROCESSED",
+            "direction": "IN",
             "TextGrid ID": msg_id,
-            "Received At": datetime.now(timezone.utc).isoformat()
+            "received_at": datetime.now(timezone.utc).isoformat()
         })
 
         return {"ok": True}
