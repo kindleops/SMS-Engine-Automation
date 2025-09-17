@@ -11,8 +11,10 @@ from sms.quota_reset import reset_daily_quotas
 from sms.metrics_tracker import update_metrics
 from sms.inbound_webhook import router as inbound_router
 
-# Load environment variables
-load_dotenv()
+# --- Load environment variables from project root ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 # --- FastAPI app ---
 app = FastAPI()
@@ -47,6 +49,17 @@ def get_perf_tables():
 def check_token(x_cron_token: str | None):
     if CRON_TOKEN and x_cron_token != CRON_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+# --- Startup Debug ---
+@app.on_event("startup")
+def log_env_config():
+    print("✅ Environment loaded:")
+    print(f"   LEADS_CONVOS_BASE: {os.getenv('LEADS_CONVOS_BASE')}")
+    print(f"   CAMPAIGN_CONTROL_BASE: {os.getenv('CAMPAIGN_CONTROL_BASE')}")
+    print(f"   PERFORMANCE_BASE: {os.getenv('PERFORMANCE_BASE')}")
+    print(f"   NUMBERS_TABLE: {NUMBERS_TABLE}")
+    print(f"   CONVERSATIONS_TABLE: {os.getenv('CONVERSATIONS_TABLE', 'Conversations')}")
 
 
 # --- Health ---
