@@ -1,14 +1,23 @@
+import os
 from datetime import datetime, timedelta, timezone
 from pyairtable import Table
-import os
 
-# Airtable setup (Conversations lives in Leads/Convos base)
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+# --- Airtable Setup ---
+AIRTABLE_API_KEY    = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE   = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+
+if not AIRTABLE_API_KEY or not LEADS_CONVOS_BASE:
+    raise RuntimeError("⚠️ Missing Airtable env for Conversations table")
 
 convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
 
+# --- Field Mapping (env-driven, with safe defaults) ---
+STATUS_FIELD       = os.getenv("CONV_STATUS_FIELD", "status")
+RETRY_COUNT_FIELD  = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
+RETRY_AFTER_FIELD  = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
+LAST_ERROR_FIELD   = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
+LAST_RETRY_AT      = os.getenv("CONV_LAST_RETRY_AT_FIELD", "last_retry_at")
 
 def handle_retry(record_id: str, error: str, max_retries: int = 3, cooldown_minutes: int = 30):
     """
@@ -22,18 +31,20 @@ def handle_retry(record_id: str, error: str, max_retries: int = 3, cooldown_minu
         rec = convos.get(record_id)
         f = rec.get("fields", {})
 
-        retries = (f.get("retry_count") or 0) + 1
+        retries = (f.get(RETRY_COUNT_FIELD) or 0) + 1
         status = "RETRY" if retries < max_retries else "GAVE_UP"
 
         updates = {
-            "status": status,
-            "retry_count": retries,
-            "last_retry_error": error,
-            "last_retry_at": datetime.now(timezone.utc).isoformat()
+            STATUS_FIELD: status,
+            RETRY_COUNT_FIELD: retries,
+            LAST_ERROR_FIELD: error,
+            LAST_RETRY_AT: datetime.now(timezone.utc).isoformat()
         }
 
         if status == "RETRY":
-            updates["retry_after"] = (datetime.now(timezone.utc) + timedelta(minutes=cooldown_minutes)).isoformat()
+            updates[RETRY_AFTER_FIELD] = (
+                datetime.now(timezone.utc) + timedelta(minutes=cooldown_minutes)
+            ).isoformat()
 
         convos.update(record_id, updates)
 

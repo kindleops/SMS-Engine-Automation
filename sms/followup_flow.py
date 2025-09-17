@@ -11,7 +11,7 @@ def run_followups():
     """
     Process today's follow-up messages from Drip Queue.
     - Finds rows where next_send_date = today
-    - Sends SMS based on stage (30, 60, 90)
+    - Sends SMS based on drip_stage (30, 60, 90)
     - Updates stage, next_send_date, and last_sent
     """
     queue = get_leads_table(DRIP_QUEUE_TABLE)
@@ -25,11 +25,11 @@ def run_followups():
 
     for r in records:
         f = r.get("fields", {})
-        phone   = f.get("phone")
-        lead_id = f.get("lead_id")
-        stage   = f.get("drip_stage", 30)
-        address = f.get("address", "your property")
-        owner   = f.get("owner_name", "Owner")
+        phone    = f.get("phone")
+        lead_id  = f.get("lead_id")  # Linked record ID (list)
+        stage    = f.get("drip_stage", 30)
+        address  = f.get("address", "your property")
+        owner    = f.get("owner_name", "Owner")
 
         if not phone:
             print(f"⚠️ Skipping record {r['id']} (missing phone)")
@@ -53,15 +53,24 @@ def run_followups():
             send_message(phone, body)
         except Exception as e:
             print(f"❌ Failed to send SMS to {phone}: {e}")
+            queue.update(r["id"], {
+                "status": "FAILED",
+                "last_error": str(e),
+                "retry_count": (f.get("retry_count") or 0) + 1
+            })
             continue
 
         updates = {
             "last_sent": datetime.now(timezone.utc).isoformat(),
-            "drip_stage": next_stage
+            "drip_stage": next_stage,
+            "status": "SENT",
+            "message_preview": body
         }
 
         if isinstance(next_stage, int):
-            updates["next_send_date"] = str((datetime.now(timezone.utc) + timedelta(days=30)).date())
+            updates["next_send_date"] = str(
+                (datetime.now(timezone.utc) + timedelta(days=30)).date()
+            )
 
         try:
             queue.update(r["id"], updates)

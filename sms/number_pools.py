@@ -7,6 +7,13 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
 NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 
+# Field names (configurable to avoid UNKNOWN_FIELD_NAME)
+FIELD_NUMBER    = os.getenv("NUMBERS_FIELD_NUMBER", "Number")
+FIELD_MARKET    = os.getenv("NUMBERS_FIELD_MARKET", "Market")
+FIELD_LAST_USED = os.getenv("NUMBERS_FIELD_LAST_USED", "Last Used")
+FIELD_COUNT     = os.getenv("NUMBERS_FIELD_COUNT", "Count")
+FIELD_REMAINING = os.getenv("NUMBERS_FIELD_REMAINING", "Remaining")
+
 if not AIRTABLE_API_KEY or not CONTROL_BASE:
     raise RuntimeError("⚠️ Missing Airtable config for Numbers table")
 
@@ -33,20 +40,24 @@ def _reset_if_new_day(number: str, market: str):
         quota_tracker[number] = {"date": today, "count": 0}
 
     try:
-        records = numbers_tbl.all(formula=f"AND({{Number}}='{number}', {{Last Used}}='{today}')")
+        formula = (
+            f"AND({{{FIELD_NUMBER}}}='{number}', "
+            f"DATETIME_FORMAT({{{FIELD_LAST_USED}}}, 'YYYY-MM-DD')='{today}')"
+        )
+        records = numbers_tbl.all(formula=formula)
         if records:
             rec = records[0]
-            count = rec["fields"].get("Count", 0)
+            count = rec["fields"].get(FIELD_COUNT, 0)
             quota_tracker[number]["count"] = count
             remaining = DAILY_LIMIT - count
-            numbers_tbl.update(rec["id"], {"Remaining": remaining})
+            numbers_tbl.update(rec["id"], {FIELD_REMAINING: remaining})
         else:
             rec = numbers_tbl.create({
-                "Number": number,
-                "Market": market,
-                "Last Used": today,
-                "Count": 0,
-                "Remaining": DAILY_LIMIT,
+                FIELD_NUMBER: number,
+                FIELD_MARKET: market,
+                FIELD_LAST_USED: today,
+                FIELD_COUNT: 0,
+                FIELD_REMAINING: DAILY_LIMIT,
             })
             quota_tracker[number]["count"] = 0
     except Exception as e:
@@ -57,9 +68,22 @@ def _update_airtable_count(number: str):
     count = quota_tracker[number]["count"]
     remaining = DAILY_LIMIT - count
     try:
-        recs = numbers_tbl.all(formula=f"AND({{Number}}='{number}', {{Last Used}}='{today}')")
+        formula = (
+            f"AND({{{FIELD_NUMBER}}}='{number}', "
+            f"DATETIME_FORMAT({{{FIELD_LAST_USED}}}, 'YYYY-MM-DD')='{today}')"
+        )
+        recs = numbers_tbl.all(formula=formula)
         if recs:
-            numbers_tbl.update(recs[0]["id"], {"Count": count, "Remaining": remaining})
+            numbers_tbl.update(recs[0]["id"], {FIELD_COUNT: count, FIELD_REMAINING: remaining})
+        else:
+            # Fallback: re-create if Airtable row missing
+            numbers_tbl.create({
+                FIELD_NUMBER: number,
+                FIELD_MARKET: "UNKNOWN",
+                FIELD_LAST_USED: today,
+                FIELD_COUNT: count,
+                FIELD_REMAINING: remaining,
+            })
     except Exception as e:
         print(f"⚠️ Failed to update Airtable for {number}: {e}")
 

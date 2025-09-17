@@ -2,7 +2,7 @@ import os
 import traceback
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Request, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from pyairtable import Table
 
 from sms.outbound_batcher import send_batch
@@ -13,26 +13,24 @@ from sms.inbound_webhook import router as inbound_router
 
 # Load environment variables
 load_dotenv()
+
+# --- FastAPI app ---
 app = FastAPI()
 app.include_router(inbound_router)
 
 # --- ENV CONFIG ---
 CRON_TOKEN = os.getenv("CRON_TOKEN")
 
-# Airtable (Conversations base for inbound)
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-
 # Performance base (for runs + KPIs)
 PERF_BASE = os.getenv("PERFORMANCE_BASE")
-PERF_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or AIRTABLE_API_KEY
+PERF_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
 
 # Campaign control base (for numbers, quotas, etc.)
 CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE")
 NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 
-# --- Airtable tables ---
+
+# --- Airtable helpers ---
 def get_perf_tables():
     if not PERF_KEY or not PERF_BASE:
         return None, None
@@ -45,14 +43,17 @@ def get_perf_tables():
         traceback.print_exc()
         return None, None
 
+
 def check_token(x_cron_token: str | None):
     if CRON_TOKEN and x_cron_token != CRON_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # --- Health ---
 @app.get("/health")
 def health():
     return {"ok": True}
+
 
 # --- Outbound Batch Endpoint ---
 @app.post("/send")
@@ -83,6 +84,7 @@ async def send_endpoint(
             print("⚠️ Failed to write to Performance base:")
             traceback.print_exc()
     return result
+
 
 # --- Autoresponder Endpoint ---
 @app.post("/autoresponder")
@@ -120,6 +122,7 @@ async def autoresponder_endpoint(
             traceback.print_exc()
     return result
 
+
 # --- AI Closer ---
 @app.post("/ai-closer")
 async def ai_closer_endpoint(
@@ -145,6 +148,7 @@ async def ai_closer_endpoint(
             print("⚠️ Failed to log AI Closer run")
             traceback.print_exc()
     return result
+
 
 # --- Manual QA ---
 @app.post("/manual-qa")
@@ -172,41 +176,6 @@ async def manual_qa_endpoint(
             traceback.print_exc()
     return result
 
-# --- Inbound Webhook (TextGrid callback) ---
-@app.post("/inbound")
-async def inbound_endpoint(request: Request):
-    """
-    Webhook for TextGrid inbound SMS -> stores in Airtable Conversations.
-    """
-    try:
-        data = await request.json()
-        print("📩 Inbound SMS:", data)
-
-        from_number = data.get("from")
-        to_number   = data.get("to")
-        message     = data.get("message")
-        msg_id      = data.get("id")
-
-        if not (AIRTABLE_API_KEY and LEADS_CONVOS_BASE):
-            print("⚠️ Airtable not configured for inbound logging")
-            return {"ok": False, "error": "Airtable not configured"}
-
-        convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
-        convos.create({
-            "phone": from_number,
-            "to_number": to_number,
-            "message": message,
-            "status": "UNPROCESSED",
-            "direction": "IN",
-            "TextGrid ID": msg_id,
-            "received_at": datetime.now(timezone.utc).isoformat()
-        })
-
-        return {"ok": True}
-    except Exception as e:
-        print("❌ Error in inbound handler:", e)
-        traceback.print_exc()
-        return {"ok": False, "error": str(e)}
 
 # --- Reset Quotas ---
 @app.post("/reset-quotas")

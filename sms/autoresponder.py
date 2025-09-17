@@ -1,23 +1,16 @@
+# sms/autoresponder.py
 import os
 import re
 import unicodedata
 from datetime import datetime, timezone
 from typing import Dict, Tuple
 
-from pyairtable import Table
 from sms.textgrid_sender import send_message
+from sms.airtable_client import get_convos, get_campaigns_table
 
-# --- Airtable Keys & Base IDs ---
-ACQ_KEY   = os.getenv("AIRTABLE_ACQUISITIONS_KEY") or os.getenv("AIRTABLE_API_KEY")
-DISPO_KEY = os.getenv("AIRTABLE_DISPO_KEY")        or os.getenv("AIRTABLE_API_KEY")
-
-LEADS_CONVOS_BASE     = os.getenv("LEADS_CONVOS_BASE")
-CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE")
-
-# Tables
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-UNPROCESSED_VIEW    = os.getenv("UNPROCESSED_VIEW", "Unprocessed Inbounds")
-OPTOUTS_TABLE       = os.getenv("OPTOUTS_TABLE", "Opt-Outs")
+# Airtable tables
+convos  = get_convos()
+optouts = get_campaigns_table(os.getenv("OPTOUTS_TABLE", "Opt-Outs"))
 
 # Fields
 FROM_FIELD   = os.getenv("CONV_FROM_FIELD",    "phone")
@@ -29,9 +22,7 @@ STATUS_FIELD = os.getenv("CONV_STATUS_FIELD",  "status")
 PROCESSED_BY_FIELD = os.getenv("CONV_PROCESSED_BY_FIELD", "Processed By")
 PROCESSED_BY_LABEL = os.getenv("PROCESSED_BY_LABEL", "Autoresponder")
 
-# Airtable Tables
-convos  = Table(ACQ_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE) if ACQ_KEY and LEADS_CONVOS_BASE else None
-optouts = Table(DISPO_KEY, CAMPAIGN_CONTROL_BASE, OPTOUTS_TABLE) if DISPO_KEY and CAMPAIGN_CONTROL_BASE else None
+UNPROCESSED_VIEW = os.getenv("UNPROCESSED_VIEW", "Unprocessed Inbounds")
 
 # --- Helpers ---
 def _normalize(text: str) -> str:

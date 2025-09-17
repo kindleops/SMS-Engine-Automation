@@ -11,10 +11,7 @@ _last_reset_date = None  # safeguard for daily quota reset
 
 
 def get_numbers_table() -> Table | None:
-    """
-    Lazy initializer for the Airtable Numbers table.
-    Returns None if env vars missing (caller should handle).
-    """
+    """Lazy initializer for Airtable Numbers table."""
     api_key = os.getenv("AIRTABLE_API_KEY")
     base_id = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
 
@@ -31,9 +28,7 @@ def get_numbers_table() -> Table | None:
 
 
 def ensure_today_rows():
-    """
-    Auto-reset daily quotas once per day across all numbers.
-    """
+    """Auto-reset daily quotas once per day across all numbers."""
     global _last_reset_date
     today = datetime.now(timezone.utc).date().isoformat()
 
@@ -45,10 +40,10 @@ def ensure_today_rows():
 
 def send_batch(limit: int = 50):
     """
-    Main outbound batching loop:
-    - Ensures quotas are reset for the day
-    - Pulls Numbers table
-    - Decrements Remaining quota for each number used
+    Outbound batching loop:
+    - Ensures quotas are reset
+    - Pulls Numbers table rows with Remaining > 0
+    - Decrements Remaining + increments Count
     """
     ensure_today_rows()
     numbers = get_numbers_table()
@@ -59,7 +54,6 @@ def send_batch(limit: int = 50):
     sent = 0
 
     try:
-        # ✅ Fetch pool of numbers with quota left
         available = numbers.all(
             formula="{Remaining} > 0",
             max_records=limit,
@@ -67,8 +61,9 @@ def send_batch(limit: int = 50):
 
         for n in available:
             f = n.get("fields", {})
-            remaining = f.get("Remaining", 0)
             phone = f.get("Number")
+            remaining = f.get("Remaining", 0)
+            count = f.get("Count", 0)
 
             if not phone:
                 continue
@@ -77,11 +72,12 @@ def send_batch(limit: int = 50):
                 try:
                     numbers.update(n["id"], {
                         "Remaining": remaining - 1,
-                        "Count": f.get("Count", 0) + 1,
-                        "Last Used": datetime.now(timezone.utc).date().isoformat(),  # keep it daily
+                        "Count": count + 1,
+                        # Write ISO datetime so Airtable Date fields stay happy
+                        "Last Used": datetime.now(timezone.utc).isoformat(),
                     })
                     sent += 1
-                    results.append({"number": phone, "status": "sent"})
+                    results.append({"number": phone, "status": "sent", "remaining": remaining - 1})
                 except Exception as e:
                     print(f"❌ Failed to decrement quota for {phone}: {e}")
                     traceback.print_exc()
