@@ -1,6 +1,6 @@
-📲 REI SMS Engine
+📲 SMS Engine Automation
 
-The REI SMS Engine is a Python-based system for outbound and inbound SMS automation using TextGrid API and Airtable for tracking leads, conversations, and quotas.
+The SMS Engine Automation is a Python-based system for outbound and inbound SMS automation using TextGrid API and Airtable for tracking leads, conversations, and quotas.
 
 ⸻
 
