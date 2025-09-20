@@ -1,123 +1,142 @@
-# sms/autoresponder.py
 import os
-import re
-import unicodedata
+import traceback
 from datetime import datetime, timezone
-from typing import Dict, Tuple
+from pyairtable import Table
 
 from sms.textgrid_sender import send_message
-from sms.airtable_client import get_convos, get_campaigns_table
 
-# Airtable tables
-convos  = get_convos()
-optouts = get_campaigns_table(os.getenv("OPTOUTS_TABLE", "Opt-Outs"))
+# --- ENV CONFIG ---
+AIRTABLE_API_KEY     = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE    = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CONVERSATIONS_TABLE  = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+LEADS_TABLE          = os.getenv("LEADS_TABLE", "Leads")
 
-# Fields
-FROM_FIELD   = os.getenv("CONV_FROM_FIELD",    "phone")
-TO_FIELD     = os.getenv("CONV_TO_FIELD",      "to_number")
-MSG_FIELD    = os.getenv("CONV_MESSAGE_FIELD", "message")
-INTENT_FIELD = os.getenv("CONV_INTENT_FIELD",  "intent")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD",  "status")
+# --- Field Mappings ---
+FROM_FIELD       = os.getenv("CONV_FROM_FIELD", "phone")
+TO_FIELD         = os.getenv("CONV_TO_FIELD", "to_number")
+MSG_FIELD        = os.getenv("CONV_MESSAGE_FIELD", "message")
+STATUS_FIELD     = os.getenv("CONV_STATUS_FIELD", "status")
+DIR_FIELD        = os.getenv("CONV_DIRECTION_FIELD", "direction")
+TG_ID_FIELD      = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
+RECEIVED_AT      = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
+PROCESSED_BY     = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
+SENT_AT          = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
+INTENT_FIELD     = os.getenv("CONV_INTENT_FIELD", "intent_detected")
 
-PROCESSED_BY_FIELD = os.getenv("CONV_PROCESSED_BY_FIELD", "Processed By")
-PROCESSED_BY_LABEL = os.getenv("PROCESSED_BY_LABEL", "Autoresponder")
+# Airtable clients
+convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY and LEADS_CONVOS_BASE else None
+leads  = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE) if AIRTABLE_API_KEY and LEADS_CONVOS_BASE else None
 
-UNPROCESSED_VIEW = os.getenv("UNPROCESSED_VIEW", "Unprocessed Inbounds")
 
 # --- Helpers ---
-def _normalize(text: str) -> str:
-    if not text:
-        return ""
-    t = unicodedata.normalize("NFKD", text)
-    t = "".join(ch for ch in t if not unicodedata.combining(ch))
-    t = t.casefold()
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
+def iso_timestamp():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-def _regex_set(patterns) -> re.Pattern:
-    return re.compile("|".join(patterns), re.IGNORECASE)
+def find_or_create_lead(phone_number: str, source: str = "Autoresponder"):
+    """Ensure every phone is tied to a Lead record."""
+    if not leads or not phone_number:
+        return None
+    try:
+        formula = f"{{phone}}='{phone_number}'"
+        results = leads.all(formula=formula)
+        if results:
+            return results[0]["id"]
+        new_lead = leads.create({
+            "phone": phone_number,
+            "Lead Status": "New",
+            "Source": source
+        })
+        print(f"✨ Created new Lead for {phone_number}")
+        return new_lead["id"]
+    except Exception as e:
+        print(f"⚠️ Lead lookup/create failed for {phone_number}: {e}")
+    return None
 
-# --- Intent Classifiers ---
-OPTOUT = _regex_set([r"\bstop\b", r"\bunsubscribe\b", r"\bquit\b", r"\bend\b", r"\bcancel\b",
-                     r"\bdo not (text|message|contact)\b", r"\bremove me\b", r"\bdnc\b"])
-WRONG  = _regex_set([r"\bwrong (number|person)\b", r"\bnot (me|mine)\b",
-                     r"\bn[úu]mero equivocado\b", r"\bno (soy|es) el du[eé]no\b"])
-YES    = _regex_set([r"\byes\b", r"\byep\b", r"\bok\b", r"\bsure\b", r"\binterested\b",
-                     r"\bprice\b", r"\boffer\b", r"\bhow much\b", r"\bmake me an offer\b"])
-NO     = _regex_set([r"\bno\b", r"\bnot interested\b", r"\bno thanks?\b", r"\bnot selling\b"])
-LATER  = _regex_set([r"\blater\b", r"\bnot now\b", r"\bcall me later\b", r"\bcheck back\b"])
+def update_lead_activity(lead_id: str, body: str, direction: str):
+    """Update activity tracking fields on Lead record."""
+    if not leads or not lead_id:
+        return
+    try:
+        leads.update(lead_id, {
+            "Last Activity": iso_timestamp(),
+            "Last Direction": direction,
+            "Last Message": body[:500] if body else ""
+        })
+    except Exception as e:
+        print(f"⚠️ Failed to update lead activity: {e}")
 
-FALSE_OPTOUT = _regex_set([r"\bstop by\b", r"\bstop in\b"])
-FALSE_NO     = _regex_set([r"\bno problem\b", r"\bno worries\b"])
 
-def classify_reply(body: str) -> Tuple[str, Dict[str, int]]:
-    b = _normalize(body)
-    scores = {"OPTOUT": 0, "WRONG": 0, "YES": 0, "NO": 0, "LATER": 0, "OTHER": 0}
-    if not b:
-        scores["OTHER"] = 1
-        return "OTHER", scores
-    if not FALSE_OPTOUT.search(b) and OPTOUT.search(b):
-        return "OPTOUT", {"OPTOUT": 5}
-    if WRONG.search(b):
-        return "WRONG", {"WRONG": 4}
-    if YES.search(b): scores["YES"] += 2
-    if not FALSE_NO.search(b) and NO.search(b): scores["NO"] += 2
-    if LATER.search(b): scores["LATER"] += 1
-    intent = max(scores, key=scores.get)
-    if scores[intent] == 0:
-        intent = "OTHER"; scores["OTHER"] = 1
-    return intent, scores
-
-REPLIES = {
-    "WRONG":  "Thanks for letting me know — I’ll remove this number.",
-    "OPTOUT": "Got it — you’re opted out and won’t hear from us again.",
-    "NO":     "All good — thanks for confirming. If anything changes, text me anytime.",
-    "YES":    "Great — are you open to a cash offer if the numbers make sense?",
-    "LATER":  "No worries — I’ll check back down the road. If timing changes sooner, just text me.",
-    "OTHER":  "Thanks for the response. Are you the owner and open to an offer if the numbers work?",
-}
-
-# --- Main Autoresponder ---
-def run_autoresponder(limit: int = 50, view: str = UNPROCESSED_VIEW):
+# --- Core Autoresponder Logic ---
+def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
+    """
+    Process inbound messages → generate AI response → send → log to Airtable.
+    """
     if not convos:
-        return {"ok": False, "error": "Airtable Conversations table not configured"}
-    records = convos.all(view=view)[:limit]
-    processed, breakdown = 0, {k: 0 for k in REPLIES.keys()}
+        return {"ok": False, "error": "Conversations table not configured"}
 
-    for r in records:
-        try:
+    processed = 0
+    breakdown = {}
+
+    try:
+        rows = convos.all(view=view, max_records=limit)
+        for r in rows:
             f = r.get("fields", {})
-            if f.get(STATUS_FIELD) != "UNPROCESSED":
+            msg_id   = r.get("id")
+            from_num = f.get(FROM_FIELD)
+            to_num   = f.get(TO_FIELD)
+            body     = f.get(MSG_FIELD)
+
+            if not from_num or not body:
                 continue
-            msg   = f.get(MSG_FIELD, "")
-            phone = f.get(FROM_FIELD)
-            if not phone:
-                continue
 
-            intent, _ = classify_reply(msg)
-            send_message(phone, REPLIES[intent])
+            print(f"🤖 Processing inbound from {from_num}: {body}")
 
-            convos.update(r["id"], {
-                STATUS_FIELD: "PROCESSED",
-                INTENT_FIELD: intent,
-                "processed_at": datetime.now(timezone.utc).isoformat(),
-                PROCESSED_BY_FIELD: PROCESSED_BY_LABEL,
-            })
+            # 1. Generate reply (placeholder AI logic for now)
+            reply_text = f"Thanks for your message: {body}"
 
-            if intent == "OPTOUT" and optouts:
-                optouts.create({
-                    "Phone": phone,
-                    "Source": "Inbound SMS",
-                    "Opt-Out Date": datetime.now(timezone.utc).isoformat(),
+            # 2. Send reply
+            send_result = send_message(to_num, from_num, reply_text)
+
+            # 3. Lead linking + activity
+            lead_id = find_or_create_lead(from_num, source="Autoresponder")
+            if lead_id:
+                update_lead_activity(lead_id, reply_text, "OUT")
+
+            # 4. Log outbound to Conversations
+            payload = {
+                FROM_FIELD: to_num,
+                TO_FIELD: from_num,
+                MSG_FIELD: reply_text,
+                STATUS_FIELD: "SENT",
+                DIR_FIELD: "OUT",
+                TG_ID_FIELD: send_result.get("sid"),
+                SENT_AT: iso_timestamp(),
+                PROCESSED_BY: os.getenv("PROCESSED_BY_LABEL", "Autoresponder")
+            }
+            if lead_id:
+                payload["lead_id"] = [lead_id]
+
+            try:
+                convos.create(payload)
+                processed += 1
+                breakdown["replied"] = breakdown.get("replied", 0) + 1
+            except Exception as log_err:
+                print(f"⚠️ Failed to log AI reply: {log_err}")
+
+            # 5. Mark inbound as processed
+            try:
+                convos.update(msg_id, {
+                    STATUS_FIELD: "RESPONDED",
+                    PROCESSED_BY: os.getenv("PROCESSED_BY_LABEL", "Autoresponder"),
+                    "processed_at": iso_timestamp(),
+                    INTENT_FIELD: "auto_reply"
                 })
+            except Exception as mark_err:
+                print(f"⚠️ Failed to update inbound row: {mark_err}")
 
-            processed += 1
-            breakdown[intent] += 1
-            print(f"🤖 Replied → {phone}: {intent}")
+    except Exception as e:
+        print("❌ Autoresponder error:")
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}
 
-        except Exception as e:
-            print(f"❌ Error processing {r.get('id')}: {e}")
-            continue
-
-    print(f"📊 Autoresponder finished — processed {processed} | {breakdown}")
-    return {"processed": processed, "breakdown": breakdown}
+    return {"ok": True, "processed": processed, "breakdown": breakdown}

@@ -10,6 +10,8 @@ from sms.autoresponder import run_autoresponder
 from sms.quota_reset import reset_daily_quotas
 from sms.metrics_tracker import update_metrics
 from sms.inbound_webhook import router as inbound_router
+from sms.kpi_aggregator import aggregate_kpis
+from sms.retry_runner import run_retry   # ✅ added retry runner
 
 # --- Load environment variables from project root ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,10 +67,10 @@ def log_env_config():
 # --- Health ---
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
-# --- Outbound Batch Endpoint ---
+# --- Outbound Batch ---
 @app.post("/send")
 async def send_endpoint(
     x_cron_token: str | None = Header(None),
@@ -76,6 +78,7 @@ async def send_endpoint(
 ):
     check_token(x_cron_token)
     result = send_batch()
+
     runs, kpis = get_perf_tables()
     if runs:
         try:
@@ -99,7 +102,7 @@ async def send_endpoint(
     return result
 
 
-# --- Autoresponder Endpoint ---
+# --- Autoresponder ---
 @app.post("/autoresponder")
 async def autoresponder_endpoint(
     limit: int = 50,
@@ -210,3 +213,28 @@ async def reset_quotas_endpoint(x_cron_token: str | None = Header(None)):
             print("⚠️ Failed to log quota reset")
             traceback.print_exc()
     return result
+
+
+# --- Metrics ---
+@app.post("/metrics")
+async def metrics_endpoint(x_cron_token: str | None = Header(None)):
+    check_token(x_cron_token)
+    return update_metrics()
+
+
+# --- Retry Worker ---
+@app.post("/retry")
+async def retry_endpoint(
+    limit: int = 100,
+    view: str | None = None,
+    x_cron_token: str | None = Header(None)
+):
+    check_token(x_cron_token)
+    return run_retry(limit=limit, view=view)
+
+
+# --- KPI Aggregator ---
+@app.post("/aggregate-kpis")
+async def aggregate_kpis_endpoint(x_cron_token: str | None = Header(None)):
+    check_token(x_cron_token)
+    return aggregate_kpis()

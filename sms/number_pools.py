@@ -1,114 +1,119 @@
 import os
+import random
 from datetime import datetime, timezone
 from pyairtable import Table
 
 # --- Airtable Setup ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
-NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
-
-# Field names (configurable to avoid UNKNOWN_FIELD_NAME)
-FIELD_NUMBER    = os.getenv("NUMBERS_FIELD_NUMBER", "Number")
-FIELD_MARKET    = os.getenv("NUMBERS_FIELD_MARKET", "Market")
-FIELD_LAST_USED = os.getenv("NUMBERS_FIELD_LAST_USED", "Last Used")
-FIELD_COUNT     = os.getenv("NUMBERS_FIELD_COUNT", "Count")
-FIELD_REMAINING = os.getenv("NUMBERS_FIELD_REMAINING", "Remaining")
+CONTROL_BASE     = os.getenv("CAMPAIGN_CONTROL_BASE")
+NUMBERS_TABLE    = os.getenv("NUMBERS_TABLE", "Numbers")
 
 if not AIRTABLE_API_KEY or not CONTROL_BASE:
     raise RuntimeError("⚠️ Missing Airtable config for Numbers table")
 
 numbers_tbl = Table(AIRTABLE_API_KEY, CONTROL_BASE, NUMBERS_TABLE)
 
-# --- Static Pools (fallback) ---
-MARKET_NUMBERS = {
-    "houston": ["+17135551234", "+12815552345", "+18325553456", "+13465554567"],
-    "phoenix": ["+16025551234", "+14805552345", "+16235553456"],
-    "tampa":   ["+18135551234", "+17275552345", "+18135553456"],
-}
+# --- Field Names ---
+FIELD_NUMBER          = "Number"
+FIELD_MARKET          = "Market"
+FIELD_LAST_USED       = "Last Used"
 
-rotation_index = {m: 0 for m in MARKET_NUMBERS}
-quota_tracker = {}
+FIELD_SENT_TODAY      = "Sent Today"
+FIELD_DELIVERED_TODAY = "Delivered Today"
+FIELD_FAILED_TODAY    = "Failed Today"
+FIELD_OPTOUTS_TODAY   = "Opt-Outs Today"
+
+FIELD_SENT_TOTAL      = "Sent Total"
+FIELD_DELIVERED_TOTAL = "Delivered Total"
+FIELD_FAILED_TOTAL    = "Failed Total"
+FIELD_OPTOUTS_TOTAL   = "Opt-Outs Total"
+
+FIELD_REMAINING       = "Remaining"
+
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "750"))
 
 # --- Helpers ---
 def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
-def _reset_if_new_day(number: str, market: str):
+def _reset_daily_if_needed(record: dict) -> dict:
+    """Reset today's counters if Last Used != today."""
     today = _today()
-    if number not in quota_tracker or quota_tracker[number]["date"] != today:
-        quota_tracker[number] = {"date": today, "count": 0}
+    last_used = record["fields"].get(FIELD_LAST_USED)
+    if not last_used or last_used[:10] != today:
+        updates = {
+            FIELD_SENT_TODAY: 0,
+            FIELD_DELIVERED_TODAY: 0,
+            FIELD_FAILED_TODAY: 0,
+            FIELD_OPTOUTS_TODAY: 0,
+            FIELD_LAST_USED: today,
+            FIELD_REMAINING: DAILY_LIMIT,
+        }
+        numbers_tbl.update(record["id"], updates)
+        record["fields"].update(updates)
+    return record
 
-    try:
-        formula = (
-            f"AND({{{FIELD_NUMBER}}}='{number}', "
-            f"DATETIME_FORMAT({{{FIELD_LAST_USED}}}, 'YYYY-MM-DD')='{today}')"
-        )
-        records = numbers_tbl.all(formula=formula)
-        if records:
-            rec = records[0]
-            count = rec["fields"].get(FIELD_COUNT, 0)
-            quota_tracker[number]["count"] = count
-            remaining = DAILY_LIMIT - count
-            numbers_tbl.update(rec["id"], {FIELD_REMAINING: remaining})
-        else:
-            rec = numbers_tbl.create({
-                FIELD_NUMBER: number,
-                FIELD_MARKET: market,
-                FIELD_LAST_USED: today,
-                FIELD_COUNT: 0,
-                FIELD_REMAINING: DAILY_LIMIT,
-            })
-            quota_tracker[number]["count"] = 0
-    except Exception as e:
-        print(f"⚠️ Failed to sync Airtable for {number}: {e}")
+def _increment_field(record_id: str, field: str, total_field: str, inc: int = 1):
+    """Increment daily + total counters for a given field."""
+    rec = numbers_tbl.get(record_id)
+    rec = _reset_daily_if_needed(rec)
 
-def _update_airtable_count(number: str):
-    today = quota_tracker[number]["date"]
-    count = quota_tracker[number]["count"]
-    remaining = DAILY_LIMIT - count
-    try:
-        formula = (
-            f"AND({{{FIELD_NUMBER}}}='{number}', "
-            f"DATETIME_FORMAT({{{FIELD_LAST_USED}}}, 'YYYY-MM-DD')='{today}')"
-        )
-        recs = numbers_tbl.all(formula=formula)
-        if recs:
-            numbers_tbl.update(recs[0]["id"], {FIELD_COUNT: count, FIELD_REMAINING: remaining})
-        else:
-            # Fallback: re-create if Airtable row missing
-            numbers_tbl.create({
-                FIELD_NUMBER: number,
-                FIELD_MARKET: "UNKNOWN",
-                FIELD_LAST_USED: today,
-                FIELD_COUNT: count,
-                FIELD_REMAINING: remaining,
-            })
-    except Exception as e:
-        print(f"⚠️ Failed to update Airtable for {number}: {e}")
+    daily_val = rec["fields"].get(field, 0) + inc
+    total_val = rec["fields"].get(total_field, 0) + inc
 
-# --- Public API ---
-def get_next_number(market: str) -> dict:
-    """Rotate numbers for a market, enforce quotas, sync to Airtable."""
-    m = market.lower()
-    numbers = MARKET_NUMBERS.get(m)
-    if not numbers:
-        raise ValueError(f"🚨 No number pool for market: {market}")
+    updates = {field: daily_val, total_field: total_val}
+    if field == FIELD_SENT_TODAY:
+        updates[FIELD_REMAINING] = max(0, DAILY_LIMIT - daily_val)
+        updates[FIELD_LAST_USED] = _today()
 
-    for _ in range(len(numbers)):
-        idx = rotation_index[m]
-        number = numbers[idx]
-        rotation_index[m] = (idx + 1) % len(numbers)
+    numbers_tbl.update(record_id, updates)
 
-        _reset_if_new_day(number, m)
+def _find_record(number: str) -> dict:
+    """Find Airtable record by phone number."""
+    recs = numbers_tbl.all(formula=f"{{{FIELD_NUMBER}}}='{number}'")
+    if not recs:
+        raise RuntimeError(f"🚨 Number {number} not found in Airtable")
+    return recs[0]
 
-        if quota_tracker[number]["count"] < DAILY_LIMIT:
-            quota_tracker[number]["count"] += 1
-            _update_airtable_count(number)
+# --- Public Increment APIs ---
+def increment_sent(number: str):      _increment_field(_find_record(number)["id"], FIELD_SENT_TODAY, FIELD_SENT_TOTAL)
+def increment_delivered(number: str): _increment_field(_find_record(number)["id"], FIELD_DELIVERED_TODAY, FIELD_DELIVERED_TOTAL)
+def increment_failed(number: str):    _increment_field(_find_record(number)["id"], FIELD_FAILED_TODAY, FIELD_FAILED_TOTAL)
+def increment_opt_out(number: str):   _increment_field(_find_record(number)["id"], FIELD_OPTOUTS_TODAY, FIELD_OPTOUTS_TOTAL)
 
-            count = quota_tracker[number]["count"]
-            remaining = DAILY_LIMIT - count
-            print(f"📞 {m.upper()} → {number} | Used {count}/{DAILY_LIMIT}, Remaining {remaining}")
-            return {"market": m, "number": number, "count": count, "remaining": remaining}
+# --- Rotation Logic ---
+def get_from_number(market: str) -> str:
+    """Select the healthiest number for a given market."""
+    # Normalize case and allow flexible match
+    formula = f"SEARCH(LOWER('{market}'), LOWER({{{FIELD_MARKET}}}))"
 
-    raise RuntimeError(f"🚨 All numbers in {market} hit quota ({DAILY_LIMIT})")
+    recs = numbers_tbl.all(formula=formula)
+    if not recs:
+        raise RuntimeError(f"🚨 No numbers found for market '{market}'")
+
+    # Reset counters if needed
+    recs = [_reset_daily_if_needed(r) for r in recs]
+
+    # Only include numbers under quota
+    available = [r for r in recs if r["fields"].get(FIELD_REMAINING, DAILY_LIMIT) > 0]
+    if not available:
+        raise RuntimeError(f"🚨 All numbers in {market} exhausted or at daily limit")
+
+    # Pick the one with most remaining quota
+    available.sort(key=lambda r: r["fields"].get(FIELD_REMAINING, 0), reverse=True)
+    return available[0]["fields"][FIELD_NUMBER]
+
+    # Reset counters if needed
+    recs = [_reset_daily_if_needed(r) for r in recs]
+
+    # Filter out exhausted numbers
+    available = [r for r in recs if r["fields"].get(FIELD_REMAINING, DAILY_LIMIT) > 0]
+
+    if not available:
+        raise RuntimeError(f"🚨 All numbers in {market} hit daily limit ({DAILY_LIMIT})")
+
+    # Pick least used today (random tie-break)
+    available.sort(key=lambda r: r["fields"].get(FIELD_SENT_TODAY, 0))
+    choice = random.choice([r for r in available if r["fields"].get(FIELD_SENT_TODAY, 0) == available[0]["fields"].get(FIELD_SENT_TODAY, 0)])
+
+    return choice["fields"][FIELD_NUMBER]

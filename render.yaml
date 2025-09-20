@@ -14,9 +14,9 @@ services:
         sync: false
       - key: AIRTABLE_PERFORMANCE_BASE_ID
         sync: false
-      - key: TEXTGRID_API_KEY
+      - key: TEXTGRID_ACCOUNT_SID
         sync: false
-      - key: TEXTGRID_CAMPAIGN_ID
+      - key: TEXTGRID_AUTH_TOKEN
         sync: false
       - key: CRON_TOKEN
         sync: false
@@ -26,49 +26,72 @@ cronjobs:
   - name: send-batch-1
     schedule: "0 15 * * *" # 10 AM CST
     command: |
-      curl -X POST "https://rei-sms-engine.onrender.com/send" \
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/send" \
         -H "x-cron-token: $CRON_TOKEN"
 
   - name: send-batch-2
     schedule: "0 19 * * *" # 2 PM CST
     command: |
-      curl -X POST "https://rei-sms-engine.onrender.com/send" \
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/send" \
         -H "x-cron-token: $CRON_TOKEN"
 
   - name: send-batch-3
     schedule: "0 23 * * *" # 6 PM CST
     command: |
-      curl -X POST "https://rei-sms-engine.onrender.com/send" \
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/send" \
         -H "x-cron-token: $CRON_TOKEN"
 
   # 🔄 Autoresponder (always on, every 10 min)
   - name: run-autoresponder
     schedule: "*/10 * * * *"
     command: |
-      curl -X POST "https://rei-sms-engine.onrender.com/autoresponder" \
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/autoresponder" \
         -H "x-cron-token: $CRON_TOKEN"
 
-  # Update metrics every 30 minutes
+  # 📊 Update metrics every 30 minutes
   - name: update-metrics
-    schedule: "*/30 * * * *" # every 30 minutes
+    schedule: "*/30 * * * *"
     command: |
-      curl -X POST https://rei-sms-engine.onrender.com/metrics \
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/metrics" \
         -H "x-cron-token: $CRON_TOKEN"
 
-    # 🔄 Retry runner — every 30 minutes
-  - type: cron
-    name: sms-retry-runner
+  # 🔁 Retry runner — every 30 minutes
+  - name: sms-retry-runner
     schedule: "*/30 * * * *"
-    env: python
-    buildCommand: ""
-    startCommand: >
-      curl -sS -X POST
-      -H "X-Cron-Token: $CRON_TOKEN"
-      https://rei-sms-engine.onrender.com/retry
+    command: |
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/retry" \
+        -H "x-cron-token: $CRON_TOKEN"
 
-cronjobs:
+  # 🌙 Reset quotas — nightly at midnight UTC
   - name: reset-daily-quotas
-    schedule: "0 0 * * *" # midnight UTC (adjust if you want a different local time)
+    schedule: "0 0 * * *"
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/reset-quotas" \
         -H "x-cron-token: $CRON_TOKEN"
+
+  # ❤️ Health ping — every 5 minutes to keep service warm
+  - name: health-ping
+    schedule: "*/5 * * * *"
+    command: |
+      curl -sS "https://rei-sms-engine.onrender.com/health"
+
+  # 📈 KPI Aggregation 
+  - name: aggregate-kpis-daily
+    schedule: "0 1 * * *" # every day at 1 AM UTC
+    command: |
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  - name: aggregate-kpis-weekly
+    schedule: "0 2 * * 1" # every Monday at 2 AM UTC
+    command: |
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  - name: aggregate-kpis-monthly
+    schedule: "0 3 1 * *" # first of the month at 3 AM UTC
+    command: |
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  
