@@ -6,3 +6,4 @@ requests==2.32.3
 python-dotenv==1.0.1
 selenium==4.24.0
 webdriver-manager==4.0.2
+python-multipart==0.0.5
