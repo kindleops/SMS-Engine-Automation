@@ -31,12 +31,12 @@ leads  = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE) if AIRTABLE_API
 # --- Base URL (TextGrid API) ---
 BASE_URL = f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
 
-
 # --- Helpers ---
 def iso_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 def find_or_create_lead(phone_number: str, source: str = "Outbound"):
+    """Ensure every outbound is tied to a Lead record."""
     if not leads or not phone_number:
         return None
     try:
@@ -46,7 +46,11 @@ def find_or_create_lead(phone_number: str, source: str = "Outbound"):
         new_lead = leads.create({
             "phone": phone_number,
             "Lead Status": "New",
-            "Source": source
+            "Source": source,
+            "Reply Count": 0,
+            "Sent Count": 0,
+            "Delivered Count": 0,
+            "Failed Count": 0
         })
         print(f"✨ Created new Lead for {phone_number}")
         return new_lead["id"]
@@ -55,17 +59,20 @@ def find_or_create_lead(phone_number: str, source: str = "Outbound"):
     return None
 
 def update_lead_activity(lead_id: str, body: str, direction: str):
+    """Update activity tracking fields on Lead record."""
     if not leads or not lead_id:
         return
     try:
-        leads.update(lead_id, {
+        updates = {
             "Last Activity": iso_timestamp(),
             "Last Direction": direction,
             "Last Message": body[:500] if body else ""
-        })
+        }
+        if direction == "OUT":
+            updates["Last Outbound"] = iso_timestamp()
+        leads.update(lead_id, updates)
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")
-
 
 # --- Send Message ---
 def send_message(to: str, body: str, from_number: str | None = None, market: str | None = None, retries: int = 3) -> dict:
@@ -113,7 +120,7 @@ def send_message(to: str, body: str, from_number: str | None = None, market: str
                     PROCESSED_BY: "TextGrid Sender"
                 }
                 if lead_id:
-                    record["lead_id"] = [lead_id]
+                    record["Lead"] = [lead_id]   # ✅ correct link field name
 
                 try:
                     convos.create(record)

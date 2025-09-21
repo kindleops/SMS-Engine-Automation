@@ -22,6 +22,7 @@ STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
 DIR_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
 TG_ID_FIELD  = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
 RECEIVED_AT  = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
+SENT_AT      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
 
 # Airtable clients
@@ -34,7 +35,6 @@ def iso_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 def find_or_create_lead(phone_number: str, source: str = "Inbound"):
-    """Ensure every inbound is tied to a Lead record."""
     if not leads or not phone_number:
         return None
     try:
@@ -54,7 +54,6 @@ def find_or_create_lead(phone_number: str, source: str = "Inbound"):
     return None
 
 def update_lead_activity(lead_id: str, body: str, direction: str, reply_increment: bool = False):
-    """Update activity tracking fields on Lead record."""
     if not leads or not lead_id:
         return
     try:
@@ -67,7 +66,10 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
         }
         if reply_increment:
             updates["Reply Count"] = reply_count + 1
-            updates["Last Inbound"] = body
+            updates["Last Inbound"] = iso_timestamp()
+        if direction == "OUT":
+            updates["Last Outbound"] = iso_timestamp()
+
         leads.update(lead_id, updates)
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")
@@ -88,10 +90,8 @@ async def inbound_handler(request: Request):
 
         print(f"📥 Inbound SMS from {from_number}: {body}")
 
-        # Ensure lead exists
         lead_id = find_or_create_lead(from_number)
 
-        # Log inbound in Conversations
         if convos:
             payload = {
                 FROM_FIELD: from_number,
@@ -103,13 +103,12 @@ async def inbound_handler(request: Request):
                 RECEIVED_AT: iso_timestamp()
             }
             if lead_id:
-                payload["lead_id"] = [lead_id]
+                payload["Lead"] = [lead_id]
             try:
                 convos.create(payload)
             except Exception as log_err:
                 print(f"⚠️ Failed to log inbound SMS: {log_err}")
 
-        # Update lead reply count + activity
         if lead_id:
             update_lead_activity(lead_id, body, "IN", reply_increment=True)
 
@@ -147,7 +146,7 @@ async def optout_handler(request: Request):
                     PROCESSED_BY: "OptOut Handler"
                 }
                 if lead_id:
-                    payload["lead_id"] = [lead_id]
+                    payload["Lead"] = [lead_id]
                 try:
                     convos.create(payload)
                 except Exception as log_err:
@@ -196,14 +195,12 @@ async def status_handler(request: Request):
                     lead = results[0]
                     lead_id = lead["id"]
 
-                    sent_count      = lead["fields"].get("Sent Count", 0)
                     delivered_count = lead["fields"].get("Delivered Count", 0)
                     failed_count    = lead["fields"].get("Failed Count", 0)
 
                     updates = {
                         "Last Activity": iso_timestamp(),
-                        "Last Delivery Status": status.upper(),
-                        "Sent Count": sent_count + 1
+                        "Last Delivery Status": status.upper()
                     }
                     if status == "delivered":
                         updates["Delivered Count"] = delivered_count + 1
