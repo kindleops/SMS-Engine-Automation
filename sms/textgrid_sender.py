@@ -120,7 +120,7 @@ def send_message(to: str, body: str, from_number: str | None = None, market: str
                     PROCESSED_BY: "TextGrid Sender"
                 }
                 if lead_id:
-                    record["Lead"] = [lead_id]   # ✅ correct link field name
+                    record["lead_id"] = [lead_id]   # ✅ correct link field name
 
                 try:
                     convos.create(record)

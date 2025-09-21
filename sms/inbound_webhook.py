@@ -103,7 +103,7 @@ async def inbound_handler(request: Request):
                 RECEIVED_AT: iso_timestamp()
             }
             if lead_id:
-                payload["Lead"] = [lead_id]
+                payload["lead_id"] = [lead_id]
             try:
                 convos.create(payload)
             except Exception as log_err:
