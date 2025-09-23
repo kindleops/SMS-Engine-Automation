@@ -89,7 +89,7 @@ def pick_number(limit: int = 1):
 # -------------------------
 # Campaign Runner
 # -------------------------
-def run_campaign(campaign_id: str | None = None, limit: int = 500):
+def send_batch(campaign_id: str | None = None, limit: int = 500):
     """
     Run a campaign:
       - Finds scheduled campaign if no ID provided
