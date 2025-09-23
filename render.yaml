@@ -22,30 +22,18 @@ services:
         sync: false
 
 cronjobs:
-  # 🚀 Outbound batches (3x daily across campaigns)
-  - name: send-batch-1
-    schedule: "0 15 * * *" # 10 AM CST
-    command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/send" \
-        -H "x-cron-token: $CRON_TOKEN"
-
-  - name: send-batch-2
-    schedule: "0 19 * * *" # 2 PM CST
-    command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/send" \
-        -H "x-cron-token: $CRON_TOKEN"
-
-  - name: send-batch-3
-    schedule: "0 23 * * *" # 6 PM CST
-    command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/send" \
-        -H "x-cron-token: $CRON_TOKEN"
-
   # 🔄 Autoresponder (always on, every 10 min)
   - name: run-autoresponder
     schedule: "*/10 * * * *"
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/autoresponder" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  # 🚀 Campaign runner — checks Airtable for scheduled campaigns
+  - name: run-campaigns
+    schedule: "*/10 * * * *"   # every 10 minutes
+    command: |
+      curl -sS -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL" \
         -H "x-cron-token: $CRON_TOKEN"
 
   # 📊 Update metrics every 30 minutes
@@ -77,7 +65,7 @@ cronjobs:
 
   # 📈 KPI Aggregation 
   - name: aggregate-kpis-daily
-    schedule: "0 1 * * *" # every day at 1 AM UTC
+    schedule: "0 1 * * *" # daily at 1 AM UTC
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
         -H "x-cron-token: $CRON_TOKEN"
@@ -93,5 +81,4 @@ cronjobs:
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
         -H "x-cron-token: $CRON_TOKEN"
-
   

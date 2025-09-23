@@ -22,12 +22,17 @@ followup_wrong = [
     "Thanks for letting me know — I’ll remove this number from our list.",
 ]
 
+# --- Helper: Extract first name from full string ---
+def _get_first_name(full_name: str) -> str:
+    if not full_name:
+        return "there"
+    return full_name.strip().split(" ")[0]  # take first word only
+
 # --- Helper: Safe Formatter ---
 def _format_safe(template: str, fields: dict) -> str:
-    """Format with fallbacks if First/Address missing."""
     return template.format(
-        First=fields.get("First", "there"),
-        Address=fields.get("Address", "your property")
+        First=_get_first_name(fields.get("Phone 1 Name (Primary)") or fields.get("First")),
+        Address=fields.get("Property Address") or fields.get("Address", "your property")
     )
 
 # --- Registry ---
