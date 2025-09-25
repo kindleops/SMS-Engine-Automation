@@ -1,7 +1,6 @@
-import os, traceback
+import os, traceback, json
 from datetime import datetime, timezone
 from pyairtable import Table
-import json
 
 from sms.outbound_batcher import send_batch, format_template
 from sms.metrics_tracker import update_metrics
@@ -12,16 +11,16 @@ API_KEY = os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
 PERFORMANCE_BASE = os.getenv("PERFORMANCE_BASE")
 
-CAMPAIGNS_TABLE = "Campaigns"
-TEMPLATES_TABLE = "Templates"
-LEADS_TABLE = "Leads"
-DRIP_QUEUE_TABLE = "Drip Queue"
+CAMPAIGNS_TABLE   = "Campaigns"
+TEMPLATES_TABLE   = "Templates"
+PROSPECTS_TABLE   = "Prospects"      # 🔥 switched from Leads
+DRIP_QUEUE_TABLE  = "Drip Queue"
 
 # Airtable clients
-campaigns = Table(API_KEY, LEADS_CONVOS_BASE, CAMPAIGNS_TABLE)
-templates = Table(API_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE)
-leads_tbl = Table(API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE)
-drip = Table(API_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
+campaigns  = Table(API_KEY, LEADS_CONVOS_BASE, CAMPAIGNS_TABLE)
+templates  = Table(API_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE)
+prospects  = Table(API_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
+drip       = Table(API_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
 
 runs = Table(API_KEY, PERFORMANCE_BASE, "Runs/Logs") if PERFORMANCE_BASE else None
 kpis = Table(API_KEY, PERFORMANCE_BASE, "KPIs") if PERFORMANCE_BASE else None
@@ -34,15 +33,15 @@ def utcnow():
 def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
     """
     Auto-runs scheduled campaigns with full lifecycle:
-    - Queues leads into Drip Queue
-    - Runs outbound batch + retries
-    - Tracks KPIs + marks campaigns Completed
+    - Pulls prospects by view/segment
+    - Queues into Drip Queue with personalization
+    - Sends batch + retries failures
+    - Updates Campaigns + logs KPIs
+    - Marks Completed once all prospects processed
     """
-
     now = utcnow()
     now_iso = now.isoformat()
 
-    # Convert "ALL" → large int
     if isinstance(limit, str) and limit.upper() == "ALL":
         limit = 9999
 
@@ -69,7 +68,6 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
         if not start_dt or now < start_dt:
             continue
         if end_dt and now > end_dt:
-            # Mark expired campaigns as Completed
             try:
                 campaigns.update(cid, {"Status": "Completed", "Last Run At": now_iso})
             except Exception:
@@ -88,35 +86,35 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
             print(f"⚠️ Template {template_id} empty, skipping")
             continue
 
-        # --- Leads ---
+        # --- Prospects ---
         view = f.get("View/Segment")
         try:
-            lead_records = leads_tbl.all(view=view) if view else leads_tbl.all()
+            prospect_records = prospects.all(view=view) if view else prospects.all()
         except Exception:
             traceback.print_exc()
             continue
 
-        total_leads = len(lead_records)
+        total_prospects = len(prospect_records)
         queued = 0
 
-        # --- Queue Leads ---
-        for lead in lead_records:
-            lf = lead["fields"]
-            phone = lf.get("phone")
+        # --- Queue Prospects ---
+        for prospect in prospect_records:
+            pf = prospect["fields"]
+            phone = pf.get("phone")
             if not phone:
                 continue
 
-            personalized_text = format_template(template_text, lf)
+            personalized_text = format_template(template_text, pf)
 
             try:
                 drip.create({
-                    "Leads": [lead["id"]],
+                    "Prospect": [prospect["id"]],
                     "Campaign": [cid],
                     "Template": [template_id],
                     "phone": phone,
                     "message_preview": personalized_text,
                     "status": "QUEUED",
-                    "from_number": None,  # TODO: integrate pick_number() if needed
+                    "from_number": None,  # can integrate pick_number() here
                     "next_send_date": now_iso
                 })
                 queued += 1
@@ -137,15 +135,15 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
 
         # --- Progress ---
         sent_so_far = f.get("Messages Sent", 0) + batch_result.get("total_sent", 0) + retry_result.get("retried", 0)
-        completed = sent_so_far >= total_leads
+        completed = sent_so_far >= total_prospects
 
         # --- Update Campaign ---
         try:
             campaigns.update(cid, {
                 "Status": "Completed" if completed else "Running",
-                "Queued Leads": queued,
+                "Queued Prospects": queued,
                 "Messages Sent": sent_so_far,
-                "Completion %": round(sent_so_far / total_leads * 100, 2) if total_leads else 0,
+                "Completion %": round(sent_so_far / total_prospects * 100, 2) if total_prospects else 0,
                 "Last Run Result": json.dumps({
                     "Queued": queued,
                     "Sent": batch_result.get("total_sent", 0),
