@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timezone
 from pyairtable import Table
 from sms.textgrid_sender import send_message
-from sms.utils.retry_handler import handle_retry
+from sms.retry_handler import handle_retry
 
 # --- Airtable Config ---
 AIRTABLE_API_KEY    = os.getenv("AIRTABLE_API_KEY")
