@@ -1,18 +1,18 @@
-import os
-import random
-import traceback
+# sms/autoresponder.py
+import os, random, traceback
 from datetime import datetime, timezone
 from pyairtable import Table
-
 from sms.textgrid_sender import send_message
+from sms.message_processor import MessageProcessor
 
 # --- ENV CONFIG ---
 AIRTABLE_API_KEY     = os.getenv("AIRTABLE_API_KEY")
 BASE_ID              = os.getenv("LEADS_CONVOS_BASE")
-CONVERSATIONS_TABLE  = "Conversations"
-LEADS_TABLE          = "Leads"
-PROSPECTS_TABLE      = "Prospects"
-TEMPLATES_TABLE      = "Templates"
+
+CONVERSATIONS_TABLE  = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+LEADS_TABLE          = os.getenv("LEADS_TABLE", "Leads")
+PROSPECTS_TABLE      = os.getenv("PROSPECTS_TABLE", "Prospects")
+TEMPLATES_TABLE      = os.getenv("TEMPLATES_TABLE", "Templates")
 
 # --- Airtable clients ---
 convos     = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE)
@@ -20,43 +20,48 @@ leads      = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE)
 prospects  = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE)
 templates  = Table(AIRTABLE_API_KEY, BASE_ID, TEMPLATES_TABLE)
 
-# -----------------
-# Configurable Field Mapping
-# -----------------
-FIELD_MAP = {
-    "phone": "phone",
-    "Owner Name": "Owner Name",
-    "Address": "Address",
-    "Market": "Market",
-    "Sync Source": "Synced From",
-    "List": "Source List",          # e.g. “Houston TX Tax Delinquent”
-    "Property Type": "Property Type"
-    # Add more here as needed → {"Prospects field": "Leads field"}
-}
 
-
-def iso_timestamp():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+# -----------------
+# Helpers
+# -----------------
+def iso_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # -----------------
 # Promote Prospects → Leads
 # -----------------
+FIELD_MAP = {
+    "phone": "phone",
+    "Property ID": "Property ID",   # 🔑 keep property linkage
+    "Owner Name": "Owner Name",
+    "Address": "Address",
+    "Market": "Market",
+    "Sync Source": "Synced From",
+    "List": "Source List",
+    "Property Type": "Property Type"
+}
+
 def promote_to_lead(phone_number: str, source: str = "Autoresponder"):
+    """Ensure a phone has a Lead record, pulling from Prospects if needed."""
     if not phone_number:
-        return None
+        return None, None
     try:
         existing = leads.all(formula=f"{{phone}}='{phone_number}'")
         if existing:
-            return existing[0]["id"]
+            lead = existing[0]
+            return lead["id"], lead["fields"].get("Property ID")
 
-        # Try pulling from Prospects
+        # Pull from Prospects
         prospect_match = prospects.all(formula=f"{{phone}}='{phone_number}'")
-        fields = {}
+        fields, property_id = {}, None
         if prospect_match:
             p_fields = prospect_match[0]["fields"]
-            fields = {leads_col: p_fields.get(prospects_col) 
-                      for prospects_col, leads_col in FIELD_MAP.items()}
+            fields = {
+                leads_col: p_fields.get(prospects_col)
+                for prospects_col, leads_col in FIELD_MAP.items()
+            }
+            property_id = p_fields.get("Property ID")
 
         new_lead = leads.create({
             **fields,
@@ -65,13 +70,14 @@ def promote_to_lead(phone_number: str, source: str = "Autoresponder"):
             "Source": source
         })
         print(f"✨ Promoted {phone_number} → Lead")
-        return new_lead["id"]
+        return new_lead["id"], property_id
     except Exception as e:
         print(f"⚠️ Lead promotion failed for {phone_number}: {e}")
-        return None
+        return None, None
 
 
 def update_lead_activity(lead_id: str, body: str, direction: str):
+    """Update last activity fields on Lead record."""
     if not lead_id:
         return
     try:
@@ -87,7 +93,8 @@ def update_lead_activity(lead_id: str, body: str, direction: str):
 # -----------------
 # Templates
 # -----------------
-def get_template(intent: str, fields: dict) -> tuple[str, str]:
+def get_template(intent: str, fields: dict) -> tuple[str, str | None]:
+    """Fetch + personalize template by intent key."""
     try:
         results = templates.all(formula=f"{{Internal ID}}='{intent}'")
         if not results:
@@ -132,8 +139,8 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
         for r in rows:
             f = r.get("fields", {})
             msg_id   = r.get("id")
-            from_num = f.get("phone")
-            to_num   = f.get("to_number")
+            from_num = f.get("phone")       # customer number
+            to_num   = f.get("to_number")   # our number
             body     = f.get("message")
 
             if not from_num or not body:
@@ -141,40 +148,27 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
 
             print(f"🤖 Processing inbound from {from_num}: {body}")
 
-            # 1. Classify + template
+            # 1. Classify intent + fetch template
             intent = classify_intent(body)
             reply_text, template_id = get_template(intent, f)
 
-            # 2. Send reply
-            send_result = send_message(to_num, reply_text, from_number=None)
+            # 2. Promote → Lead
+            lead_id, property_id = promote_to_lead(from_num, source="Autoresponder")
 
-            # 3. Promote → Lead
-            lead_id = promote_to_lead(from_num, source="Autoresponder")
-            if lead_id:
-                update_lead_activity(lead_id, reply_text, "OUT")
+            # 3. Send reply via unified processor
+            send_result = MessageProcessor.send(
+                phone=from_num,
+                body=reply_text,
+                lead_id=lead_id,
+                property_id=property_id,
+                direction="OUT"
+            )
 
-            # 4. Log outbound
-            payload = {
-                "phone": to_num,
-                "to_number": from_num,
-                "message": reply_text,
-                "status": "SENT",
-                "direction": "OUT",
-                "TextGrid ID": send_result.get("sid"),
-                "sent_at": iso_timestamp(),
-                "processed_by": "Autoresponder"
-            }
-            if lead_id:
-                payload["lead_id"] = [lead_id]
-
-            try:
-                convos.create(payload)
+            if send_result["status"] == "sent":
                 processed += 1
                 breakdown[intent] = breakdown.get(intent, 0) + 1
-            except Exception as log_err:
-                print(f"⚠️ Failed to log AI reply: {log_err}")
 
-            # 5. Mark inbound processed
+            # 4. Mark inbound as processed
             try:
                 convos.update(msg_id, {
                     "status": "RESPONDED",

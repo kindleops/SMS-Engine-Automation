@@ -101,6 +101,7 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
         for prospect in prospect_records:
             pf = prospect["fields"]
             phone = pf.get("phone")
+            property_id = pf.get("Property ID")  # 🔑 capture linkage
             if not phone:
                 continue
 
@@ -115,7 +116,8 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
                     "message_preview": personalized_text,
                     "status": "QUEUED",
                     "from_number": None,  # can integrate pick_number() here
-                    "next_send_date": now_iso
+                    "next_send_date": now_iso,
+                    "Property ID": property_id  # 🔗 pass property into drip
                 })
                 queued += 1
             except Exception as e:

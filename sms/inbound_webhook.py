@@ -9,10 +9,12 @@ from sms.number_pools import increment_delivered, increment_failed, increment_op
 router = APIRouter()
 
 # --- ENV CONFIG ---
-AIRTABLE_API_KEY     = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE    = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-CONVERSATIONS_TABLE  = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE          = os.getenv("LEADS_TABLE", "Leads")
+AIRTABLE_API_KEY  = os.getenv("AIRTABLE_API_KEY")
+BASE_ID           = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+LEADS_TABLE         = os.getenv("LEADS_TABLE", "Leads")
+PROSPECTS_TABLE     = os.getenv("PROSPECTS_TABLE", "Prospects")
 
 # --- Field Mappings ---
 FROM_FIELD   = os.getenv("CONV_FROM_FIELD", "phone")
@@ -26,34 +28,66 @@ SENT_AT      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
 
 # Airtable clients
-convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY and LEADS_CONVOS_BASE else None
-leads  = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE) if AIRTABLE_API_KEY and LEADS_CONVOS_BASE else None
+convos    = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
+leads     = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE) if AIRTABLE_API_KEY else None
+prospects = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KEY else None
 
+# --- Field mapping (Prospects → Leads) ---
+FIELD_MAP = {
+    "phone": "phone",
+    "Property ID": "Property ID",   # 🔑 join key
+    "Owner Name": "Owner Name",
+    "Address": "Address",
+    "Market": "Market",
+    "Sync Source": "Synced From",
+    "List": "Source List",
+    "Property Type": "Property Type"
+}
 
 # --- Helpers ---
 def iso_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-def find_or_create_lead(phone_number: str, source: str = "Inbound"):
-    if not leads or not phone_number:
-        return None
+
+def promote_prospect_to_lead(phone_number: str, source="Inbound"):
+    """Promote Prospects → Leads, carrying Property ID forward."""
+    if not phone_number:
+        return None, None
     try:
-        results = leads.all(formula=f"{{phone}}='{phone_number}'")
-        if results:
-            return results[0]["id"]
+        # Already a Lead?
+        existing = leads.all(formula=f"{{phone}}='{phone_number}'")
+        if existing:
+            lead = existing[0]
+            return lead["id"], lead["fields"].get("Property ID")
+
+        # Prospect match?
+        fields, property_id = {}, None
+        prospect = prospects.all(formula=f"{{phone}}='{phone_number}'") if prospects else []
+        if prospect:
+            p_fields = prospect[0]["fields"]
+            fields = {leads_col: p_fields.get(prospects_col)
+                      for prospects_col, leads_col in FIELD_MAP.items()}
+            property_id = p_fields.get("Property ID")
+
+        # Create new Lead
         new_lead = leads.create({
+            **fields,
             "phone": phone_number,
             "Lead Status": "New",
             "Source": source,
-            "Reply Count": 0
+            "Reply Count": 0,
+            "Last Inbound": iso_timestamp()
         })
-        print(f"✨ Created new Lead for {phone_number}")
-        return new_lead["id"]
+        print(f"✨ Promoted {phone_number} → Lead")
+        return new_lead["id"], property_id
+
     except Exception as e:
-        print(f"⚠️ Lead lookup/create failed for {phone_number}: {e}")
-    return None
+        print(f"⚠️ Prospect promotion failed for {phone_number}: {e}")
+    return None, None
+
 
 def update_lead_activity(lead_id: str, body: str, direction: str, reply_increment: bool = False):
+    """Update activity metrics for Leads."""
     if not leads or not lead_id:
         return
     try:
@@ -62,7 +96,7 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
         updates = {
             "Last Activity": iso_timestamp(),
             "Last Direction": direction,
-            "Last Message": body[:500] if body else ""
+            "Last Message": (body or "")[:500]
         }
         if reply_increment:
             updates["Reply Count"] = reply_count + 1
@@ -73,6 +107,16 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
         leads.update(lead_id, updates)
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")
+
+
+def log_conversation(payload: dict):
+    """Wrapper for safe logging into Conversations table."""
+    if not convos:
+        return
+    try:
+        convos.create(payload)
+    except Exception as log_err:
+        print(f"⚠️ Failed to log to Conversations: {log_err}")
 
 
 # --- Inbound SMS ---
@@ -90,24 +134,23 @@ async def inbound_handler(request: Request):
 
         print(f"📥 Inbound SMS from {from_number}: {body}")
 
-        lead_id = find_or_create_lead(from_number)
+        lead_id, property_id = promote_prospect_to_lead(from_number)
 
-        if convos:
-            payload = {
-                FROM_FIELD: from_number,
-                TO_FIELD: to_number,
-                MSG_FIELD: body,
-                STATUS_FIELD: "UNPROCESSED",
-                DIR_FIELD: "IN",
-                TG_ID_FIELD: msg_id,
-                RECEIVED_AT: iso_timestamp()
-            }
-            if lead_id:
-                payload["lead_id"] = [lead_id]
-            try:
-                convos.create(payload)
-            except Exception as log_err:
-                print(f"⚠️ Failed to log inbound SMS: {log_err}")
+        payload = {
+            FROM_FIELD: from_number,
+            TO_FIELD: to_number,
+            MSG_FIELD: body,
+            STATUS_FIELD: "UNPROCESSED",
+            DIR_FIELD: "IN",
+            TG_ID_FIELD: msg_id,
+            RECEIVED_AT: iso_timestamp()
+        }
+        if lead_id:
+            payload["lead_id"] = [lead_id]
+        if property_id:
+            payload["Property ID"] = property_id
+
+        log_conversation(payload)
 
         if lead_id:
             update_lead_activity(lead_id, body, "IN", reply_increment=True)
@@ -132,25 +175,24 @@ async def optout_handler(request: Request):
             print(f"🚫 Opt-out from {from_number}")
             increment_opt_out(from_number)
 
-            lead_id = find_or_create_lead(from_number, source="Opt-Out")
+            lead_id, property_id = promote_prospect_to_lead(from_number, source="Opt-Out")
             if lead_id:
                 update_lead_activity(lead_id, body, "IN")
 
-            if convos:
-                payload = {
-                    FROM_FIELD: from_number,
-                    MSG_FIELD: body,
-                    STATUS_FIELD: "OPTOUT",
-                    DIR_FIELD: "IN",
-                    RECEIVED_AT: iso_timestamp(),
-                    PROCESSED_BY: "OptOut Handler"
-                }
-                if lead_id:
-                    payload["Lead"] = [lead_id]
-                try:
-                    convos.create(payload)
-                except Exception as log_err:
-                    print(f"⚠️ Failed to log opt-out: {log_err}")
+            payload = {
+                FROM_FIELD: from_number,
+                MSG_FIELD: body,
+                STATUS_FIELD: "OPTOUT",
+                DIR_FIELD: "IN",
+                RECEIVED_AT: iso_timestamp(),
+                PROCESSED_BY: "OptOut Handler"
+            }
+            if lead_id:
+                payload["lead_id"] = [lead_id]
+            if property_id:
+                payload["Property ID"] = property_id
+
+            log_conversation(payload)
 
         return {"ok": True}
 
@@ -187,7 +229,7 @@ async def status_handler(request: Request):
             except Exception as log_err:
                 print(f"⚠️ Failed to update delivery status in Conversations: {log_err}")
 
-        # Update lead record counters
+        # Update lead metrics
         if leads and to:
             try:
                 results = leads.all(formula=f"{{phone}}='{to}'")

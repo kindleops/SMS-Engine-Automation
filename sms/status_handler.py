@@ -1,44 +1,66 @@
+# sms/status_handler.py
 import os
 from fastapi import APIRouter, Request
 from pyairtable import Table
 
-# Airtable Templates table
+router = APIRouter()
+
+# --- Airtable Config ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 BASE_ID          = os.getenv("LEADS_CONVOS_BASE")
 TEMPLATES_TABLE  = os.getenv("TEMPLATES_TABLE", "Templates")
 
-templates = Table(AIRTABLE_API_KEY, BASE_ID, TEMPLATES_TABLE)
+templates = None
+if AIRTABLE_API_KEY and BASE_ID:
+    try:
+        templates = Table(AIRTABLE_API_KEY, BASE_ID, TEMPLATES_TABLE)
+    except Exception as e:
+        print(f"⚠️ Failed to init Templates table: {e}")
+else:
+    print("⚠️ No Airtable config detected → using MOCK Templates table")
 
-router = APIRouter()
-
-# --- KPI Logger (shared with autoresponder) ---
+# --- KPI Logger ---
 def log_template_kpi(template_id: str, event: str):
-    if not template_id:
+    """Increment KPI counters on a template record."""
+    if not template_id or not templates:
+        print(f"[MOCK] log_template_kpi({template_id}, {event})")
         return
+
     updates = {}
     if event == "delivered":
         updates["Delivered"] = {"increment": 1}
     elif event == "failed":
         updates["Failed Deliveries"] = {"increment": 1}
-    try:
-        templates.update(template_id, updates)
-    except Exception as e:
-        print(f"⚠️ Failed to update delivery KPI: {e}")
 
+    if updates:
+        try:
+            templates.update(template_id, updates)
+            print(f"📊 Template {template_id} KPI updated → {event}")
+        except Exception as e:
+            print(f"⚠️ Failed to update delivery KPI: {e}")
 
 # --- Delivery Status Endpoint ---
 @router.post("/status")
 async def delivery_status(req: Request):
     """
-    Webhook from TextGrid / carrier.
-    Should include: sid, status, template_id
+    Webhook from TextGrid/carrier.
+    Expected payload:
+      {
+        "sid": "SM123...",
+        "status": "delivered|failed|undeliverable",
+        "template_id": "recXXXX..."
+      }
     """
-    data = await req.json()
+    try:
+        data = await req.json()
+    except Exception:
+        data = {}
+
     sid         = data.get("sid")
-    status      = data.get("status", "").lower()
+    status      = (data.get("status") or "").lower()
     template_id = data.get("template_id")
 
-    print(f"📡 Delivery status update for {sid}: {status}")
+    print(f"📡 Delivery status update for {sid or 'unknown SID'} → {status or 'unknown'}")
 
     if "delivered" in status:
         log_template_kpi(template_id, "delivered")

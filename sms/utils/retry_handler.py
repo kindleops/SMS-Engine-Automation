@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Literal, Optional
 from pyairtable import Table
 
 # --- Airtable Setup ---
@@ -19,20 +20,36 @@ RETRY_AFTER_FIELD  = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
 LAST_ERROR_FIELD   = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
 LAST_RETRY_AT      = os.getenv("CONV_LAST_RETRY_AT_FIELD", "last_retry_at")
 
-def handle_retry(record_id: str, error: str, max_retries: int = 3, cooldown_minutes: int = 30):
+
+def handle_retry(
+    record_id: str,
+    error: str,
+    max_retries: int = 3,
+    cooldown_minutes: int = 30
+) -> Literal["NEEDS_RETRY", "GAVE_UP", "ERROR"]:
     """
-    Mark a conversation record for retry.
-    - Increments retry_count
-    - Logs error + timestamp
-    - Sets retry_after with cooldown
-    - Marks GAVE_UP if max_retries exceeded
+    Mark a conversation record for retry in Airtable.
+
+    Effects:
+    - Increments `retry_count`
+    - Updates `last_retry_error` + `last_retry_at`
+    - Sets `retry_after` to now + cooldown if under max_retries
+    - Sets `status` to NEEDS_RETRY or GAVE_UP
     """
     try:
         rec = convos.get(record_id)
-        f = rec.get("fields", {})
+        if not rec:
+            print(f"⚠️ RetryHandler → Record {record_id} not found")
+            return "ERROR"
 
-        retries = (f.get(RETRY_COUNT_FIELD) or 0) + 1
-        status = "RETRY" if retries < max_retries else "GAVE_UP"
+        fields = rec.get("fields", {})
+        retries = (fields.get(RETRY_COUNT_FIELD) or 0) + 1
+        status: Literal["NEEDS_RETRY", "GAVE_UP"]
+
+        if retries < max_retries:
+            status = "NEEDS_RETRY"
+        else:
+            status = "GAVE_UP"
 
         updates = {
             STATUS_FIELD: status,
@@ -41,7 +58,7 @@ def handle_retry(record_id: str, error: str, max_retries: int = 3, cooldown_minu
             LAST_RETRY_AT: datetime.now(timezone.utc).isoformat()
         }
 
-        if status == "RETRY":
+        if status == "NEEDS_RETRY":
             updates[RETRY_AFTER_FIELD] = (
                 datetime.now(timezone.utc) + timedelta(minutes=cooldown_minutes)
             ).isoformat()

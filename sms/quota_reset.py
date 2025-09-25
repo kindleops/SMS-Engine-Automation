@@ -1,3 +1,4 @@
+# sms/reset_daily_quotas.py
 import os
 from datetime import datetime, timezone
 from pyairtable import Table
@@ -10,7 +11,7 @@ NUMBERS_TABLE    = os.getenv("NUMBERS_TABLE", "Numbers")
 
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "750"))
 
-# --- Fields ---
+# --- Field Names ---
 FIELD_NUMBER          = "Number"
 FIELD_LAST_USED       = "Last Used"
 FIELD_SENT_TODAY      = "Sent Today"
@@ -20,10 +21,10 @@ FIELD_OPTOUTS_TODAY   = "Opt-Outs Today"
 FIELD_REMAINING       = "Remaining"
 
 # --- Helpers ---
-def _today():
+def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
-def _init_table():
+def _init_table() -> Table | None:
     if not (AIRTABLE_API_KEY and CONTROL_BASE):
         print("⚠️ Missing Airtable env for Numbers table")
         return None
@@ -52,6 +53,7 @@ def reset_daily_quotas():
     try:
         rows = tbl.all()
         for r in rows:
+            number = r.get("fields", {}).get(FIELD_NUMBER, "UNKNOWN")
             try:
                 tbl.update(r["id"], {
                     FIELD_SENT_TODAY: 0,
@@ -62,14 +64,20 @@ def reset_daily_quotas():
                     FIELD_LAST_USED: today,
                 })
                 updated += 1
+                print(f"🔄 Reset quota for {number}")
             except Exception as e:
-                errors.append({"number": r.get("fields", {}).get(FIELD_NUMBER), "error": str(e)})
-                print(f"❌ Failed to reset {r.get('fields', {}).get(FIELD_NUMBER)}: {e}")
+                err_msg = str(e)
+                errors.append({"number": number, "error": err_msg})
+                print(f"❌ Failed to reset {number}: {err_msg}")
                 traceback.print_exc()
 
+        print(f"✅ Reset complete | Date: {today} | Updated: {updated} | Errors: {len(errors)}")
         return {"ok": True, "date": today, "updated": updated, "errors": errors}
 
     except Exception as e:
         print("❌ Error in reset_daily_quotas:", e)
         traceback.print_exc()
         return {"ok": False, "error": str(e), "date": today, "updated": updated, "errors": errors}
+
+if __name__ == "__main__":
+    reset_daily_quotas()

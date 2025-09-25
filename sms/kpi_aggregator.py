@@ -1,12 +1,11 @@
 # sms/kpi_aggregator.py
 import os
+import traceback
 from datetime import datetime, timedelta, timezone
 from pyairtable import Table
-import traceback
-import calendar
 
 AIRTABLE_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-PERF_BASE = os.getenv("PERFORMANCE_BASE")
+PERF_BASE    = os.getenv("PERFORMANCE_BASE")
 
 def _get_tables():
     if not (AIRTABLE_KEY and PERF_BASE):
@@ -16,6 +15,19 @@ def _get_tables():
     except Exception:
         traceback.print_exc()
         return None
+
+
+def _parse_date(date_str: str):
+    """Handle both YYYY-MM-DD and ISO timestamps from Airtable."""
+    if not date_str:
+        return None
+    try:
+        if "T" in date_str:  # ISO timestamp
+            return datetime.fromisoformat(date_str.replace("Z", "+00:00")).date()
+        return datetime.fromisoformat(date_str).date()
+    except Exception:
+        return None
+
 
 def aggregate_kpis():
     """
@@ -33,21 +45,22 @@ def aggregate_kpis():
     start_month = today.replace(day=1)
 
     try:
-        rows = kpi_tbl.all()
+        rows = kpi_tbl.all(max_records=5000)  # safety limit
         daily_totals, weekly_totals, monthly_totals = {}, {}, {}
 
         for r in rows:
             f = r.get("fields", {})
             metric = f.get("Metric")
-            value = f.get("Value") or 0
-            date_str = f.get("Date")
-            if not (metric and date_str):
+            raw_val = f.get("Value")
+            date_obj = _parse_date(f.get("Date"))
+
+            if not (metric and date_obj):
                 continue
 
             try:
-                date_obj = datetime.fromisoformat(date_str).date()
+                value = int(raw_val) if isinstance(raw_val, (int, float, str)) else 0
             except Exception:
-                continue
+                value = 0
 
             # Daily
             if date_obj == today:
@@ -73,6 +86,7 @@ def aggregate_kpis():
                     "Timestamp": timestamp,
                 })
 
+        # Write aggregates
         _write_totals("DAILY_TOTAL", daily_totals)
         _write_totals("WEEKLY_TOTAL", weekly_totals)
         _write_totals("MONTHLY_TOTAL", monthly_totals)

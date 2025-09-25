@@ -2,9 +2,10 @@ import os
 import traceback
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query
 from pyairtable import Table
 
+# --- SMS Engine Modules ---
 from sms.outbound_batcher import send_batch
 from sms.autoresponder import run_autoresponder
 from sms.quota_reset import reset_daily_quotas
@@ -12,51 +13,54 @@ from sms.metrics_tracker import update_metrics
 from sms.inbound_webhook import router as inbound_router
 from sms.campaign_runner import run_campaigns
 from sms.kpi_aggregator import aggregate_kpis
-from sms.retry_runner import run_retry   # ✅ retry runner
+from sms.retry_runner import run_retry
+from sms.followup_flow import run_followups   # ✅ Follow-up flow
 
-# --- Load env ---
+# --- Load .env ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 # --- FastAPI app ---
-app = FastAPI()
+app = FastAPI(title="REI SMS Engine", version="1.0")
 app.include_router(inbound_router)
 
 # --- ENV CONFIG ---
 CRON_TOKEN = os.getenv("CRON_TOKEN")
 
-# Bases
 PERF_BASE = os.getenv("PERFORMANCE_BASE")
 PERF_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE")
-NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
-
-# Leads + Templates
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
 AIRTABLE_API_KEY  = os.getenv("AIRTABLE_API_KEY")
-TEMPLATES_TABLE   = os.getenv("TEMPLATES_TABLE", "Templates")
-LEADS_TABLE       = os.getenv("LEADS_TABLE", "Leads")
 
+# Airtable defaults
+TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
+LEADS_TABLE     = os.getenv("LEADS_TABLE", "Leads")
+
+# Airtable clients
 templates = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE) if AIRTABLE_API_KEY else None
 leads     = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE) if AIRTABLE_API_KEY else None
 
 
-# --- Airtable helpers ---
+# -------------------------
+# Helpers
+# -------------------------
 def get_perf_tables():
-    if not PERF_KEY or not PERF_BASE:
+    """Return Runs/Logs + KPIs tables if configured."""
+    if not (PERF_KEY and PERF_BASE):
         return None, None
     try:
         runs = Table(PERF_KEY, PERF_BASE, "Runs/Logs")
         kpis = Table(PERF_KEY, PERF_BASE, "KPIs")
         return runs, kpis
     except Exception:
-        print("⚠️ Failed to init Performance tables:")
+        print("⚠️ Failed to init Performance tables")
         traceback.print_exc()
         return None, None
 
 
 def check_token(x_cron_token: str | None):
+    """Verify CRON_TOKEN for secure endpoints."""
     if CRON_TOKEN and x_cron_token != CRON_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -65,43 +69,49 @@ def iso_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-# --- Template KPI Tracker ---
-def log_template_kpi(template_id: str | None, metric: str):
-    """Increment KPI counters on Templates table."""
-    if not templates or not template_id:
-        return
+def log_run(runs, step: str, result: dict):
+    """Write a record to Runs/Logs table for each step in /cron/all."""
     try:
-        row = templates.get(template_id)
-        fields = row.get("fields", {})
-        updates = {}
-
-        if metric == "sent":
-            updates["Sends"] = fields.get("Sends", 0) + 1
-        elif metric == "delivered":
-            updates["Delivered"] = fields.get("Delivered", 0) + 1
-        elif metric == "failed":
-            updates["Failed Deliveries"] = fields.get("Failed Deliveries", 0) + 1
-        elif metric == "replied":
-            updates["Replies"] = fields.get("Replies", 0) + 1
-
-        templates.update(template_id, updates)
-        print(f"📊 Updated template {template_id}: +1 {metric}")
-    except Exception as e:
-        print(f"⚠️ Failed to update template KPI {metric}: {e}")
+        return runs.create({
+            "Type": step,
+            "Processed": result.get("processed") or result.get("total_sent") or result.get("sent") or 0,
+            "Breakdown": str(result),
+            "Timestamp": iso_timestamp()
+        })
+    except Exception:
+        traceback.print_exc()
+        return None
 
 
-# --- Startup Debug ---
+def log_kpi(kpis, metric: str, value: int):
+    """Write a KPI row for /cron/all summary."""
+    try:
+        return kpis.create({
+            "Campaign": "ALL",
+            "Metric": metric,
+            "Value": value,
+            "Date": datetime.now(timezone.utc).date().isoformat()
+        })
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+# -------------------------
+# Startup Debug
+# -------------------------
 @app.on_event("startup")
 def log_env_config():
     print("✅ Environment loaded:")
-    print(f"   LEADS_CONVOS_BASE: {os.getenv('LEADS_CONVOS_BASE')}")
-    print(f"   CAMPAIGN_CONTROL_BASE: {os.getenv('CAMPAIGN_CONTROL_BASE')}")
-    print(f"   PERFORMANCE_BASE: {os.getenv('PERFORMANCE_BASE')}")
-    print(f"   NUMBERS_TABLE: {NUMBERS_TABLE}")
+    print(f"   LEADS_CONVOS_BASE: {LEADS_CONVOS_BASE}")
+    print(f"   PERFORMANCE_BASE: {PERF_BASE}")
     print(f"   CONVERSATIONS_TABLE: {os.getenv('CONVERSATIONS_TABLE', 'Conversations')}")
 
 
-# --- Health ---
+# -------------------------
+# Routes
+# -------------------------
+
 @app.get("/health")
 def health():
     return {"ok": True, "timestamp": datetime.now(timezone.utc).isoformat()}
@@ -111,35 +121,11 @@ def health():
 @app.post("/send")
 async def send_endpoint(
     x_cron_token: str | None = Header(None),
-    template: str = Query("intro", description="Which template to use"),
-    campaign: str = Query("ALL", description="Campaign label")
+    template: str = Query("intro"),
+    campaign: str = Query("ALL")
 ):
     check_token(x_cron_token)
-    result = send_batch(template=template, campaign=campaign)
-
-    runs, kpis = get_perf_tables()
-    if runs:
-        try:
-            run_record = runs.create({
-                "Type": "OUTBOUND",
-                "Processed": result.get("total_sent", 0),
-                "Breakdown": str(result.get("results", [])),
-                "Campaign": campaign,
-                "Template": template,
-                "Timestamp": iso_timestamp()
-            })
-            if kpis and result.get("total_sent", 0) > 0:
-                kpis.create({
-                    "Campaign": campaign,
-                    "Metric": "OUTBOUND_SENT",
-                    "Value": result.get("total_sent", 0),
-                    "Date": datetime.now(timezone.utc).date().isoformat()
-                })
-            result["run_id"] = run_record["id"]
-        except Exception:
-            print("⚠️ Failed to write to Performance base:")
-            traceback.print_exc()
-    return result
+    return send_batch(template=template, campaign=campaign)
 
 
 # --- Autoresponder ---
@@ -148,42 +134,20 @@ async def autoresponder_endpoint(
     limit: int = 50,
     view: str = "Unprocessed Inbounds",
     x_cron_token: str | None = Header(None),
-    campaign: str = Query("ALL", description="Campaign label")
+    campaign: str = Query("ALL")
 ):
     check_token(x_cron_token)
     os.environ["PROCESSED_BY_LABEL"] = "Autoresponder"
-    result = run_autoresponder(limit=limit, view=view)
-
-    runs, kpis = get_perf_tables()
-    if runs:
-        try:
-            run_record = runs.create({
-                "Type": "AUTORESPONDER",
-                "Processed": result.get("processed", 0),
-                "Breakdown": str(result.get("breakdown", {})),
-                "Campaign": campaign,
-                "Timestamp": iso_timestamp()
-            })
-            result["run_id"] = run_record["id"]
-
-            if kpis:
-                for intent, count in (result.get("breakdown") or {}).items():
-                    if count > 0:
-                        kpis.create({
-                            "Campaign": campaign,
-                            "Metric": intent,
-                            "Value": count,
-                            "Date": datetime.now(timezone.utc).date().isoformat()
-                        })
-        except Exception:
-            print("⚠️ Failed to write to Performance base:")
-            traceback.print_exc()
-    return result
+    return run_autoresponder(limit=limit, view=view)
 
 
 # --- AI Closer ---
 @app.post("/ai-closer")
-async def ai_closer_endpoint(limit: int = 50, view: str = "Unprocessed Inbounds", x_cron_token: str | None = Header(None)):
+async def ai_closer_endpoint(
+    limit: int = 50,
+    view: str = "Unprocessed Inbounds",
+    x_cron_token: str | None = Header(None)
+):
     check_token(x_cron_token)
     os.environ["PROCESSED_BY_LABEL"] = "AI Closer"
     return run_autoresponder(limit=limit, view=view)
@@ -191,41 +155,14 @@ async def ai_closer_endpoint(limit: int = 50, view: str = "Unprocessed Inbounds"
 
 # --- Manual QA ---
 @app.post("/manual-qa")
-async def manual_qa_endpoint(limit: int = 50, view: str = "Unprocessed Inbounds", x_cron_token: str | None = Header(None)):
+async def manual_qa_endpoint(
+    limit: int = 50,
+    view: str = "Unprocessed Inbounds",
+    x_cron_token: str | None = Header(None)
+):
     check_token(x_cron_token)
     os.environ["PROCESSED_BY_LABEL"] = "Manual QA"
     return run_autoresponder(limit=limit, view=view)
-
-
-# --- Delivery Status Webhook ---
-@app.post("/status")
-async def delivery_status(request: Request):
-    data = await request.json()
-    sid         = data.get("MessageSid") or data.get("sid")
-    status      = str(data.get("MessageStatus") or data.get("status", "")).lower()
-    template_id = data.get("template_id")
-    lead_id     = data.get("lead_id")
-
-    print(f"📡 Delivery status for {sid}: {status}")
-
-    if template_id:
-        if "delivered" in status:
-            log_template_kpi(template_id, "delivered")
-        elif "fail" in status or "undeliverable" in status:
-            log_template_kpi(template_id, "failed")
-
-    if lead_id and leads:
-        try:
-            updates = {"Last Delivery Status": status.upper()}
-            if "delivered" in status:
-                updates["Delivered Count"] = leads.get(lead_id)["fields"].get("Delivered Count", 0) + 1
-            elif "fail" in status:
-                updates["Failed Count"] = leads.get(lead_id)["fields"].get("Failed Count", 0) + 1
-            leads.update(lead_id, updates)
-        except Exception as e:
-            print(f"⚠️ Failed to update lead delivery metrics: {e}")
-
-    return {"ok": True, "sid": sid, "status": status}
 
 
 # --- Reset Quotas ---
@@ -259,27 +196,81 @@ async def aggregate_kpis_endpoint(x_cron_token: str | None = Header(None)):
 # --- Campaign Runner ---
 @app.post("/run-campaigns")
 async def run_campaigns_endpoint(
-    limit: str = Query("ALL", description="Number of campaigns to process, or ALL"),
+    limit: str = Query("ALL"),
     x_cron_token: str | None = Header(None)
 ):
     check_token(x_cron_token)
-
-    # Convert "ALL" → large int
     lim = 9999 if str(limit).upper() == "ALL" else int(limit)
+    return run_campaigns(limit=lim)
 
-    result = run_campaigns(limit=lim)
 
+# --- Full Cron Runner ---
+@app.post("/cron/all")
+async def cron_all_endpoint(
+    limit: int = 500,
+    x_cron_token: str | None = Header(None)
+):
+    """
+    Run the full SMS engine pipeline in sequence:
+      1. Outbound batcher
+      2. Autoresponder
+      3. Follow-ups
+      4. Metrics update
+      5. Retry worker
+      6. KPI aggregator
+      7. Campaign runner
+    Logs each step in Runs/Logs + KPI summary + DAILY_SUMMARY.
+    """
+    check_token(x_cron_token)
+    results = {}
     runs, kpis = get_perf_tables()
+    totals = {"processed": 0, "errors": 0}
+
+    steps = [
+        ("OUTBOUND", lambda: send_batch(limit=limit)),
+        ("AUTORESPONDER", lambda: run_autoresponder(limit=50, view="Unprocessed Inbounds")),
+        ("FOLLOWUPS", run_followups),
+        ("METRICS", update_metrics),
+        ("RETRY", lambda: run_retry(limit=100)),
+        ("AGGREGATE_KPIS", aggregate_kpis),
+        ("CAMPAIGN_RUNNER", lambda: run_campaigns(limit=9999)),
+    ]
+
+    for step, func in steps:
+        try:
+            result = func()
+            results[step.lower()] = result
+            if runs:
+                log_run(runs, step, result)
+
+            # accumulate totals
+            processed = result.get("processed") or result.get("total_sent") or result.get("sent") or 0
+            totals["processed"] += processed
+        except Exception as e:
+            err = str(e)
+            results[f"{step.lower()}_error"] = err
+            totals["errors"] += 1
+            print(f"❌ {step} failed: {err}")
+            if runs:
+                log_run(runs, step, {"error": err})
+
+    # --- KPI summary ---
+    if kpis:
+        log_kpi(kpis, "TOTAL_PROCESSED", totals["processed"])
+        log_kpi(kpis, "TOTAL_ERRORS", totals["errors"])
+
+    # --- DAILY_SUMMARY run log ---
     if runs:
         try:
-            run_record = runs.create({
-                "Type": "CAMPAIGN_RUNNER",
-                "Processed": result.get("processed", 0),
-                "Breakdown": str(result.get("results", [])),
-                "Timestamp": datetime.now(timezone.utc).isoformat()
+            runs.create({
+                "Type": "DAILY_SUMMARY",
+                "Processed": totals["processed"],
+                "Breakdown": str(results),
+                "Timestamp": iso_timestamp()
             })
-            result["run_id"] = run_record["id"]
+            print("📊 Logged DAILY_SUMMARY run")
         except Exception:
-            print("⚠️ Failed to log campaign runner")
             traceback.print_exc()
-    return result
+
+    print("✅ CRON ALL sequence completed")
+    return {"ok": True, "results": results, "totals": totals, "timestamp": iso_timestamp()}

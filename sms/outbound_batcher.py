@@ -1,3 +1,4 @@
+# sms/outbound_batcher.py
 import os
 import traceback
 from datetime import datetime, timezone
@@ -47,7 +48,6 @@ def ensure_today_rows():
     """Auto-reset daily quotas once per day across all numbers."""
     global _last_reset_date
     today = datetime.now(timezone.utc).date().isoformat()
-
     if _last_reset_date != today:
         print(f"⚡ Auto-resetting quotas for {today}")
         reset_daily_quotas()
@@ -59,9 +59,9 @@ def ensure_today_rows():
 # -------------------------
 def format_template(template: str, lead_fields: dict) -> str:
     """Safely format template with lead data."""
-    full_name = lead_fields.get("Owner Name", "")
+    full_name = lead_fields.get("Owner Name") or lead_fields.get("First") or ""
     first = full_name.split(" ")[0] if full_name else "there"
-    address = lead_fields.get("address") or lead_fields.get("Address") or "your property"
+    address = lead_fields.get("Address") or lead_fields.get("Property Address") or "your property"
 
     try:
         return template.format(First=first, Address=address)
@@ -123,7 +123,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     c_fields = campaign["fields"]
     campaign_name = c_fields.get("Name", "Unnamed")
     view = c_fields.get("View/Segment")
-    template_id = c_fields.get("Template", [None])[0]
+    template_id = (c_fields.get("Template") or [None])[0]
 
     print(f"🚀 Launching Campaign: {campaign_name}")
 
@@ -152,9 +152,9 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         # 4. Personalize message
         personalized_text = format_template(template_text, lf)
 
-        # 5. Add to Drip Queue
+        # 5. Queue into Drip Queue
         try:
-            drip.create({
+            drip_payload = {
                 "Leads": [lead["id"]],
                 "Campaign": [campaign["id"]],
                 "Template": [template_id],
@@ -162,9 +162,23 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
                 "message_preview": personalized_text,
                 "status": "QUEUED",
                 "from_number": from_number,
-                "next_send_date": now_iso
-            })
+                "next_send_date": now_iso,
+            }
+
+            # 🔗 Property linkage
+            property_id = lf.get("Property ID")
+            if property_id:
+                drip_payload["Property ID"] = property_id
+
+            record = drip.create(drip_payload)
             queued += 1
+
+            print(
+                f"📥 Queued → {phone} | "
+                f"Campaign: {campaign_name} | "
+                f"Property ID: {property_id or 'N/A'}"
+            )
+
         except Exception as e:
             print(f"❌ Failed to queue message for {phone}: {e}")
             traceback.print_exc()

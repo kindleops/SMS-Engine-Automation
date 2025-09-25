@@ -9,6 +9,7 @@ def get_table(api_key_env: str, base_id_env: str, table_name_env: str, default_t
     - base_id_env: ENV var for the Airtable base ID.
     - table_name_env: ENV var for the table name.
     - default_table: fallback name if env not set.
+
     Returns:
         pyairtable.Table or None if env is incomplete.
     """
@@ -25,6 +26,7 @@ def get_table(api_key_env: str, base_id_env: str, table_name_env: str, default_t
 
 
 # ── Shortcuts for common tables ──────────────────────────────
+
 def get_convos(table_name: str = "Conversations"):
     """Conversations table (Leads/Convos base)."""
     return get_table("AIRTABLE_ACQUISITIONS_KEY", "AIRTABLE_LEADS_CONVOS_BASE_ID",
@@ -35,6 +37,18 @@ def get_leads(table_name: str = "Leads"):
     """Leads table (Leads/Convos base)."""
     return get_table("AIRTABLE_ACQUISITIONS_KEY", "AIRTABLE_LEADS_CONVOS_BASE_ID",
                      "LEADS_TABLE", table_name)
+
+
+def get_prospects(table_name: str = "Prospects"):
+    """Prospects table (Leads/Convos base)."""
+    return get_table("AIRTABLE_ACQUISITIONS_KEY", "AIRTABLE_LEADS_CONVOS_BASE_ID",
+                     "PROSPECTS_TABLE", table_name)
+
+
+def get_drip(table_name: str = "Drip Queue"):
+    """Drip Queue table (Leads/Convos base)."""
+    return get_table("AIRTABLE_ACQUISITIONS_KEY", "AIRTABLE_LEADS_CONVOS_BASE_ID",
+                     "DRIP_TABLE", table_name)
 
 
 def get_campaigns(table_name: str = "Campaigns"):
