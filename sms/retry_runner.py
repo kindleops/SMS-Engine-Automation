@@ -1,22 +1,13 @@
 # sms/retry_runner.py
 import os
 from datetime import datetime, timedelta, timezone
-from pyairtable import Table
+from functools import lru_cache
 from sms.textgrid_sender import send_message
 
-# --- Airtable Config ---
-AIRTABLE_API_KEY    = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE   = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-
-convos = None
-if AIRTABLE_API_KEY and LEADS_CONVOS_BASE:
-    try:
-        convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
-    except Exception as e:
-        print(f"❌ RetryRunner: failed to init Conversations table: {e}")
-else:
-    print("⚠️ RetryRunner: No Airtable config → running in MOCK mode")
+try:
+    from pyairtable import Table
+except ImportError:
+    Table = None
 
 # --- Retry Config ---
 MAX_RETRIES          = int(os.getenv("MAX_RETRIES", "3"))
@@ -34,6 +25,24 @@ RETRIED_AT_FIELD      = os.getenv("CONV_RETRIED_AT_FIELD", "retried_at")
 LAST_ERROR_FIELD      = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
 PERM_FAIL_REASON      = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
 
+
+# --- Lazy Airtable Client ---
+@lru_cache(maxsize=1)
+def get_convos():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+    table   = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+
+    if api_key and base_id and Table:
+        try:
+            return Table(api_key, base_id, table)
+        except Exception as e:
+            print(f"❌ RetryRunner: failed to init Conversations table → {e}")
+            return None
+    print("⚠️ RetryRunner: No Airtable config → running in MOCK mode")
+    return None
+
+
 # --- Formula (OUT + failed + retryable) ---
 FORMULA = f"""
 AND(
@@ -44,21 +53,23 @@ AND(
 )
 """.strip()
 
+
 # --- Helpers ---
 def _backoff_delay(retry_count: int) -> timedelta:
-    """Exponential backoff: 30m, 60m, 120m..."""
     return timedelta(minutes=BASE_BACKOFF_MINUTES * (2 ** (retry_count - 1)))
 
+
 def _is_permanent_error(err: str) -> bool:
-    """Detect non-retryable carrier errors."""
     signals = [
         "invalid", "not a valid", "unreachable", "blacklisted",
         "blocked", "landline", "disconnected", "undeliverable"
     ]
     return any(sig in err.lower() for sig in signals)
 
+
 # --- Main ---
 def run_retry(limit: int = 100, view: str | None = None):
+    convos = get_convos()
     if not convos:
         print("⚠️ RetryRunner: Skipping because Airtable is not configured")
         return {"ok": False, "retried": 0, "failed": 0, "permanent": 0, "limit": limit}
@@ -77,7 +88,6 @@ def run_retry(limit: int = 100, view: str | None = None):
             continue
 
         try:
-            # Attempt resend
             send_message(phone, body)
             convos.update(r["id"], {
                 STATUS_FIELD: "SENT",
@@ -116,6 +126,7 @@ def run_retry(limit: int = 100, view: str | None = None):
 
     print(f"🔁 Retry runner done | ✅ Retried: {retried} | ❌ Fails: {failed} | 🚫 Permanent: {permanent}")
     return {"ok": True, "retried": retried, "failed": failed, "permanent": permanent, "limit": limit}
+
 
 if __name__ == "__main__":
     run_retry()

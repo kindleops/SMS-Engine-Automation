@@ -5,21 +5,23 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query
 from pyairtable import Table
 
-# --- SMS Engine Modules ---
-from sms.outbound_batcher import send_batch
-from sms.autoresponder import run_autoresponder
-from sms.quota_reset import reset_daily_quotas
-from sms.metrics_tracker import update_metrics
-from sms.inbound_webhook import router as inbound_router
-from sms.campaign_runner import run_campaigns
-from sms.kpi_aggregator import aggregate_kpis
-from sms.retry_runner import run_retry
-from sms.followup_flow import run_followups   # ✅ Follow-up flow
-
 # --- Load .env ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
 load_dotenv(dotenv_path=ENV_PATH, override=True)
+
+# --- SMS Engine Modules ---
+from sms.outbound_batcher import send_batch
+from sms.autoresponder import run_autoresponder
+from sms.quota_reset import reset_daily_quotas
+from sms.metrics_tracker import update_metrics, _notify
+from sms.inbound_webhook import router as inbound_router
+from sms.campaign_runner import run_campaigns
+from sms.kpi_aggregator import aggregate_kpis
+from sms.retry_runner import run_retry
+from sms.followup_flow import run_followups
+from sms.dispatcher import run_engine
+from sms.health_strict import strict_health   # ✅ moved out to its own module
 
 # --- FastAPI app ---
 app = FastAPI(title="REI SMS Engine", version="1.0")
@@ -46,7 +48,6 @@ leads     = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE) if AIRTABLE_
 # Helpers
 # -------------------------
 def get_perf_tables():
-    """Return Runs/Logs + KPIs tables if configured."""
     if not (PERF_KEY and PERF_BASE):
         return None, None
     try:
@@ -60,7 +61,6 @@ def get_perf_tables():
 
 
 def check_token(x_cron_token: str | None):
-    """Verify CRON_TOKEN for secure endpoints."""
     if CRON_TOKEN and x_cron_token != CRON_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -70,7 +70,6 @@ def iso_timestamp():
 
 
 def log_run(runs, step: str, result: dict):
-    """Write a record to Runs/Logs table for each step in /cron/all."""
     try:
         return runs.create({
             "Type": step,
@@ -84,7 +83,6 @@ def log_run(runs, step: str, result: dict):
 
 
 def log_kpi(kpis, metric: str, value: int):
-    """Write a KPI row for /cron/all summary."""
     try:
         return kpis.create({
             "Campaign": "ALL",
@@ -98,14 +96,51 @@ def log_kpi(kpis, metric: str, value: int):
 
 
 # -------------------------
-# Startup Debug
+# Startup Checks (merged)
 # -------------------------
+STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
+
 @app.on_event("startup")
-def log_env_config():
-    print("✅ Environment loaded:")
-    print(f"   LEADS_CONVOS_BASE: {LEADS_CONVOS_BASE}")
-    print(f"   PERFORMANCE_BASE: {PERF_BASE}")
-    print(f"   CONVERSATIONS_TABLE: {os.getenv('CONVERSATIONS_TABLE', 'Conversations')}")
+def startup_checks():
+    try:
+        print("✅ Environment loaded:")
+        print(f"   LEADS_CONVOS_BASE: {LEADS_CONVOS_BASE}")
+        print(f"   PERFORMANCE_BASE: {PERF_BASE}")
+        print(f"   CONVERSATIONS_TABLE: {os.getenv('CONVERSATIONS_TABLE', 'Conversations')}")
+        print(f"   STRICT_MODE: {STRICT_MODE}")
+
+        # Sanity check env vars
+        missing = []
+        for key in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"]:
+            if not os.getenv(key):
+                missing.append(key)
+
+        if missing:
+            msg = f"🚨 Missing env vars → {', '.join(missing)}"
+            print(msg)
+            _notify(msg)
+            if STRICT_MODE:
+                raise RuntimeError(msg)
+
+        # Airtable smoke test
+        if not templates or not leads:
+            msg = "🚨 Airtable tables not initialized"
+            print(msg)
+            _notify(msg)
+            if STRICT_MODE:
+                raise RuntimeError(msg)
+
+        print("✅ Startup checks passed")
+
+    except Exception as e:
+        err = f"❌ Startup exception: {e}"
+        print(err)
+        try:
+            _notify(err)
+        except:
+            pass
+        if STRICT_MODE:
+            raise
 
 
 # -------------------------
@@ -117,31 +152,33 @@ def health():
     return {"ok": True, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
-# --- Outbound Batch ---
+@app.get("/health/strict")
+def health_strict_endpoint(mode: str = Query("prospects", description="prospects | leads | inbounds")):
+    """Strict Airtable connectivity check."""
+    return strict_health(mode=mode)
+
+
 @app.post("/send")
 async def send_endpoint(
     x_cron_token: str | None = Header(None),
-    template: str = Query("intro"),
-    campaign: str = Query("ALL")
+    campaign_id: str = Query(None),
+    limit: int = Query(500)
 ):
     check_token(x_cron_token)
-    return send_batch(template=template, campaign=campaign)
+    return send_batch(campaign_id=campaign_id, limit=limit)
 
 
-# --- Autoresponder ---
 @app.post("/autoresponder")
 async def autoresponder_endpoint(
     limit: int = 50,
     view: str = "Unprocessed Inbounds",
     x_cron_token: str | None = Header(None),
-    campaign: str = Query("ALL")
 ):
     check_token(x_cron_token)
     os.environ["PROCESSED_BY_LABEL"] = "Autoresponder"
     return run_autoresponder(limit=limit, view=view)
 
 
-# --- AI Closer ---
 @app.post("/ai-closer")
 async def ai_closer_endpoint(
     limit: int = 50,
@@ -153,7 +190,6 @@ async def ai_closer_endpoint(
     return run_autoresponder(limit=limit, view=view)
 
 
-# --- Manual QA ---
 @app.post("/manual-qa")
 async def manual_qa_endpoint(
     limit: int = 50,
@@ -165,35 +201,30 @@ async def manual_qa_endpoint(
     return run_autoresponder(limit=limit, view=view)
 
 
-# --- Reset Quotas ---
 @app.post("/reset-quotas")
 async def reset_quotas_endpoint(x_cron_token: str | None = Header(None)):
     check_token(x_cron_token)
     return reset_daily_quotas()
 
 
-# --- Metrics ---
 @app.post("/metrics")
 async def metrics_endpoint(x_cron_token: str | None = Header(None)):
     check_token(x_cron_token)
     return update_metrics()
 
 
-# --- Retry Worker ---
 @app.post("/retry")
 async def retry_endpoint(limit: int = 100, view: str | None = None, x_cron_token: str | None = Header(None)):
     check_token(x_cron_token)
     return run_retry(limit=limit, view=view)
 
 
-# --- KPI Aggregator ---
 @app.post("/aggregate-kpis")
 async def aggregate_kpis_endpoint(x_cron_token: str | None = Header(None)):
     check_token(x_cron_token)
     return aggregate_kpis()
 
 
-# --- Campaign Runner ---
 @app.post("/run-campaigns")
 async def run_campaigns_endpoint(
     limit: str = Query("ALL"),
@@ -204,27 +235,30 @@ async def run_campaigns_endpoint(
     return run_campaigns(limit=lim)
 
 
-# --- Full Cron Runner ---
 @app.post("/cron/all")
 async def cron_all_endpoint(
     limit: int = 500,
     x_cron_token: str | None = Header(None)
 ):
-    """
-    Run the full SMS engine pipeline in sequence:
-      1. Outbound batcher
-      2. Autoresponder
-      3. Follow-ups
-      4. Metrics update
-      5. Retry worker
-      6. KPI aggregator
-      7. Campaign runner
-    Logs each step in Runs/Logs + KPI summary + DAILY_SUMMARY.
-    """
     check_token(x_cron_token)
     results = {}
     runs, kpis = get_perf_tables()
     totals = {"processed": 0, "errors": 0}
+
+    # Strict preflight for all modes
+    for mode in ["prospects", "leads", "inbounds"]:
+        health_result = strict_health(mode)
+        results[f"{mode}_health"] = health_result
+        if not health_result.get("ok"):
+            if runs:
+                log_run(runs, f"{mode.upper()}_HEALTH_FAIL", health_result)
+            return {
+                "ok": False,
+                "error": f"Health check failed for {mode}",
+                "results": results,
+                "totals": totals,
+                "timestamp": iso_timestamp()
+            }
 
     steps = [
         ("OUTBOUND", lambda: send_batch(limit=limit)),
@@ -242,24 +276,19 @@ async def cron_all_endpoint(
             results[step.lower()] = result
             if runs:
                 log_run(runs, step, result)
-
-            # accumulate totals
             processed = result.get("processed") or result.get("total_sent") or result.get("sent") or 0
             totals["processed"] += processed
         except Exception as e:
             err = str(e)
             results[f"{step.lower()}_error"] = err
             totals["errors"] += 1
-            print(f"❌ {step} failed: {err}")
             if runs:
                 log_run(runs, step, {"error": err})
 
-    # --- KPI summary ---
     if kpis:
         log_kpi(kpis, "TOTAL_PROCESSED", totals["processed"])
         log_kpi(kpis, "TOTAL_ERRORS", totals["errors"])
 
-    # --- DAILY_SUMMARY run log ---
     if runs:
         try:
             runs.create({
@@ -268,9 +297,25 @@ async def cron_all_endpoint(
                 "Breakdown": str(results),
                 "Timestamp": iso_timestamp()
             })
-            print("📊 Logged DAILY_SUMMARY run")
         except Exception:
             traceback.print_exc()
 
-    print("✅ CRON ALL sequence completed")
     return {"ok": True, "results": results, "totals": totals, "timestamp": iso_timestamp()}
+
+
+@app.get("/engine")
+def trigger_engine(
+    mode: str = Query(..., description="prospects | leads | inbounds"),
+    limit: int = 50,
+    retry_limit: int = 100
+):
+    valid_modes = {"prospects", "leads", "inbounds"}
+    if mode not in valid_modes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode '{mode}'. Must be one of {', '.join(valid_modes)}."
+        )
+
+    strict_health(mode)  # ✅ preflight check
+    result = run_engine(mode, limit=limit, retry_limit=retry_limit)
+    return {"ok": True, "mode": mode, "result": result}

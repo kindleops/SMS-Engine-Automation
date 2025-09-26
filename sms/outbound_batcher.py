@@ -106,7 +106,16 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     drip = get_table("LEADS_CONVOS_BASE", "Drip Queue")
 
     if not (campaigns and templates and leads_tbl and drip):
-        return {"ok": False, "error": "Missing Airtable tables"}
+        return {
+            "ok": False,
+            "type": "Prospect",
+            "error": "Missing Airtable tables",
+            "queued": 0,
+            "sent": 0,
+            "completed": False,
+            "retries": 0,
+            "errors": ["Missing Airtable tables"]
+        }
 
     # 1. Select campaign
     if campaign_id:
@@ -117,7 +126,16 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             formula=f"AND({{Status}}='Scheduled', IS_BEFORE({{Start Time}}, '{now_iso}'))"
         )
         if not eligible:
-            return {"ok": False, "error": "No eligible campaigns"}
+            return {
+                "ok": False,
+                "type": "Prospect",
+                "error": "No eligible campaigns",
+                "queued": 0,
+                "sent": 0,
+                "completed": False,
+                "retries": 0,
+                "errors": ["No eligible campaigns"]
+            }
         campaign = eligible[0]
 
     c_fields = campaign["fields"]
@@ -131,7 +149,16 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     template_row = templates.get(template_id) if template_id else None
     template_text = template_row["fields"].get("Message") if template_row else None
     if not template_text:
-        return {"ok": False, "error": "No template found"}
+        return {
+            "ok": False,
+            "type": "Prospect",
+            "error": "No template found",
+            "queued": 0,
+            "sent": 0,
+            "completed": False,
+            "retries": 0,
+            "errors": ["No template found"]
+        }
 
     # 3. Fetch leads
     lead_records = leads_tbl.all(view=view, max_records=limit) if view else leads_tbl.all(max_records=limit)
@@ -149,10 +176,8 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             print("⚠️ No numbers available with quota")
             break
 
-        # 4. Personalize message
         personalized_text = format_template(template_text, lf)
 
-        # 5. Queue into Drip Queue
         try:
             drip_payload = {
                 "Leads": [lead["id"]],
@@ -165,7 +190,6 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
                 "next_send_date": now_iso,
             }
 
-            # 🔗 Property linkage
             property_id = lf.get("Property ID")
             if property_id:
                 drip_payload["Property ID"] = property_id
@@ -174,9 +198,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             queued += 1
 
             print(
-                f"📥 Queued → {phone} | "
-                f"Campaign: {campaign_name} | "
-                f"Property ID: {property_id or 'N/A'}"
+                f"📥 Queued → {phone} | Campaign: {campaign_name} | Property ID: {property_id or 'N/A'}"
             )
 
         except Exception as e:
@@ -220,4 +242,14 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         print("⚠️ Failed to update campaign status")
         traceback.print_exc()
 
-    return {"ok": True, "campaign": campaign_name, "queued": queued}
+    # --- Standardized return schema ---
+    return {
+        "ok": True,
+        "campaign": campaign_name,
+        "type": "Prospect",
+        "queued": queued,
+        "sent": queued,
+        "completed": False,
+        "retries": 0,
+        "errors": []
+    }

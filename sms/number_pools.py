@@ -2,6 +2,7 @@
 import os
 import random
 from datetime import datetime, timezone
+from functools import lru_cache
 
 try:
     from pyairtable import Table
@@ -9,10 +10,7 @@ except ImportError:
     Table = None
 
 # --- Env Config ---
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-CONTROL_BASE     = os.getenv("CAMPAIGN_CONTROL_BASE")
-NUMBERS_TABLE    = os.getenv("NUMBERS_TABLE", "Numbers")
-DAILY_LIMIT      = int(os.getenv("DAILY_LIMIT", "750"))
+DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "750"))
 
 # --- Field Names ---
 FIELD_NUMBER          = "Number"
@@ -32,24 +30,32 @@ FIELD_OPTOUTS_TOTAL   = "Opt-Outs Total"
 FIELD_REMAINING       = "Remaining"
 
 
-# --- Helpers ---
 def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
-# --- Airtable Mode ---
-numbers_tbl = None
-if AIRTABLE_API_KEY and CONTROL_BASE and Table:
+# --- Lazy Airtable Client ---
+@lru_cache(maxsize=1)
+def get_numbers_tbl():
+    """Return Airtable Numbers table client, or None if not configured."""
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("CAMPAIGN_CONTROL_BASE")
+    table_name = os.getenv("NUMBERS_TABLE", "Numbers")
+
+    if not (api_key and base_id and Table):
+        print("⚠️ NumberPools: No Airtable config → using MOCK mode")
+        return None
     try:
-        numbers_tbl = Table(AIRTABLE_API_KEY, CONTROL_BASE, NUMBERS_TABLE)
+        return Table(api_key, base_id, table_name)
     except Exception as e:
         print(f"❌ NumberPools: failed to init Airtable table → {e}")
-else:
-    print("⚠️ NumberPools: No Airtable config → running in MOCK mode")
+        return None
 
 
 def _reset_daily_if_needed(record: dict) -> dict:
-    """Reset counters if Last Used != today (Airtable mode only)."""
+    tbl = get_numbers_tbl()
+    if not tbl:
+        return record
     today = _today()
     last_used = record["fields"].get(FIELD_LAST_USED)
     if not last_used or last_used[:10] != today:
@@ -61,17 +67,18 @@ def _reset_daily_if_needed(record: dict) -> dict:
             FIELD_LAST_USED: today,
             FIELD_REMAINING: DAILY_LIMIT,
         }
-        numbers_tbl.update(record["id"], updates)
+        tbl.update(record["id"], updates)
         record["fields"].update(updates)
     return record
 
 
 def _increment_field(record_id: str, field: str, total_field: str, inc: int = 1):
-    if not numbers_tbl:
+    tbl = get_numbers_tbl()
+    if not tbl:
         print(f"[MOCK] _increment_field({record_id}, {field}, {total_field}, +{inc})")
         return
 
-    rec = numbers_tbl.get(record_id)
+    rec = tbl.get(record_id)
     rec = _reset_daily_if_needed(rec)
 
     daily_val = rec["fields"].get(field, 0) + inc
@@ -82,14 +89,15 @@ def _increment_field(record_id: str, field: str, total_field: str, inc: int = 1)
         updates[FIELD_REMAINING] = max(0, DAILY_LIMIT - daily_val)
         updates[FIELD_LAST_USED] = _today()
 
-    numbers_tbl.update(record_id, updates)
+    tbl.update(record_id, updates)
 
 
 def _find_record(number: str) -> dict:
-    if not numbers_tbl:
+    tbl = get_numbers_tbl()
+    if not tbl:
         print(f"[MOCK] _find_record({number}) → returning fake record")
         return {"id": "mock_id", "fields": {FIELD_NUMBER: number}}
-    recs = numbers_tbl.all(formula=f"{{{FIELD_NUMBER}}}='{number}'")
+    recs = tbl.all(formula=f"{{{FIELD_NUMBER}}}='{number}'")
     if not recs:
         raise RuntimeError(f"🚨 Number {number} not found in Airtable")
     return recs[0]
@@ -104,14 +112,14 @@ def increment_opt_out(number: str):   _increment_field(_find_record(number)["id"
 
 # --- Rotation Logic ---
 def get_from_number(market: str) -> str:
-    """Select the healthiest number for a given market (quota-aware)."""
-    if not numbers_tbl:
+    tbl = get_numbers_tbl()
+    if not tbl:
         dummy = f"+1999999{random.randint(1000,9999)}"
         print(f"[MOCK] get_from_number({market}) → {dummy}")
         return dummy
 
     formula = f"SEARCH(LOWER('{market}'), LOWER({{{FIELD_MARKET}}}))"
-    recs = numbers_tbl.all(formula=formula)
+    recs = tbl.all(formula=formula)
     if not recs:
         raise RuntimeError(f"🚨 No numbers found for market '{market}'")
 

@@ -1,18 +1,13 @@
 # sms/metrics_tracker.py
 import os, json, traceback, requests
 from datetime import datetime, timezone, timedelta
-from pyairtable import Table
+from functools import lru_cache
 from sms.textgrid_sender import send_message
 
-# --- Airtable Config ---
-API_KEY          = os.getenv("AIRTABLE_API_KEY")
-PERF_BASE        = os.getenv("PERFORMANCE_BASE")
-LEADS_CONVOS_BASE= os.getenv("LEADS_CONVOS_BASE")
-CONTROL_BASE     = os.getenv("CAMPAIGN_CONTROL_BASE")
-
-CAMPAIGNS_TABLE      = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
-CONVERSATIONS_TABLE  = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-TEMPLATES_TABLE      = os.getenv("TEMPLATES_TABLE", "Templates")
+try:
+    from pyairtable import Table
+except ImportError:
+    Table = None
 
 # --- Alerts Config ---
 ALERT_PHONE         = os.getenv("ALERT_PHONE")
@@ -21,15 +16,39 @@ OPT_OUT_THRESHOLD   = float(os.getenv("OPT_OUT_ALERT_THRESHOLD", "2.5"))      # 
 DELIVERY_THRESHOLD  = float(os.getenv("DELIVERY_ALERT_THRESHOLD", "90"))      # %
 COOLDOWN_HOURS      = int(os.getenv("OPT_OUT_ALERT_COOLDOWN_HOURS", "24"))
 
-# --- Init Tables ---
-def _table(base, table):
-    return Table(API_KEY, base, table) if base and API_KEY else None
+# --- Lazy Airtable Table Factories ---
+@lru_cache(maxsize=None)
+def get_runs():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("PERFORMANCE_BASE")
+    return Table(api_key, base_id, "Runs/Logs") if api_key and base_id and Table else None
 
-runs      = _table(PERF_BASE, "Runs/Logs")
-kpis      = _table(PERF_BASE, "KPIs")
-campaigns = _table(CONTROL_BASE, CAMPAIGNS_TABLE)
-convos    = _table(LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
-templates = _table(LEADS_CONVOS_BASE, TEMPLATES_TABLE)
+@lru_cache(maxsize=None)
+def get_kpis():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("PERFORMANCE_BASE")
+    return Table(api_key, base_id, "KPIs") if api_key and base_id and Table else None
+
+@lru_cache(maxsize=None)
+def get_campaigns():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("CAMPAIGN_CONTROL_BASE")
+    table   = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+    return Table(api_key, base_id, table) if api_key and base_id and Table else None
+
+@lru_cache(maxsize=None)
+def get_convos():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE")
+    table   = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+    return Table(api_key, base_id, table) if api_key and base_id and Table else None
+
+@lru_cache(maxsize=None)
+def get_templates():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE")
+    table   = os.getenv("TEMPLATES_TABLE", "Templates")
+    return Table(api_key, base_id, table) if api_key and base_id and Table else None
 
 
 # -----------------------
@@ -73,6 +92,11 @@ def _notify(msg):
 # Metrics Update
 # -----------------------
 def update_metrics():
+    campaigns = get_campaigns()
+    convos    = get_convos()
+    runs      = get_runs()
+    kpis      = get_kpis()
+
     if not campaigns or not convos:
         return {"ok": False, "error": "Missing Airtable setup"}
 

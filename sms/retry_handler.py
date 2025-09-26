@@ -2,22 +2,12 @@
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Literal
-from pyairtable import Table
+from functools import lru_cache
 
-# --- Airtable Setup ---
-AIRTABLE_API_KEY    = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE   = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-
-convos = None
-if AIRTABLE_API_KEY and LEADS_CONVOS_BASE:
-    try:
-        convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
-    except Exception as e:
-        print(f"❌ RetryHandler: failed to init Conversations table: {e}")
-else:
-    print("⚠️ RetryHandler: No Airtable config → running in MOCK mode")
-
+try:
+    from pyairtable import Table
+except ImportError:
+    Table = None
 
 # --- Field Mapping (env-driven, with safe defaults) ---
 STATUS_FIELD       = os.getenv("CONV_STATUS_FIELD", "status")
@@ -25,6 +15,23 @@ RETRY_COUNT_FIELD  = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
 RETRY_AFTER_FIELD  = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
 LAST_ERROR_FIELD   = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
 LAST_RETRY_AT      = os.getenv("CONV_LAST_RETRY_AT_FIELD", "last_retry_at")
+
+
+# --- Lazy Airtable Client ---
+@lru_cache(maxsize=1)
+def get_convos():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+    table   = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+
+    if api_key and base_id and Table:
+        try:
+            return Table(api_key, base_id, table)
+        except Exception as e:
+            print(f"❌ RetryHandler: failed to init Conversations table → {e}")
+            return None
+    print("⚠️ RetryHandler: No Airtable config → running in MOCK mode")
+    return None
 
 
 def handle_retry(
@@ -43,6 +50,7 @@ def handle_retry(
     - Sets `status` to NEEDS_RETRY or GAVE_UP
     - If Airtable is not configured → logs + returns "MOCK"
     """
+    convos = get_convos()
     if not convos:
         print(f"[MOCK] RetryHandler → would retry record={record_id}, error={error}")
         return "MOCK"
@@ -57,10 +65,7 @@ def handle_retry(
         retries = (fields.get(RETRY_COUNT_FIELD) or 0) + 1
 
         status: Literal["NEEDS_RETRY", "GAVE_UP"]
-        if retries < max_retries:
-            status = "NEEDS_RETRY"
-        else:
-            status = "GAVE_UP"
+        status = "NEEDS_RETRY" if retries < max_retries else "GAVE_UP"
 
         updates = {
             STATUS_FIELD: status,

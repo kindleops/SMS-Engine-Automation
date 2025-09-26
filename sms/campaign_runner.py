@@ -1,39 +1,70 @@
 # sms/campaign_runner.py
 import os, traceback, json
 from datetime import datetime, timezone
-from pyairtable import Table
+from functools import lru_cache
 
 from sms.outbound_batcher import send_batch, format_template
 from sms.metrics_tracker import update_metrics
 from sms.retry_runner import run_retry   # 🔁 retry handler
 
-# --- Airtable Config ---
-API_KEY = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
-PERFORMANCE_BASE = os.getenv("PERFORMANCE_BASE")
+try:
+    from pyairtable import Table
+except ImportError:
+    Table = None
 
+# --- Airtable Tables ---
 CAMPAIGNS_TABLE   = "Campaigns"
 TEMPLATES_TABLE   = "Templates"
-PROSPECTS_TABLE   = "Prospects"      # 🔥 switched from Leads
+PROSPECTS_TABLE   = "Prospects"      # 🔥 Prospect-level outreach
 DRIP_QUEUE_TABLE  = "Drip Queue"
 
-# --- Airtable clients (safe init) ---
-campaigns = templates = prospects = drip = None
-runs = kpis = None
 
-if API_KEY and LEADS_CONVOS_BASE:
-    try:
-        campaigns  = Table(API_KEY, LEADS_CONVOS_BASE, CAMPAIGNS_TABLE)
-        templates  = Table(API_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE)
-        prospects  = Table(API_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
-        drip       = Table(API_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
-        if PERFORMANCE_BASE:
-            runs = Table(API_KEY, PERFORMANCE_BASE, "Runs/Logs")
-            kpis = Table(API_KEY, PERFORMANCE_BASE, "KPIs")
-    except Exception as e:
-        print(f"❌ CampaignRunner: failed to init Airtable tables: {e}")
-else:
-    print("⚠️ CampaignRunner: No Airtable config → running in MOCK mode")
+# --- Lazy Airtable Clients ---
+@lru_cache(maxsize=None)
+def get_campaigns():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE")
+    if api_key and base_id and Table:
+        try:
+            return Table(api_key, base_id, CAMPAIGNS_TABLE)
+        except Exception as e:
+            print(f"❌ CampaignRunner: failed to init Campaigns table: {e}")
+    return None
+
+
+@lru_cache(maxsize=None)
+def get_templates():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE")
+    return Table(api_key, base_id, TEMPLATES_TABLE) if api_key and base_id and Table else None
+
+
+@lru_cache(maxsize=None)
+def get_prospects():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE")
+    return Table(api_key, base_id, PROSPECTS_TABLE) if api_key and base_id and Table else None
+
+
+@lru_cache(maxsize=None)
+def get_drip():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE")
+    return Table(api_key, base_id, DRIP_QUEUE_TABLE) if api_key and base_id and Table else None
+
+
+@lru_cache(maxsize=None)
+def get_runs():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    perf_base = os.getenv("PERFORMANCE_BASE")
+    return Table(api_key, perf_base, "Runs/Logs") if api_key and perf_base and Table else None
+
+
+@lru_cache(maxsize=None)
+def get_kpis():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    perf_base = os.getenv("PERFORMANCE_BASE")
+    return Table(api_key, perf_base, "KPIs") if api_key and perf_base and Table else None
 
 
 # --- Helpers ---
@@ -44,16 +75,29 @@ def utcnow():
 # --- Main Runner ---
 def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
     """
-    Auto-runs scheduled campaigns with full lifecycle:
+    Auto-runs scheduled Prospect campaigns with full lifecycle:
     - Pulls prospects by view/segment
     - Queues into Drip Queue with personalization
     - Sends batch + retries failures
     - Updates Campaigns + logs KPIs
     - Marks Completed once all prospects processed
     """
-    if not campaigns or not templates or not prospects or not drip:
+    campaigns = get_campaigns()
+    templates = get_templates()
+    prospects = get_prospects()
+    drip      = get_drip()
+    runs      = get_runs()
+    kpis      = get_kpis()
+
+    if not (campaigns and templates and prospects and drip):
         print("⚠️ CampaignRunner: MOCK mode → skipping real Airtable ops")
-        return {"ok": True, "processed": 0, "results": []}
+        return {
+            "ok": False,
+            "type": "Prospect",
+            "processed": 0,
+            "results": [],
+            "errors": ["Missing Airtable tables"]
+        }
 
     now = utcnow()
     now_iso = now.isoformat()
@@ -65,7 +109,13 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
         scheduled = campaigns.all(formula="{Status}='Scheduled'")
     except Exception:
         traceback.print_exc()
-        return {"ok": False, "error": "Failed to fetch campaigns"}
+        return {
+            "ok": False,
+            "type": "Prospect",
+            "processed": 0,
+            "results": [],
+            "errors": ["Failed to fetch campaigns"]
+        }
 
     processed, results = 0, []
 
@@ -117,7 +167,7 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
         for prospect in prospect_records:
             pf = prospect["fields"]
             phone = pf.get("phone")
-            property_id = pf.get("Property ID")  # 🔑 capture linkage
+            property_id = pf.get("Property ID")
             if not phone:
                 continue
 
@@ -131,9 +181,9 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
                     "phone": phone,
                     "message_preview": personalized_text,
                     "status": "QUEUED",
-                    "from_number": None,  # can integrate pick_number() here
+                    "from_number": None,  # 🔄 TODO: integrate number pooling
                     "next_send_date": now_iso,
-                    "Property ID": property_id  # 🔗 pass property into drip
+                    "Property ID": property_id
                 })
                 queued += 1
             except Exception as e:
@@ -215,4 +265,11 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
     except Exception:
         traceback.print_exc()
 
-    return {"ok": True, "processed": processed, "results": results}
+    # --- Standardized return ---
+    return {
+        "ok": True,
+        "type": "Prospect",
+        "processed": processed,
+        "results": results,
+        "errors": []
+    }

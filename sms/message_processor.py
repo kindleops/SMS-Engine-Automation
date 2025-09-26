@@ -1,6 +1,7 @@
 # sms/message_processor.py
 import os
 from datetime import datetime, timezone
+from functools import lru_cache
 
 try:
     from pyairtable import Table
@@ -10,14 +11,6 @@ except ImportError:
 from sms.textgrid_sender import send_message
 from sms.retry_handler import handle_retry
 
-# --- Airtable Config ---
-AIRTABLE_API_KEY    = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE   = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE         = os.getenv("LEADS_TABLE", "Leads")
-PROSPECTS_TABLE     = os.getenv("PROSPECTS_TABLE", "Prospects")
-
 # --- Field Mappings ---
 FROM_FIELD   = os.getenv("CONV_FROM_FIELD", "phone")
 TO_FIELD     = os.getenv("CONV_TO_FIELD", "to_number")
@@ -26,19 +19,50 @@ STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
 DIR_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
 SENT_AT      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 
-# --- Airtable Clients (safe init) ---
-convos = leads = prospects = None
-if AIRTABLE_API_KEY and LEADS_CONVOS_BASE and Table:
-    try:
-        convos    = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
-        leads     = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE)
-        prospects = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
-    except Exception as e:
-        print(f"⚠️ MessageProcessor: failed to init Airtable tables → {e}")
-else:
-    print("⚠️ MessageProcessor: No Airtable config → running in MOCK mode")
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+LEADS_TABLE         = os.getenv("LEADS_TABLE", "Leads")
+PROSPECTS_TABLE     = os.getenv("PROSPECTS_TABLE", "Prospects")
 
 
+# --- Lazy Airtable Clients ---
+@lru_cache(maxsize=1)
+def get_convos():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+    if api_key and base_id and Table:
+        try:
+            return Table(api_key, base_id, CONVERSATIONS_TABLE)
+        except Exception as e:
+            print(f"⚠️ MessageProcessor: failed to init Conversations → {e}")
+    print("⚠️ MessageProcessor: Conversations in MOCK mode")
+    return None
+
+
+@lru_cache(maxsize=1)
+def get_leads():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+    if api_key and base_id and Table:
+        try:
+            return Table(api_key, base_id, LEADS_TABLE)
+        except Exception as e:
+            print(f"⚠️ MessageProcessor: failed to init Leads → {e}")
+    return None
+
+
+@lru_cache(maxsize=1)
+def get_prospects():
+    api_key = os.getenv("AIRTABLE_API_KEY")
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+    if api_key and base_id and Table:
+        try:
+            return Table(api_key, base_id, PROSPECTS_TABLE)
+        except Exception as e:
+            print(f"⚠️ MessageProcessor: failed to init Prospects → {e}")
+    return None
+
+
+# --- Core Processor ---
 class MessageProcessor:
     @staticmethod
     def send(
@@ -59,12 +83,12 @@ class MessageProcessor:
             return {"status": "skipped", "reason": "missing phone or body"}
 
         try:
-            # --- Send Message ---
+            # --- Send SMS ---
             send_result = send_message(phone, body)
 
             # --- Log to Conversations ---
             payload = {
-                FROM_FIELD: phone,             # recipient phone (OUT) or sender (IN)
+                FROM_FIELD: phone,
                 MSG_FIELD: body,
                 DIR_FIELD: direction,
                 STATUS_FIELD: "SENT",
@@ -75,16 +99,15 @@ class MessageProcessor:
             if property_id:
                 payload["Property ID"] = property_id
 
-            record = None
-            if convos:
-                record = convos.create(payload)
-            else:
+            convos = get_convos()
+            record = convos.create(payload) if convos else {"id": "mock_convo"}
+            if not convos:
                 print(f"[MOCK] Would log conversation → {payload}")
-                record = {"id": "mock_convo"}
 
             # --- Update Lead ---
             if lead_id:
                 now_iso = datetime.now(timezone.utc).isoformat()
+                leads = get_leads()
                 if leads:
                     leads.update(lead_id, {
                         "Last Outbound": now_iso if direction == "OUT" else None,
@@ -93,14 +116,14 @@ class MessageProcessor:
                         "Property ID": property_id
                     })
                 else:
-                    print(f"[MOCK] Would update lead {lead_id} with message + activity")
+                    print(f"[MOCK] Would update lead {lead_id} with activity")
 
             print(f"📤 {direction} → {phone} | Body: {body} | Property: {property_id or 'N/A'}")
             return {
                 "status": "sent",
                 "phone": phone,
                 "body": body,
-                "record_id": record.get("id") if record else None,
+                "record_id": record.get("id"),
                 "property_id": property_id,
                 "textgrid": send_result
             }
