@@ -1,3 +1,4 @@
+# sms/campaign_runner.py
 import os, traceback, json
 from datetime import datetime, timezone
 from pyairtable import Table
@@ -16,20 +17,31 @@ TEMPLATES_TABLE   = "Templates"
 PROSPECTS_TABLE   = "Prospects"      # 🔥 switched from Leads
 DRIP_QUEUE_TABLE  = "Drip Queue"
 
-# Airtable clients
-campaigns  = Table(API_KEY, LEADS_CONVOS_BASE, CAMPAIGNS_TABLE)
-templates  = Table(API_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE)
-prospects  = Table(API_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
-drip       = Table(API_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
+# --- Airtable clients (safe init) ---
+campaigns = templates = prospects = drip = None
+runs = kpis = None
 
-runs = Table(API_KEY, PERFORMANCE_BASE, "Runs/Logs") if PERFORMANCE_BASE else None
-kpis = Table(API_KEY, PERFORMANCE_BASE, "KPIs") if PERFORMANCE_BASE else None
+if API_KEY and LEADS_CONVOS_BASE:
+    try:
+        campaigns  = Table(API_KEY, LEADS_CONVOS_BASE, CAMPAIGNS_TABLE)
+        templates  = Table(API_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE)
+        prospects  = Table(API_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
+        drip       = Table(API_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
+        if PERFORMANCE_BASE:
+            runs = Table(API_KEY, PERFORMANCE_BASE, "Runs/Logs")
+            kpis = Table(API_KEY, PERFORMANCE_BASE, "KPIs")
+    except Exception as e:
+        print(f"❌ CampaignRunner: failed to init Airtable tables: {e}")
+else:
+    print("⚠️ CampaignRunner: No Airtable config → running in MOCK mode")
 
 
+# --- Helpers ---
 def utcnow():
     return datetime.now(timezone.utc)
 
 
+# --- Main Runner ---
 def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
     """
     Auto-runs scheduled campaigns with full lifecycle:
@@ -39,6 +51,10 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3):
     - Updates Campaigns + logs KPIs
     - Marks Completed once all prospects processed
     """
+    if not campaigns or not templates or not prospects or not drip:
+        print("⚠️ CampaignRunner: MOCK mode → skipping real Airtable ops")
+        return {"ok": True, "processed": 0, "results": []}
+
     now = utcnow()
     now_iso = now.isoformat()
 
