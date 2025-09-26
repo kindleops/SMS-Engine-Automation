@@ -1,6 +1,7 @@
+# sms/retry_handler.py
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Literal
 from pyairtable import Table
 
 # --- Airtable Setup ---
@@ -8,10 +9,15 @@ AIRTABLE_API_KEY    = os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE   = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
-if not AIRTABLE_API_KEY or not LEADS_CONVOS_BASE:
-    raise RuntimeError("⚠️ Missing Airtable env for Conversations table")
+convos = None
+if AIRTABLE_API_KEY and LEADS_CONVOS_BASE:
+    try:
+        convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
+    except Exception as e:
+        print(f"❌ RetryHandler: failed to init Conversations table: {e}")
+else:
+    print("⚠️ RetryHandler: No Airtable config → running in MOCK mode")
 
-convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
 
 # --- Field Mapping (env-driven, with safe defaults) ---
 STATUS_FIELD       = os.getenv("CONV_STATUS_FIELD", "status")
@@ -26,7 +32,7 @@ def handle_retry(
     error: str,
     max_retries: int = 3,
     cooldown_minutes: int = 30
-) -> Literal["NEEDS_RETRY", "GAVE_UP", "ERROR"]:
+) -> Literal["NEEDS_RETRY", "GAVE_UP", "ERROR", "MOCK"]:
     """
     Mark a conversation record for retry in Airtable.
 
@@ -35,7 +41,12 @@ def handle_retry(
     - Updates `last_retry_error` + `last_retry_at`
     - Sets `retry_after` to now + cooldown if under max_retries
     - Sets `status` to NEEDS_RETRY or GAVE_UP
+    - If Airtable is not configured → logs + returns "MOCK"
     """
+    if not convos:
+        print(f"[MOCK] RetryHandler → would retry record={record_id}, error={error}")
+        return "MOCK"
+
     try:
         rec = convos.get(record_id)
         if not rec:
@@ -44,8 +55,8 @@ def handle_retry(
 
         fields = rec.get("fields", {})
         retries = (fields.get(RETRY_COUNT_FIELD) or 0) + 1
-        status: Literal["NEEDS_RETRY", "GAVE_UP"]
 
+        status: Literal["NEEDS_RETRY", "GAVE_UP"]
         if retries < max_retries:
             status = "NEEDS_RETRY"
         else:

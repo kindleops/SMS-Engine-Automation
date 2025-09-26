@@ -1,7 +1,12 @@
 # sms/message_processor.py
 import os
 from datetime import datetime, timezone
-from pyairtable import Table
+
+try:
+    from pyairtable import Table
+except ImportError:
+    Table = None
+
 from sms.textgrid_sender import send_message
 from sms.retry_handler import handle_retry
 
@@ -21,23 +26,32 @@ STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
 DIR_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
 SENT_AT      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 
-# --- Airtable Clients ---
-convos    = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
-leads     = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE) if AIRTABLE_API_KEY else None
-prospects = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE) if AIRTABLE_API_KEY else None
+# --- Airtable Clients (safe init) ---
+convos = leads = prospects = None
+if AIRTABLE_API_KEY and LEADS_CONVOS_BASE and Table:
+    try:
+        convos    = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
+        leads     = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE)
+        prospects = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
+    except Exception as e:
+        print(f"⚠️ MessageProcessor: failed to init Airtable tables → {e}")
+else:
+    print("⚠️ MessageProcessor: No Airtable config → running in MOCK mode")
 
 
 class MessageProcessor:
     @staticmethod
-    def send(phone: str,
-             body: str,
-             lead_id: str | None = None,
-             property_id: str | None = None,
-             direction: str = "OUT") -> dict:
+    def send(
+        phone: str,
+        body: str,
+        lead_id: str | None = None,
+        property_id: str | None = None,
+        direction: str = "OUT"
+    ) -> dict:
         """
         Core message processor:
           - Sends SMS via TextGrid
-          - Logs into Conversations
+          - Logs into Conversations (if Airtable available)
           - Updates Leads with activity
           - Handles retries on failure
         """
@@ -59,33 +73,40 @@ class MessageProcessor:
             if lead_id:
                 payload["lead_id"] = [lead_id]
             if property_id:
-                payload["Property ID"] = property_id  # 🔗 maintain linkage
+                payload["Property ID"] = property_id
 
-            record = convos.create(payload) if convos else {"id": None}
+            record = None
+            if convos:
+                record = convos.create(payload)
+            else:
+                print(f"[MOCK] Would log conversation → {payload}")
+                record = {"id": "mock_convo"}
 
             # --- Update Lead ---
-            if lead_id and leads:
+            if lead_id:
                 now_iso = datetime.now(timezone.utc).isoformat()
-                leads.update(lead_id, {
-                    "Last Outbound": now_iso if direction == "OUT" else None,
-                    "Last Activity": now_iso,
-                    "Last Message": body[:500],
-                    "Property ID": property_id
-                })
+                if leads:
+                    leads.update(lead_id, {
+                        "Last Outbound": now_iso if direction == "OUT" else None,
+                        "Last Activity": now_iso,
+                        "Last Message": body[:500],
+                        "Property ID": property_id
+                    })
+                else:
+                    print(f"[MOCK] Would update lead {lead_id} with message + activity")
 
             print(f"📤 {direction} → {phone} | Body: {body} | Property: {property_id or 'N/A'}")
             return {
                 "status": "sent",
                 "phone": phone,
                 "body": body,
-                "record_id": record.get("id"),
+                "record_id": record.get("id") if record else None,
                 "property_id": property_id,
                 "textgrid": send_result
             }
 
         except Exception as e:
-            # Handle retry if conversation record exists
-            if 'record' in locals() and record.get("id"):
+            if 'record' in locals() and record and record.get("id"):
                 handle_retry(record["id"], str(e))
             print(f"❌ Failed sending to {phone}: {e}")
             return {"status": "failed", "phone": phone, "error": str(e)}
