@@ -7,18 +7,25 @@ from sms.message_processor import MessageProcessor
 
 # --- ENV CONFIG ---
 AIRTABLE_API_KEY     = os.getenv("AIRTABLE_API_KEY")
-BASE_ID              = os.getenv("LEADS_CONVOS_BASE")
+BASE_ID              = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 
 CONVERSATIONS_TABLE  = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 LEADS_TABLE          = os.getenv("LEADS_TABLE", "Leads")
 PROSPECTS_TABLE      = os.getenv("PROSPECTS_TABLE", "Prospects")
 TEMPLATES_TABLE      = os.getenv("TEMPLATES_TABLE", "Templates")
 
-# --- Airtable clients ---
-convos     = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE)
-leads      = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE)
-prospects  = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE)
-templates  = Table(AIRTABLE_API_KEY, BASE_ID, TEMPLATES_TABLE)
+# --- Airtable clients (safe init) ---
+convos, leads, prospects, templates = None, None, None, None
+if AIRTABLE_API_KEY and BASE_ID:
+    try:
+        convos     = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE)
+        leads      = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE)
+        prospects  = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE)
+        templates  = Table(AIRTABLE_API_KEY, BASE_ID, TEMPLATES_TABLE)
+    except Exception as e:
+        print(f"❌ Autoresponder: failed to init Airtable tables: {e}")
+else:
+    print("⚠️ Autoresponder: No Airtable config → running in MOCK mode")
 
 
 # -----------------

@@ -9,10 +9,14 @@ AIRTABLE_API_KEY    = os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE   = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
-if not AIRTABLE_API_KEY or not LEADS_CONVOS_BASE:
-    raise RuntimeError("⚠️ Missing Airtable config for Conversations table")
-
-convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
+convos = None
+if AIRTABLE_API_KEY and LEADS_CONVOS_BASE:
+    try:
+        convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
+    except Exception as e:
+        print(f"❌ RetryRunner: failed to init Conversations table: {e}")
+else:
+    print("⚠️ RetryRunner: No Airtable config → running in MOCK mode")
 
 # --- Retry Config ---
 MAX_RETRIES          = int(os.getenv("MAX_RETRIES", "3"))
@@ -55,6 +59,10 @@ def _is_permanent_error(err: str) -> bool:
 
 # --- Main ---
 def run_retry(limit: int = 100, view: str | None = None):
+    if not convos:
+        print("⚠️ RetryRunner: Skipping because Airtable is not configured")
+        return {"ok": False, "retried": 0, "failed": 0, "permanent": 0, "limit": limit}
+
     records = convos.all(view=view)[:limit] if view else convos.all(formula=FORMULA)[:limit]
 
     retried, failed, permanent = 0, 0, 0
@@ -107,7 +115,7 @@ def run_retry(limit: int = 100, view: str | None = None):
             failed += 1
 
     print(f"🔁 Retry runner done | ✅ Retried: {retried} | ❌ Fails: {failed} | 🚫 Permanent: {permanent}")
-    return {"retried": retried, "failed": failed, "permanent": permanent, "limit": limit}
+    return {"ok": True, "retried": retried, "failed": failed, "permanent": permanent, "limit": limit}
 
 if __name__ == "__main__":
     run_retry()
