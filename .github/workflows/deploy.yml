@@ -2,7 +2,7 @@ name: Deploy FastAPI
 
 on:
   push:
-    branches: [ main ]   # deploy only from main
+    branches: [ main ]
 
 jobs:
   deploy:
@@ -26,6 +26,6 @@ jobs:
           docker build -t ${{ secrets.DOCKER_USERNAME }}/rei-sms-engine:latest .
           docker push ${{ secrets.DOCKER_USERNAME }}/rei-sms-engine:latest
 
-      - name: Deploy to Render (or Fly.io)
+      - name: Trigger Render Deploy
         run: |
-          curl -X POST ${{ secrets.RENDER_DEPLOY_HOOK }}
+          curl -s -o /dev/null -w "%{http_code}" -X POST ${{ secrets.RENDER_DEPLOY_HOOK }}
