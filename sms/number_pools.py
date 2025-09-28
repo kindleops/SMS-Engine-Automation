@@ -13,21 +13,21 @@ except ImportError:
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "750"))
 
 # --- Field Names ---
-FIELD_NUMBER          = "Number"
-FIELD_MARKET          = "Market"
-FIELD_LAST_USED       = "Last Used"
+FIELD_NUMBER = "Number"
+FIELD_MARKET = "Market"
+FIELD_LAST_USED = "Last Used"
 
-FIELD_SENT_TODAY      = "Sent Today"
+FIELD_SENT_TODAY = "Sent Today"
 FIELD_DELIVERED_TODAY = "Delivered Today"
-FIELD_FAILED_TODAY    = "Failed Today"
-FIELD_OPTOUTS_TODAY   = "Opt-Outs Today"
+FIELD_FAILED_TODAY = "Failed Today"
+FIELD_OPTOUTS_TODAY = "Opt-Outs Today"
 
-FIELD_SENT_TOTAL      = "Sent Total"
+FIELD_SENT_TOTAL = "Sent Total"
 FIELD_DELIVERED_TOTAL = "Delivered Total"
-FIELD_FAILED_TOTAL    = "Failed Total"
-FIELD_OPTOUTS_TOTAL   = "Opt-Outs Total"
+FIELD_FAILED_TOTAL = "Failed Total"
+FIELD_OPTOUTS_TOTAL = "Opt-Outs Total"
 
-FIELD_REMAINING       = "Remaining"
+FIELD_REMAINING = "Remaining"
 
 
 def _today() -> str:
@@ -104,10 +104,24 @@ def _find_record(number: str) -> dict:
 
 
 # --- Public Increment APIs ---
-def increment_sent(number: str):      _increment_field(_find_record(number)["id"], FIELD_SENT_TODAY, FIELD_SENT_TOTAL)
-def increment_delivered(number: str): _increment_field(_find_record(number)["id"], FIELD_DELIVERED_TODAY, FIELD_DELIVERED_TOTAL)
-def increment_failed(number: str):    _increment_field(_find_record(number)["id"], FIELD_FAILED_TODAY, FIELD_FAILED_TOTAL)
-def increment_opt_out(number: str):   _increment_field(_find_record(number)["id"], FIELD_OPTOUTS_TODAY, FIELD_OPTOUTS_TOTAL)
+def increment_sent(number: str):
+    _increment_field(_find_record(number)["id"], FIELD_SENT_TODAY, FIELD_SENT_TOTAL)
+
+
+def increment_delivered(number: str):
+    _increment_field(
+        _find_record(number)["id"], FIELD_DELIVERED_TODAY, FIELD_DELIVERED_TOTAL
+    )
+
+
+def increment_failed(number: str):
+    _increment_field(_find_record(number)["id"], FIELD_FAILED_TODAY, FIELD_FAILED_TOTAL)
+
+
+def increment_opt_out(number: str):
+    _increment_field(
+        _find_record(number)["id"], FIELD_OPTOUTS_TODAY, FIELD_OPTOUTS_TOTAL
+    )
 
 
 # --- Rotation Logic ---
@@ -126,10 +140,14 @@ def get_from_number(market: str) -> str:
     recs = [_reset_daily_if_needed(r) for r in recs]
     available = [r for r in recs if r["fields"].get(FIELD_REMAINING, DAILY_LIMIT) > 0]
     if not available:
-        raise RuntimeError(f"🚨 All numbers in {market} exhausted (limit {DAILY_LIMIT})")
+        raise RuntimeError(
+            f"🚨 All numbers in {market} exhausted (limit {DAILY_LIMIT})"
+        )
 
     available.sort(key=lambda r: r["fields"].get(FIELD_SENT_TODAY, 0))
     least_used = available[0]["fields"].get(FIELD_SENT_TODAY, 0)
-    candidates = [r for r in available if r["fields"].get(FIELD_SENT_TODAY, 0) == least_used]
+    candidates = [
+        r for r in available if r["fields"].get(FIELD_SENT_TODAY, 0) == least_used
+    ]
     choice = random.choice(candidates)
     return choice["fields"][FIELD_NUMBER]

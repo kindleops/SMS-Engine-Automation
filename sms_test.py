@@ -7,9 +7,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 def debug_env():
     """Print critical env vars so we know what's loaded."""
     print("🔎 DEBUG ENV VARS:")
+
     def mask(val):
         return val[:8] + "..." if val else None
 
@@ -19,13 +21,14 @@ def debug_env():
     print("TEXTGRID_ACCOUNT_SID:", mask(os.getenv("TEXTGRID_ACCOUNT_SID")))
     print("TEXTGRID_AUTH_TOKEN:", mask(os.getenv("TEXTGRID_AUTH_TOKEN")))
 
+
 def run_test():
     try:
         debug_env()
         res = send_message(
             to="+16128072000",  # 🔔 replace with your test number
             body="🔥 Test message from Everline engine",
-            market="houston"    # pulls number from pools
+            market="houston",  # pulls number from pools
         )
         print("✅ RESULT:")
         print(json.dumps(res, indent=2))
@@ -33,6 +36,7 @@ def run_test():
     except Exception as e:
         print("❌ ERROR:", e)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     run_test()

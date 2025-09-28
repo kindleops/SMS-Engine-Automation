@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from pyairtable import Table
 from datetime import datetime, timezone
 
+
 def strict_health(
     mode: str = "prospects",
     api_key: str | None = None,

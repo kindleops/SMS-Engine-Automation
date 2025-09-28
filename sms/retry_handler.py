@@ -10,19 +10,21 @@ except ImportError:
     Table = None
 
 # --- Field Mapping (env-driven, with safe defaults) ---
-STATUS_FIELD       = os.getenv("CONV_STATUS_FIELD", "status")
-RETRY_COUNT_FIELD  = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
-RETRY_AFTER_FIELD  = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
-LAST_ERROR_FIELD   = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
-LAST_RETRY_AT      = os.getenv("CONV_LAST_RETRY_AT_FIELD", "last_retry_at")
+STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
+RETRY_COUNT_FIELD = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
+RETRY_AFTER_FIELD = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
+LAST_ERROR_FIELD = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
+LAST_RETRY_AT = os.getenv("CONV_LAST_RETRY_AT_FIELD", "last_retry_at")
 
 
 # --- Lazy Airtable Client ---
 @lru_cache(maxsize=1)
 def get_convos():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-    table   = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
+        "AIRTABLE_LEADS_CONVOS_BASE_ID"
+    )
+    table = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
     if api_key and base_id and Table:
         try:
@@ -35,10 +37,7 @@ def get_convos():
 
 
 def handle_retry(
-    record_id: str,
-    error: str,
-    max_retries: int = 3,
-    cooldown_minutes: int = 30
+    record_id: str, error: str, max_retries: int = 3, cooldown_minutes: int = 30
 ) -> Literal["NEEDS_RETRY", "GAVE_UP", "ERROR", "MOCK"]:
     """
     Mark a conversation record for retry in Airtable.
@@ -71,7 +70,7 @@ def handle_retry(
             STATUS_FIELD: status,
             RETRY_COUNT_FIELD: retries,
             LAST_ERROR_FIELD: error,
-            LAST_RETRY_AT: datetime.now(timezone.utc).isoformat()
+            LAST_RETRY_AT: datetime.now(timezone.utc).isoformat(),
         }
 
         if status == "NEEDS_RETRY":

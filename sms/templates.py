@@ -23,6 +23,7 @@ followup_wrong = [
     "Thanks for letting me know — I’ll remove this number from our list.",
 ]
 
+
 # --- Helpers ---
 def _get_first_name(full_name: str | None) -> str:
     """Extract first name from full name string."""
@@ -30,12 +31,18 @@ def _get_first_name(full_name: str | None) -> str:
         return "there"
     return full_name.strip().split(" ")[0]
 
+
 def _format_safe(template: str, fields: dict) -> str:
     """Safely format a template with prospect/lead fields."""
     return template.format(
-        First=_get_first_name(fields.get("Phone 1 Name (Primary)") or fields.get("First")),
-        Address=fields.get("Property Address") or fields.get("Address") or "your property",
+        First=_get_first_name(
+            fields.get("Phone 1 Name (Primary)") or fields.get("First")
+        ),
+        Address=fields.get("Property Address")
+        or fields.get("Address")
+        or "your property",
     )
+
 
 # --- Template Registry ---
 TEMPLATES = {
@@ -45,16 +52,17 @@ TEMPLATES = {
     "followup_wrong": lambda fields: random.choice(followup_wrong),
 }
 
+
 # --- Public API ---
 def get_template(name: str, fields: dict | None = None) -> str:
     """
     Fetch a message body by template key.
     Falls back to 'intro' if unknown key is requested.
-    
+
     Args:
         name (str): template key, e.g. "intro", "followup_yes".
         fields (dict): optional data for personalization.
-    
+
     Returns:
         str: personalized message text.
     """

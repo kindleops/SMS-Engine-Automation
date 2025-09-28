@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 from pyairtable import Table
 
 AIRTABLE_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-PERF_BASE    = os.getenv("PERFORMANCE_BASE")
+PERF_BASE = os.getenv("PERFORMANCE_BASE")
+
 
 def _get_tables():
     if not (AIRTABLE_KEY and PERF_BASE):
@@ -78,13 +79,15 @@ def aggregate_kpis():
 
         def _write_totals(suffix, totals):
             for metric, total in totals.items():
-                kpi_tbl.create({
-                    "Campaign": "ALL",
-                    "Metric": f"{metric}_{suffix}",
-                    "Value": total,
-                    "Date": str(today),
-                    "Timestamp": timestamp,
-                })
+                kpi_tbl.create(
+                    {
+                        "Campaign": "ALL",
+                        "Metric": f"{metric}_{suffix}",
+                        "Value": total,
+                        "Date": str(today),
+                        "Timestamp": timestamp,
+                    }
+                )
 
         # Write aggregates
         _write_totals("DAILY_TOTAL", daily_totals)

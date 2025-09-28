@@ -62,7 +62,11 @@ def format_template(template: str, lead_fields: dict) -> str:
     """Safely format template with lead data."""
     full_name = lead_fields.get("Owner Name") or lead_fields.get("First") or ""
     first = full_name.split(" ")[0] if full_name else "there"
-    address = lead_fields.get("Address") or lead_fields.get("Property Address") or "your property"
+    address = (
+        lead_fields.get("Address")
+        or lead_fields.get("Property Address")
+        or "your property"
+    )
 
     try:
         return template.format(First=first, Address=address)
@@ -115,7 +119,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             "sent": 0,
             "completed": False,
             "retries": 0,
-            "errors": ["Missing Airtable tables"]
+            "errors": ["Missing Airtable tables"],
         }
 
     # 1. Select campaign
@@ -135,7 +139,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
                 "sent": 0,
                 "completed": False,
                 "retries": 0,
-                "errors": ["No eligible campaigns"]
+                "errors": ["No eligible campaigns"],
             }
         campaign = eligible[0]
 
@@ -158,11 +162,15 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             "sent": 0,
             "completed": False,
             "retries": 0,
-            "errors": ["No template found"]
+            "errors": ["No template found"],
         }
 
     # 3. Fetch leads
-    lead_records = leads_tbl.all(view=view, max_records=limit) if view else leads_tbl.all(max_records=limit)
+    lead_records = (
+        leads_tbl.all(view=view, max_records=limit)
+        if view
+        else leads_tbl.all(max_records=limit)
+    )
     queued = 0
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -210,22 +218,26 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     runs, kpis = get_perf_tables()
     if runs:
         try:
-            run_record = runs.create({
-                "Type": "OUTBOUND_CAMPAIGN",
-                "Campaign": campaign_name,
-                "Queued": queued,
-                "Timestamp": now_iso,
-                "Template Used": template_id,
-                "View Used": view or "ALL",
-                "Processed By": "OutboundBatcher"
-            })
-            if kpis:
-                kpis.create({
+            run_record = runs.create(
+                {
+                    "Type": "OUTBOUND_CAMPAIGN",
                     "Campaign": campaign_name,
-                    "Metric": "MESSAGES_QUEUED",
-                    "Value": queued,
-                    "Date": datetime.now(timezone.utc).date().isoformat()
-                })
+                    "Queued": queued,
+                    "Timestamp": now_iso,
+                    "Template Used": template_id,
+                    "View Used": view or "ALL",
+                    "Processed By": "OutboundBatcher",
+                }
+            )
+            if kpis:
+                kpis.create(
+                    {
+                        "Campaign": campaign_name,
+                        "Metric": "MESSAGES_QUEUED",
+                        "Value": queued,
+                        "Date": datetime.now(timezone.utc).date().isoformat(),
+                    }
+                )
             print(f"📊 Logged campaign run → {run_record['id']}")
         except Exception:
             print("⚠️ Failed to log performance run")
@@ -233,12 +245,15 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
 
     # 7. Update campaign status
     try:
-        campaigns.update(campaign["id"], {
-            "Last Run Result": f"Queued {queued}",
-            "Messages Queued": queued,
-            "Status": "Running",
-            "Last Run": now_iso
-        })
+        campaigns.update(
+            campaign["id"],
+            {
+                "Last Run Result": f"Queued {queued}",
+                "Messages Queued": queued,
+                "Status": "Running",
+                "Last Run": now_iso,
+            },
+        )
     except Exception:
         print("⚠️ Failed to update campaign status")
         traceback.print_exc()
@@ -252,5 +267,5 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         "sent": queued,
         "completed": False,
         "retries": 0,
-        "errors": []
+        "errors": [],
     }

@@ -10,28 +10,30 @@ except ImportError:
     Table = None
 
 # --- Retry Config ---
-MAX_RETRIES          = int(os.getenv("MAX_RETRIES", "3"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
 
 # --- Field Mapping ---
-PHONE_FIELD           = os.getenv("CONV_FROM_FIELD", "phone")
-MESSAGE_FIELD         = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD          = os.getenv("CONV_STATUS_FIELD", "status")
-DIRECTION_FIELD       = os.getenv("CONV_DIRECTION_FIELD", "direction")
+PHONE_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
+MESSAGE_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
+STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
+DIRECTION_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
 
-RETRY_COUNT_FIELD     = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
-RETRY_AFTER_FIELD     = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
-RETRIED_AT_FIELD      = os.getenv("CONV_RETRIED_AT_FIELD", "retried_at")
-LAST_ERROR_FIELD      = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
-PERM_FAIL_REASON      = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
+RETRY_COUNT_FIELD = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
+RETRY_AFTER_FIELD = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
+RETRIED_AT_FIELD = os.getenv("CONV_RETRIED_AT_FIELD", "retried_at")
+LAST_ERROR_FIELD = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
+PERM_FAIL_REASON = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
 
 
 # --- Lazy Airtable Client ---
 @lru_cache(maxsize=1)
 def get_convos():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-    table   = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
+        "AIRTABLE_LEADS_CONVOS_BASE_ID"
+    )
+    table = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
     if api_key and base_id and Table:
         try:
@@ -61,8 +63,14 @@ def _backoff_delay(retry_count: int) -> timedelta:
 
 def _is_permanent_error(err: str) -> bool:
     signals = [
-        "invalid", "not a valid", "unreachable", "blacklisted",
-        "blocked", "landline", "disconnected", "undeliverable"
+        "invalid",
+        "not a valid",
+        "unreachable",
+        "blacklisted",
+        "blocked",
+        "landline",
+        "disconnected",
+        "undeliverable",
     ]
     return any(sig in err.lower() for sig in signals)
 
@@ -74,14 +82,16 @@ def run_retry(limit: int = 100, view: str | None = None):
         print("⚠️ RetryRunner: Skipping because Airtable is not configured")
         return {"ok": False, "retried": 0, "failed": 0, "permanent": 0, "limit": limit}
 
-    records = convos.all(view=view)[:limit] if view else convos.all(formula=FORMULA)[:limit]
+    records = (
+        convos.all(view=view)[:limit] if view else convos.all(formula=FORMULA)[:limit]
+    )
 
     retried, failed, permanent = 0, 0, 0
 
     for r in records:
         f = r.get("fields", {})
         phone = f.get(PHONE_FIELD)
-        body  = f.get(MESSAGE_FIELD)
+        body = f.get(MESSAGE_FIELD)
         retry_count = f.get(RETRY_COUNT_FIELD, 0) or 0
 
         if not phone or not body:
@@ -89,11 +99,14 @@ def run_retry(limit: int = 100, view: str | None = None):
 
         try:
             send_message(phone, body)
-            convos.update(r["id"], {
-                STATUS_FIELD: "SENT",
-                RETRY_COUNT_FIELD: retry_count + 1,
-                RETRIED_AT_FIELD: datetime.now(timezone.utc).isoformat()
-            })
+            convos.update(
+                r["id"],
+                {
+                    STATUS_FIELD: "SENT",
+                    RETRY_COUNT_FIELD: retry_count + 1,
+                    RETRIED_AT_FIELD: datetime.now(timezone.utc).isoformat(),
+                },
+            )
             retried += 1
             print(f"📤 Retried → {phone} | Retry #{retry_count + 1}")
 
@@ -117,15 +130,27 @@ def run_retry(limit: int = 100, view: str | None = None):
 
             else:
                 backoff = _backoff_delay(new_count)
-                update[RETRY_AFTER_FIELD] = (datetime.now(timezone.utc) + backoff).isoformat()
+                update[RETRY_AFTER_FIELD] = (
+                    datetime.now(timezone.utc) + backoff
+                ).isoformat()
                 update[STATUS_FIELD] = "NEEDS_RETRY"
-                print(f"⚠️ Retry failed → {phone} | Next attempt after {backoff}: {err_msg}")
+                print(
+                    f"⚠️ Retry failed → {phone} | Next attempt after {backoff}: {err_msg}"
+                )
 
             convos.update(r["id"], update)
             failed += 1
 
-    print(f"🔁 Retry runner done | ✅ Retried: {retried} | ❌ Fails: {failed} | 🚫 Permanent: {permanent}")
-    return {"ok": True, "retried": retried, "failed": failed, "permanent": permanent, "limit": limit}
+    print(
+        f"🔁 Retry runner done | ✅ Retried: {retried} | ❌ Fails: {failed} | 🚫 Permanent: {permanent}"
+    )
+    return {
+        "ok": True,
+        "retried": retried,
+        "failed": failed,
+        "permanent": permanent,
+        "limit": limit,
+    }
 
 
 if __name__ == "__main__":

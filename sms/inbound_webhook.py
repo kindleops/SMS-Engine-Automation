@@ -9,40 +9,45 @@ from sms.number_pools import increment_delivered, increment_failed, increment_op
 router = APIRouter()
 
 # --- ENV CONFIG ---
-AIRTABLE_API_KEY  = os.getenv("AIRTABLE_API_KEY")
-BASE_ID           = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+BASE_ID = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE         = os.getenv("LEADS_TABLE", "Leads")
-PROSPECTS_TABLE     = os.getenv("PROSPECTS_TABLE", "Prospects")
+LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
+PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
 
 # --- Field Mappings ---
-FROM_FIELD   = os.getenv("CONV_FROM_FIELD", "phone")
-TO_FIELD     = os.getenv("CONV_TO_FIELD", "to_number")
-MSG_FIELD    = os.getenv("CONV_MESSAGE_FIELD", "message")
+FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
+TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")
+MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
 STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
-TG_ID_FIELD  = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-RECEIVED_AT  = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
-SENT_AT      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
+DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
+TG_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
+RECEIVED_AT = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
+SENT_AT = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
 
 # Airtable clients
-convos    = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
-leads     = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE) if AIRTABLE_API_KEY else None
-prospects = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KEY else None
+convos = (
+    Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
+)
+leads = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE) if AIRTABLE_API_KEY else None
+prospects = (
+    Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KEY else None
+)
 
 # --- Field mapping (Prospects → Leads) ---
 FIELD_MAP = {
     "phone": "phone",
-    "Property ID": "Property ID",   # 🔑 join key
+    "Property ID": "Property ID",  # 🔑 join key
     "Owner Name": "Owner Name",
     "Address": "Address",
     "Market": "Market",
     "Sync Source": "Synced From",
     "List": "Source List",
-    "Property Type": "Property Type"
+    "Property Type": "Property Type",
 }
+
 
 # --- Helpers ---
 def iso_timestamp():
@@ -62,22 +67,28 @@ def promote_prospect_to_lead(phone_number: str, source="Inbound"):
 
         # Prospect match?
         fields, property_id = {}, None
-        prospect = prospects.all(formula=f"{{phone}}='{phone_number}'") if prospects else []
+        prospect = (
+            prospects.all(formula=f"{{phone}}='{phone_number}'") if prospects else []
+        )
         if prospect:
             p_fields = prospect[0]["fields"]
-            fields = {leads_col: p_fields.get(prospects_col)
-                      for prospects_col, leads_col in FIELD_MAP.items()}
+            fields = {
+                leads_col: p_fields.get(prospects_col)
+                for prospects_col, leads_col in FIELD_MAP.items()
+            }
             property_id = p_fields.get("Property ID")
 
         # Create new Lead
-        new_lead = leads.create({
-            **fields,
-            "phone": phone_number,
-            "Lead Status": "New",
-            "Source": source,
-            "Reply Count": 0,
-            "Last Inbound": iso_timestamp()
-        })
+        new_lead = leads.create(
+            {
+                **fields,
+                "phone": phone_number,
+                "Lead Status": "New",
+                "Source": source,
+                "Reply Count": 0,
+                "Last Inbound": iso_timestamp(),
+            }
+        )
         print(f"✨ Promoted {phone_number} → Lead")
         return new_lead["id"], property_id
 
@@ -86,7 +97,9 @@ def promote_prospect_to_lead(phone_number: str, source="Inbound"):
     return None, None
 
 
-def update_lead_activity(lead_id: str, body: str, direction: str, reply_increment: bool = False):
+def update_lead_activity(
+    lead_id: str, body: str, direction: str, reply_increment: bool = False
+):
     """Update activity metrics for Leads."""
     if not leads or not lead_id:
         return
@@ -96,7 +109,7 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
         updates = {
             "Last Activity": iso_timestamp(),
             "Last Direction": direction,
-            "Last Message": (body or "")[:500]
+            "Last Message": (body or "")[:500],
         }
         if reply_increment:
             updates["Reply Count"] = reply_count + 1
@@ -125,9 +138,9 @@ async def inbound_handler(request: Request):
     try:
         data = await request.form()
         from_number = data.get("From")
-        to_number   = data.get("To")
-        body        = data.get("Body")
-        msg_id      = data.get("MessageSid")
+        to_number = data.get("To")
+        body = data.get("Body")
+        msg_id = data.get("MessageSid")
 
         if not from_number or not body:
             raise HTTPException(status_code=400, detail="Missing From or Body")
@@ -143,7 +156,7 @@ async def inbound_handler(request: Request):
             STATUS_FIELD: "UNPROCESSED",
             DIR_FIELD: "IN",
             TG_ID_FIELD: msg_id,
-            RECEIVED_AT: iso_timestamp()
+            RECEIVED_AT: iso_timestamp(),
         }
         if lead_id:
             payload["lead_id"] = [lead_id]
@@ -169,13 +182,15 @@ async def optout_handler(request: Request):
     try:
         data = await request.form()
         from_number = data.get("From")
-        body        = (data.get("Body") or "").lower()
+        body = (data.get("Body") or "").lower()
 
         if "stop" in body or "unsubscribe" in body or "quit" in body:
             print(f"🚫 Opt-out from {from_number}")
             increment_opt_out(from_number)
 
-            lead_id, property_id = promote_prospect_to_lead(from_number, source="Opt-Out")
+            lead_id, property_id = promote_prospect_to_lead(
+                from_number, source="Opt-Out"
+            )
             if lead_id:
                 update_lead_activity(lead_id, body, "IN")
 
@@ -185,7 +200,7 @@ async def optout_handler(request: Request):
                 STATUS_FIELD: "OPTOUT",
                 DIR_FIELD: "IN",
                 RECEIVED_AT: iso_timestamp(),
-                PROCESSED_BY: "OptOut Handler"
+                PROCESSED_BY: "OptOut Handler",
             }
             if lead_id:
                 payload["lead_id"] = [lead_id]
@@ -207,9 +222,9 @@ async def optout_handler(request: Request):
 async def status_handler(request: Request):
     try:
         data = await request.form()
-        msg_id   = data.get("MessageSid")
-        status   = data.get("MessageStatus")
-        to       = data.get("To")
+        msg_id = data.get("MessageSid")
+        status = data.get("MessageStatus")
+        to = data.get("To")
         from_num = data.get("From")
 
         print(f"📡 Delivery receipt for {to} [{status}]")
@@ -223,9 +238,9 @@ async def status_handler(request: Request):
         # Update conversation record
         if convos and msg_id:
             try:
-                convos.update_by_fields({TG_ID_FIELD: msg_id}, {
-                    STATUS_FIELD: status.upper()
-                })
+                convos.update_by_fields(
+                    {TG_ID_FIELD: msg_id}, {STATUS_FIELD: status.upper()}
+                )
             except Exception as log_err:
                 print(f"⚠️ Failed to update delivery status in Conversations: {log_err}")
 
@@ -238,11 +253,11 @@ async def status_handler(request: Request):
                     lead_id = lead["id"]
 
                     delivered_count = lead["fields"].get("Delivered Count", 0)
-                    failed_count    = lead["fields"].get("Failed Count", 0)
+                    failed_count = lead["fields"].get("Failed Count", 0)
 
                     updates = {
                         "Last Activity": iso_timestamp(),
-                        "Last Delivery Status": status.upper()
+                        "Last Delivery Status": status.upper(),
                     }
                     if status == "delivered":
                         updates["Delivered Count"] = delivered_count + 1

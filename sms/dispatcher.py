@@ -33,7 +33,7 @@ def run_engine(mode: str, **kwargs) -> dict:
                 "type": "Lead",
                 "processed": retry_result.get("retried", 0),
                 "retries": retry_result,
-                "errors": []
+                "errors": [],
             }
 
         elif mode == "inbounds":
@@ -44,7 +44,7 @@ def run_engine(mode: str, **kwargs) -> dict:
             return {
                 "ok": False,
                 "error": f"Unknown mode: {mode}",
-                "supported_modes": ["prospects", "leads", "inbounds"]
+                "supported_modes": ["prospects", "leads", "inbounds"],
             }
 
     except Exception as e:
@@ -54,7 +54,7 @@ def run_engine(mode: str, **kwargs) -> dict:
             "ok": False,
             "error": str(e),
             "mode": mode,
-            "stack": traceback.format_exc()
+            "stack": traceback.format_exc(),
         }
 
     return result

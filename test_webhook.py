@@ -10,9 +10,11 @@ from sms import inbound_webhook
 
 # Wrap FastAPI router in a test client
 from fastapi import FastAPI
+
 app = FastAPI()
 app.include_router(inbound_webhook.router)
 client = TestClient(app)
+
 
 # --- Simulate inbound message ---
 def test_inbound():
@@ -20,19 +22,18 @@ def test_inbound():
         "From": "+15555550123",
         "To": "+14444440123",
         "Body": "Yes I'm interested",
-        "MessageSid": "SM123456789"
+        "MessageSid": "SM123456789",
     }
     resp = client.post("/inbound", data=payload)
     print("Inbound Response:", resp.json())
 
+
 # --- Simulate opt-out ---
 def test_optout():
-    payload = {
-        "From": "+15555550123",
-        "Body": "STOP"
-    }
+    payload = {"From": "+15555550123", "Body": "STOP"}
     resp = client.post("/optout", data=payload)
     print("Opt-Out Response:", resp.json())
+
 
 # --- Simulate delivery receipt ---
 def test_status():
@@ -40,10 +41,11 @@ def test_status():
         "MessageSid": "SM123456789",
         "MessageStatus": "delivered",
         "To": "+15555550123",
-        "From": "+14444440123"
+        "From": "+14444440123",
     }
     resp = client.post("/status", data=payload)
     print("Status Response:", resp.json())
+
 
 if __name__ == "__main__":
     test_inbound()

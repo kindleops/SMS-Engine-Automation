@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sms.textgrid_sender import send_message
 from sms.tables import get_drip  # central table getter
 
+
 # --- Follow-Up Flow ---
 def run_followups():
     """
@@ -25,11 +26,11 @@ def run_followups():
 
     for r in records:
         f = r.get("fields", {})
-        phone       = f.get("phone")
-        lead_ids    = f.get("lead_id")  # Linked record(s)
-        stage       = f.get("drip_stage", 30)
-        address     = f.get("Address", "your property")
-        owner       = f.get("Owner Name", "Owner")
+        phone = f.get("phone")
+        lead_ids = f.get("lead_id")  # Linked record(s)
+        stage = f.get("drip_stage", 30)
+        address = f.get("Address", "your property")
+        owner = f.get("Owner Name", "Owner")
         property_id = f.get("Property ID")
 
         if not phone:
@@ -54,19 +55,24 @@ def run_followups():
             send_message(phone, body)
         except Exception as e:
             print(f"❌ Failed to send SMS to {phone}: {e}")
-            queue.update(r["id"], {
-                "status": "FAILED",
-                "last_error": str(e),
-                "retry_count": (f.get("retry_count") or 0) + 1,
-                "retry_after": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-            })
+            queue.update(
+                r["id"],
+                {
+                    "status": "FAILED",
+                    "last_error": str(e),
+                    "retry_count": (f.get("retry_count") or 0) + 1,
+                    "retry_after": (
+                        datetime.now(timezone.utc) + timedelta(hours=1)
+                    ).isoformat(),
+                },
+            )
             continue
 
         updates = {
             "last_sent": datetime.now(timezone.utc).isoformat(),
             "drip_stage": next_stage,
             "status": "SENT",
-            "message_preview": body
+            "message_preview": body,
         }
 
         # 🔁 Schedule next send (only if not COMPLETE)

@@ -18,7 +18,7 @@ from sms.kpi_aggregator import aggregate_kpis
 from sms.retry_runner import run_retry
 from sms.followup_flow import run_followups
 from sms.dispatcher import run_engine
-from sms.health_strict import strict_health   # ✅ also belongs up here
+from sms.health_strict import strict_health  # ✅ also belongs up here
 
 # --- Load .env ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,15 +35,23 @@ CRON_TOKEN = os.getenv("CRON_TOKEN")
 PERF_BASE = os.getenv("PERFORMANCE_BASE")
 PERF_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
-AIRTABLE_API_KEY  = os.getenv("AIRTABLE_API_KEY")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 
 # Airtable defaults
 TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
-LEADS_TABLE     = os.getenv("LEADS_TABLE", "Leads")
+LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
 
 # Airtable clients
-templates = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE) if AIRTABLE_API_KEY else None
-leads     = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE) if AIRTABLE_API_KEY else None
+templates = (
+    Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE)
+    if AIRTABLE_API_KEY
+    else None
+)
+leads = (
+    Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE)
+    if AIRTABLE_API_KEY
+    else None
+)
 
 
 # -------------------------
@@ -73,12 +81,17 @@ def iso_timestamp():
 
 def log_run(runs, step: str, result: dict):
     try:
-        return runs.create({
-            "Type": step,
-            "Processed": result.get("processed") or result.get("total_sent") or result.get("sent") or 0,
-            "Breakdown": str(result),
-            "Timestamp": iso_timestamp()
-        })
+        return runs.create(
+            {
+                "Type": step,
+                "Processed": result.get("processed")
+                or result.get("total_sent")
+                or result.get("sent")
+                or 0,
+                "Breakdown": str(result),
+                "Timestamp": iso_timestamp(),
+            }
+        )
     except Exception:
         traceback.print_exc()
         return None
@@ -86,12 +99,14 @@ def log_run(runs, step: str, result: dict):
 
 def log_kpi(kpis, metric: str, value: int):
     try:
-        return kpis.create({
-            "Campaign": "ALL",
-            "Metric": metric,
-            "Value": value,
-            "Date": datetime.now(timezone.utc).date().isoformat()
-        })
+        return kpis.create(
+            {
+                "Campaign": "ALL",
+                "Metric": metric,
+                "Value": value,
+                "Date": datetime.now(timezone.utc).date().isoformat(),
+            }
+        )
     except Exception:
         traceback.print_exc()
         return None
@@ -102,13 +117,16 @@ def log_kpi(kpis, metric: str, value: int):
 # -------------------------
 STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
 
+
 @app.on_event("startup")
 def startup_checks():
     try:
         print("✅ Environment loaded:")
         print(f"   LEADS_CONVOS_BASE: {LEADS_CONVOS_BASE}")
         print(f"   PERFORMANCE_BASE: {PERF_BASE}")
-        print(f"   CONVERSATIONS_TABLE: {os.getenv('CONVERSATIONS_TABLE', 'Conversations')}")
+        print(
+            f"   CONVERSATIONS_TABLE: {os.getenv('CONVERSATIONS_TABLE', 'Conversations')}"
+        )
         print(f"   STRICT_MODE: {STRICT_MODE}")
 
         # Sanity check env vars
@@ -149,13 +167,16 @@ def startup_checks():
 # Routes
 # -------------------------
 
+
 @app.get("/health")
 def health():
     return {"ok": True, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/health/strict")
-def health_strict_endpoint(mode: str = Query("prospects", description="prospects | leads | inbounds")):
+def health_strict_endpoint(
+    mode: str = Query("prospects", description="prospects | leads | inbounds")
+):
     """Strict Airtable connectivity check."""
     return strict_health(mode=mode)
 
@@ -164,7 +185,7 @@ def health_strict_endpoint(mode: str = Query("prospects", description="prospects
 async def send_endpoint(
     x_cron_token: str | None = Header(None),
     campaign_id: str = Query(None),
-    limit: int = Query(500)
+    limit: int = Query(500),
 ):
     check_token(x_cron_token)
     return send_batch(campaign_id=campaign_id, limit=limit)
@@ -185,7 +206,7 @@ async def autoresponder_endpoint(
 async def ai_closer_endpoint(
     limit: int = 50,
     view: str = "Unprocessed Inbounds",
-    x_cron_token: str | None = Header(None)
+    x_cron_token: str | None = Header(None),
 ):
     check_token(x_cron_token)
     os.environ["PROCESSED_BY_LABEL"] = "AI Closer"
@@ -196,7 +217,7 @@ async def ai_closer_endpoint(
 async def manual_qa_endpoint(
     limit: int = 50,
     view: str = "Unprocessed Inbounds",
-    x_cron_token: str | None = Header(None)
+    x_cron_token: str | None = Header(None),
 ):
     check_token(x_cron_token)
     os.environ["PROCESSED_BY_LABEL"] = "Manual QA"
@@ -216,7 +237,9 @@ async def metrics_endpoint(x_cron_token: str | None = Header(None)):
 
 
 @app.post("/retry")
-async def retry_endpoint(limit: int = 100, view: str | None = None, x_cron_token: str | None = Header(None)):
+async def retry_endpoint(
+    limit: int = 100, view: str | None = None, x_cron_token: str | None = Header(None)
+):
     check_token(x_cron_token)
     return run_retry(limit=limit, view=view)
 
@@ -229,8 +252,7 @@ async def aggregate_kpis_endpoint(x_cron_token: str | None = Header(None)):
 
 @app.post("/run-campaigns")
 async def run_campaigns_endpoint(
-    limit: str = Query("ALL"),
-    x_cron_token: str | None = Header(None)
+    limit: str = Query("ALL"), x_cron_token: str | None = Header(None)
 ):
     check_token(x_cron_token)
     lim = 9999 if str(limit).upper() == "ALL" else int(limit)
@@ -238,10 +260,7 @@ async def run_campaigns_endpoint(
 
 
 @app.post("/cron/all")
-async def cron_all_endpoint(
-    limit: int = 500,
-    x_cron_token: str | None = Header(None)
-):
+async def cron_all_endpoint(limit: int = 500, x_cron_token: str | None = Header(None)):
     check_token(x_cron_token)
     results = {}
     runs, kpis = get_perf_tables()
@@ -259,12 +278,15 @@ async def cron_all_endpoint(
                 "error": f"Health check failed for {mode}",
                 "results": results,
                 "totals": totals,
-                "timestamp": iso_timestamp()
+                "timestamp": iso_timestamp(),
             }
 
     steps = [
         ("OUTBOUND", lambda: send_batch(limit=limit)),
-        ("AUTORESPONDER", lambda: run_autoresponder(limit=50, view="Unprocessed Inbounds")),
+        (
+            "AUTORESPONDER",
+            lambda: run_autoresponder(limit=50, view="Unprocessed Inbounds"),
+        ),
         ("FOLLOWUPS", run_followups),
         ("METRICS", update_metrics),
         ("RETRY", lambda: run_retry(limit=100)),
@@ -278,7 +300,12 @@ async def cron_all_endpoint(
             results[step.lower()] = result
             if runs:
                 log_run(runs, step, result)
-            processed = result.get("processed") or result.get("total_sent") or result.get("sent") or 0
+            processed = (
+                result.get("processed")
+                or result.get("total_sent")
+                or result.get("sent")
+                or 0
+            )
             totals["processed"] += processed
         except Exception as e:
             err = str(e)
@@ -293,29 +320,36 @@ async def cron_all_endpoint(
 
     if runs:
         try:
-            runs.create({
-                "Type": "DAILY_SUMMARY",
-                "Processed": totals["processed"],
-                "Breakdown": str(results),
-                "Timestamp": iso_timestamp()
-            })
+            runs.create(
+                {
+                    "Type": "DAILY_SUMMARY",
+                    "Processed": totals["processed"],
+                    "Breakdown": str(results),
+                    "Timestamp": iso_timestamp(),
+                }
+            )
         except Exception:
             traceback.print_exc()
 
-    return {"ok": True, "results": results, "totals": totals, "timestamp": iso_timestamp()}
+    return {
+        "ok": True,
+        "results": results,
+        "totals": totals,
+        "timestamp": iso_timestamp(),
+    }
 
 
 @app.get("/engine")
 def trigger_engine(
     mode: str = Query(..., description="prospects | leads | inbounds"),
     limit: int = 50,
-    retry_limit: int = 100
+    retry_limit: int = 100,
 ):
     valid_modes = {"prospects", "leads", "inbounds"}
     if mode not in valid_modes:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid mode '{mode}'. Must be one of {', '.join(valid_modes)}."
+            detail=f"Invalid mode '{mode}'. Must be one of {', '.join(valid_modes)}.",
         )
 
     strict_health(mode)  # ✅ preflight check

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pyairtable import Table
 
 AIRTABLE_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-PERF_BASE    = os.getenv("PERFORMANCE_BASE")
+PERF_BASE = os.getenv("PERFORMANCE_BASE")
 
 
 def _get_table():

@@ -13,39 +13,61 @@ except ImportError:
     Table = None
 
 # --- ENV CONFIG ---
-CONVERSATIONS_TABLE  = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE          = os.getenv("LEADS_TABLE", "Leads")
-PROSPECTS_TABLE      = os.getenv("PROSPECTS_TABLE", "Prospects")
-TEMPLATES_TABLE      = os.getenv("TEMPLATES_TABLE", "Templates")
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
+PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
+TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
 
 
 # --- Lazy Airtable clients ---
 @lru_cache(maxsize=None)
 def get_convos():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-    return Table(api_key, base_id, CONVERSATIONS_TABLE) if api_key and base_id and Table else None
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
+        "AIRTABLE_LEADS_CONVOS_BASE_ID"
+    )
+    return (
+        Table(api_key, base_id, CONVERSATIONS_TABLE)
+        if api_key and base_id and Table
+        else None
+    )
 
 
 @lru_cache(maxsize=None)
 def get_leads():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-    return Table(api_key, base_id, LEADS_TABLE) if api_key and base_id and Table else None
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
+        "AIRTABLE_LEADS_CONVOS_BASE_ID"
+    )
+    return (
+        Table(api_key, base_id, LEADS_TABLE) if api_key and base_id and Table else None
+    )
 
 
 @lru_cache(maxsize=None)
 def get_prospects():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-    return Table(api_key, base_id, PROSPECTS_TABLE) if api_key and base_id and Table else None
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
+        "AIRTABLE_LEADS_CONVOS_BASE_ID"
+    )
+    return (
+        Table(api_key, base_id, PROSPECTS_TABLE)
+        if api_key and base_id and Table
+        else None
+    )
 
 
 @lru_cache(maxsize=None)
 def get_templates():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-    return Table(api_key, base_id, TEMPLATES_TABLE) if api_key and base_id and Table else None
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
+        "AIRTABLE_LEADS_CONVOS_BASE_ID"
+    )
+    return (
+        Table(api_key, base_id, TEMPLATES_TABLE)
+        if api_key and base_id and Table
+        else None
+    )
 
 
 # -----------------
@@ -66,8 +88,9 @@ FIELD_MAP = {
     "Market": "Market",
     "Sync Source": "Synced From",
     "List": "Source List",
-    "Property Type": "Property Type"
+    "Property Type": "Property Type",
 }
+
 
 def promote_to_lead(phone_number: str, source: str = "Autoresponder"):
     """Ensure a phone has a Lead record, pulling from Prospects if needed."""
@@ -94,12 +117,9 @@ def promote_to_lead(phone_number: str, source: str = "Autoresponder"):
                 }
                 property_id = p_fields.get("Property ID")
 
-        new_lead = leads.create({
-            **fields,
-            "phone": phone_number,
-            "Lead Status": "New",
-            "Source": source
-        })
+        new_lead = leads.create(
+            {**fields, "phone": phone_number, "Lead Status": "New", "Source": source}
+        )
         print(f"✨ Promoted {phone_number} → Lead")
         return new_lead["id"], property_id
     except Exception as e:
@@ -112,11 +132,14 @@ def update_lead_activity(lead_id: str, body: str, direction: str):
     if not lead_id or not leads:
         return
     try:
-        leads.update(lead_id, {
-            "Last Activity": iso_timestamp(),
-            "Last Direction": direction,
-            "Last Message": (body or "")[:500]
-        })
+        leads.update(
+            lead_id,
+            {
+                "Last Activity": iso_timestamp(),
+                "Last Direction": direction,
+                "Last Message": (body or "")[:500],
+            },
+        )
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")
 
@@ -138,7 +161,7 @@ def get_template(intent: str, fields: dict) -> tuple[str, str | None]:
         msg = template["fields"].get("Message", "Hi there")
         msg = msg.format(
             First=fields.get("First", "there"),
-            Address=fields.get("Address", "your property")
+            Address=fields.get("Address", "your property"),
         )
         return (msg, template["id"])
     except Exception as e:
@@ -173,7 +196,7 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
             "type": "Inbound",
             "processed": 0,
             "breakdown": {},
-            "errors": ["Missing Airtable Conversations table"]
+            "errors": ["Missing Airtable Conversations table"],
         }
 
     processed, breakdown, errors = 0, {}, []
@@ -181,9 +204,9 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
         rows = convos.all(view=view, max_records=limit)
         for r in rows:
             f = r.get("fields", {})
-            msg_id   = r.get("id")
+            msg_id = r.get("id")
             from_num = f.get("phone")
-            body     = f.get("message")
+            body = f.get("message")
 
             if not from_num or not body:
                 continue
@@ -203,7 +226,7 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
                 body=reply_text,
                 lead_id=lead_id,
                 property_id=property_id,
-                direction="OUT"
+                direction="OUT",
             )
 
             if send_result.get("status") == "sent":
@@ -214,12 +237,15 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
 
             # 4. Mark inbound as processed
             try:
-                convos.update(msg_id, {
-                    "status": "RESPONDED",
-                    "processed_by": "Autoresponder",
-                    "processed_at": iso_timestamp(),
-                    "intent_detected": intent
-                })
+                convos.update(
+                    msg_id,
+                    {
+                        "status": "RESPONDED",
+                        "processed_by": "Autoresponder",
+                        "processed_at": iso_timestamp(),
+                        "intent_detected": intent,
+                    },
+                )
             except Exception as mark_err:
                 errors.append(f"Failed to update inbound row {msg_id}: {mark_err}")
 
@@ -233,5 +259,5 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
         "type": "Inbound",
         "processed": processed,
         "breakdown": breakdown,
-        "errors": errors
+        "errors": errors,
     }

@@ -3,10 +3,12 @@ import traceback
 from datetime import datetime, timezone
 from sms.dispatcher import run_engine
 
+
 def log_result(tag: str, result: dict):
     ts = datetime.now(timezone.utc).isoformat()
     print(f"\n[{ts}] ✅ {tag} completed")
     print(result)
+
 
 def main():
     print("🚀 Engine Runner started")
@@ -36,6 +38,7 @@ def main():
         traceback.print_exc()
 
     print("🏁 Engine Runner finished\n")
+
 
 if __name__ == "__main__":
     main()

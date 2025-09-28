@@ -7,8 +7,8 @@ router = APIRouter()
 
 # --- Airtable Config ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-BASE_ID          = os.getenv("LEADS_CONVOS_BASE")
-TEMPLATES_TABLE  = os.getenv("TEMPLATES_TABLE", "Templates")
+BASE_ID = os.getenv("LEADS_CONVOS_BASE")
+TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
 
 templates = None
 if AIRTABLE_API_KEY and BASE_ID:
@@ -18,6 +18,7 @@ if AIRTABLE_API_KEY and BASE_ID:
         print(f"⚠️ Failed to init Templates table: {e}")
 else:
     print("⚠️ No Airtable config detected → using MOCK Templates table")
+
 
 # --- KPI Logger ---
 def log_template_kpi(template_id: str, event: str):
@@ -39,6 +40,7 @@ def log_template_kpi(template_id: str, event: str):
         except Exception as e:
             print(f"⚠️ Failed to update delivery KPI: {e}")
 
+
 # --- Delivery Status Endpoint ---
 @router.post("/status")
 async def delivery_status(req: Request):
@@ -56,11 +58,13 @@ async def delivery_status(req: Request):
     except Exception:
         data = {}
 
-    sid         = data.get("sid")
-    status      = (data.get("status") or "").lower()
+    sid = data.get("sid")
+    status = (data.get("status") or "").lower()
     template_id = data.get("template_id")
 
-    print(f"📡 Delivery status update for {sid or 'unknown SID'} → {status or 'unknown'}")
+    print(
+        f"📡 Delivery status update for {sid or 'unknown SID'} → {status or 'unknown'}"
+    )
 
     if "delivered" in status:
         log_template_kpi(template_id, "delivered")

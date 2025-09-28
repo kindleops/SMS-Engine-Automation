@@ -33,7 +33,9 @@ COOLDOWN_HOURS: int = int(os.getenv("OPT_OUT_ALERT_COOLDOWN_HOURS", "24"))
 def get_runs() -> Table | None:
     api_key = os.getenv("AIRTABLE_API_KEY")
     base_id = os.getenv("PERFORMANCE_BASE")
-    return Table(api_key, base_id, "Runs/Logs") if api_key and base_id and Table else None
+    return (
+        Table(api_key, base_id, "Runs/Logs") if api_key and base_id and Table else None
+    )
 
 
 @lru_cache(maxsize=None)
@@ -124,7 +126,13 @@ def update_metrics() -> dict:
 
     today = datetime.now(timezone.utc).date().isoformat()
     summary: list[dict] = []
-    global_stats = {"sent": 0, "delivered": 0, "failed": 0, "responses": 0, "optouts": 0}
+    global_stats = {
+        "sent": 0,
+        "delivered": 0,
+        "failed": 0,
+        "responses": 0,
+        "optouts": 0,
+    }
     run_id: str | None = None
 
     for camp in campaigns.all():
@@ -134,39 +142,58 @@ def update_metrics() -> dict:
             last_alert_at = cf.get("last_alert_at")
 
             # outbound sent
-            sent = convos.all(formula=f"AND({{direction}}='OUT',{{Campaign}}='{camp_name}')")
+            sent = convos.all(
+                formula=f"AND({{direction}}='OUT',{{Campaign}}='{camp_name}')"
+            )
             total_sent = len(sent)
 
             delivered = [r for r in sent if r["fields"].get("status") == "DELIVERED"]
             failed = [r for r in sent if r["fields"].get("status") == "FAILED"]
 
-            inbound = convos.all(formula=f"AND({{direction}}='IN',{{Campaign}}='{camp_name}')")
+            inbound = convos.all(
+                formula=f"AND({{direction}}='IN',{{Campaign}}='{camp_name}')"
+            )
             responses = len(inbound)
 
-            optouts = [r for r in inbound if "stop" in str(r["fields"].get("message", "")).lower()]
+            optouts = [
+                r
+                for r in inbound
+                if "stop" in str(r["fields"].get("message", "")).lower()
+            ]
             total_optouts = len(optouts)
 
-            delivery_rate = round((len(delivered) / total_sent * 100), 2) if total_sent else 0.0
-            response_rate = round((responses / total_sent * 100), 2) if total_sent else 0.0
-            optout_rate = round((total_optouts / total_sent * 100), 2) if total_sent else 0.0
+            delivery_rate = (
+                round((len(delivered) / total_sent * 100), 2) if total_sent else 0.0
+            )
+            response_rate = (
+                round((responses / total_sent * 100), 2) if total_sent else 0.0
+            )
+            optout_rate = (
+                round((total_optouts / total_sent * 100), 2) if total_sent else 0.0
+            )
 
             # update Airtable
-            campaigns.update(camp["id"], {
-                "total_sent": total_sent,
-                "delivered": len(delivered),
-                "failed": len(failed),
-                "responses": responses,
-                "optouts": total_optouts,
-                "delivery_rate": delivery_rate,
-                "response_rate": response_rate,
-                "optout_rate": optout_rate,
-                "last_metrics_update": datetime.now(timezone.utc).isoformat(),
-            })
+            campaigns.update(
+                camp["id"],
+                {
+                    "total_sent": total_sent,
+                    "delivered": len(delivered),
+                    "failed": len(failed),
+                    "responses": responses,
+                    "optouts": total_optouts,
+                    "delivery_rate": delivery_rate,
+                    "response_rate": response_rate,
+                    "optout_rate": optout_rate,
+                    "last_metrics_update": datetime.now(timezone.utc).isoformat(),
+                },
+            )
 
             # alerts
             if _should_alert(last_alert_at, optout_rate, OPT_OUT_THRESHOLD):
                 _notify(f"⚠️ High opt-out rate for {camp_name}: {optout_rate}%")
-            if _should_alert(last_alert_at, 100 - delivery_rate, 100 - DELIVERY_THRESHOLD):
+            if _should_alert(
+                last_alert_at, 100 - delivery_rate, 100 - DELIVERY_THRESHOLD
+            ):
                 _notify(f"⚠️ Low delivery rate for {camp_name}: {delivery_rate}%")
 
             # KPIs
@@ -181,25 +208,29 @@ def update_metrics() -> dict:
                     ("RESPONSE_RATE", response_rate),
                     ("OPTOUT_RATE", optout_rate),
                 ]:
-                    kpis.create({
-                        "Campaign": camp_name,
-                        "Metric": metric,
-                        "Value": value,
-                        "Date": today,
-                    })
+                    kpis.create(
+                        {
+                            "Campaign": camp_name,
+                            "Metric": metric,
+                            "Value": value,
+                            "Date": today,
+                        }
+                    )
 
             # append summary
-            summary.append({
-                "campaign": camp_name,
-                "sent": total_sent,
-                "delivered": len(delivered),
-                "failed": len(failed),
-                "responses": responses,
-                "optouts": total_optouts,
-                "delivery_rate": delivery_rate,
-                "response_rate": response_rate,
-                "optout_rate": optout_rate,
-            })
+            summary.append(
+                {
+                    "campaign": camp_name,
+                    "sent": total_sent,
+                    "delivered": len(delivered),
+                    "failed": len(failed),
+                    "responses": responses,
+                    "optouts": total_optouts,
+                    "delivery_rate": delivery_rate,
+                    "response_rate": response_rate,
+                    "optout_rate": optout_rate,
+                }
+            )
 
             # accumulate global stats
             global_stats["sent"] += total_sent
@@ -222,24 +253,28 @@ def update_metrics() -> dict:
             ("OPTOUTS", global_stats["optouts"]),
         ]:
             try:
-                kpis.create({
-                    "Campaign": "ALL",
-                    "Metric": metric,
-                    "Value": value,
-                    "Date": today,
-                })
+                kpis.create(
+                    {
+                        "Campaign": "ALL",
+                        "Metric": metric,
+                        "Value": value,
+                        "Date": today,
+                    }
+                )
             except Exception:
                 traceback.print_exc()
 
     # runs log
     if runs:
         try:
-            run_record = runs.create({
-                "Type": "METRICS_UPDATE",
-                "Processed": global_stats["sent"],
-                "Breakdown": json.dumps(summary, indent=2),
-                "Timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            run_record = runs.create(
+                {
+                    "Type": "METRICS_UPDATE",
+                    "Processed": global_stats["sent"],
+                    "Breakdown": json.dumps(summary, indent=2),
+                    "Timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             run_id = run_record["id"]
         except Exception:
             traceback.print_exc()

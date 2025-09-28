@@ -4,40 +4,52 @@ import time
 import httpx
 from datetime import datetime, timezone
 from pyairtable import Table
-from sms.number_pools import get_from_number   # auto-select pool numbers
+from sms.number_pools import get_from_number  # auto-select pool numbers
 
 # --- Env Config ---
-ACCOUNT_SID  = os.getenv("TEXTGRID_ACCOUNT_SID")
-AUTH_TOKEN   = os.getenv("TEXTGRID_AUTH_TOKEN")
+ACCOUNT_SID = os.getenv("TEXTGRID_ACCOUNT_SID")
+AUTH_TOKEN = os.getenv("TEXTGRID_AUTH_TOKEN")
 
-AIRTABLE_API_KEY   = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE  = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
+    "AIRTABLE_LEADS_CONVOS_BASE_ID"
+)
 
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE         = os.getenv("LEADS_TABLE", "Leads")
+LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
 
 # --- Field Mappings ---
-FROM_FIELD   = os.getenv("CONV_FROM_FIELD", "phone")
-TO_FIELD     = os.getenv("CONV_TO_FIELD", "to_number")
-MSG_FIELD    = os.getenv("CONV_MESSAGE_FIELD", "message")
+FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
+TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")
+MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
 STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
-TG_ID_FIELD  = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-SENT_AT      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
+DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
+TG_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
+SENT_AT = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
 
 # Airtable clients
-convos = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY and LEADS_CONVOS_BASE else None
-leads  = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE) if AIRTABLE_API_KEY and LEADS_CONVOS_BASE else None
+convos = (
+    Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, CONVERSATIONS_TABLE)
+    if AIRTABLE_API_KEY and LEADS_CONVOS_BASE
+    else None
+)
+leads = (
+    Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE)
+    if AIRTABLE_API_KEY and LEADS_CONVOS_BASE
+    else None
+)
 
 # --- Base URL (TextGrid API) ---
 BASE_URL = f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
+
 
 # -----------------
 # Helpers
 # -----------------
 def iso_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
 
 def find_or_create_lead(phone_number: str, source: str = "Outbound"):
     """
@@ -53,20 +65,23 @@ def find_or_create_lead(phone_number: str, source: str = "Outbound"):
             return lead["id"], lead["fields"].get("Property ID")
 
         # Create new lead if none exists
-        new_lead = leads.create({
-            "phone": phone_number,
-            "Lead Status": "New",
-            "Source": source,
-            "Reply Count": 0,
-            "Sent Count": 0,
-            "Delivered Count": 0,
-            "Failed Count": 0
-        })
+        new_lead = leads.create(
+            {
+                "phone": phone_number,
+                "Lead Status": "New",
+                "Source": source,
+                "Reply Count": 0,
+                "Sent Count": 0,
+                "Delivered Count": 0,
+                "Failed Count": 0,
+            }
+        )
         print(f"✨ Created new Lead for {phone_number}")
         return new_lead["id"], new_lead["fields"].get("Property ID")
     except Exception as e:
         print(f"⚠️ Lead lookup/create failed for {phone_number}: {e}")
     return None, None
+
 
 def update_lead_activity(lead_id: str, body: str, direction: str):
     """Update basic activity fields on Lead."""
@@ -76,7 +91,7 @@ def update_lead_activity(lead_id: str, body: str, direction: str):
         updates = {
             "Last Activity": iso_timestamp(),
             "Last Direction": direction,
-            "Last Message": (body or "")[:500]
+            "Last Message": (body or "")[:500],
         }
         if direction == "OUT":
             updates["Last Outbound"] = iso_timestamp()
@@ -84,11 +99,17 @@ def update_lead_activity(lead_id: str, body: str, direction: str):
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")
 
+
 # -----------------
 # Core: Send Message
 # -----------------
-def send_message(to: str, body: str, from_number: str | None = None,
-                 market: str | None = None, retries: int = 3) -> dict:
+def send_message(
+    to: str,
+    body: str,
+    from_number: str | None = None,
+    market: str | None = None,
+    retries: int = 3,
+) -> dict:
     """
     Send SMS via TextGrid and log to Airtable (Conversations + Leads).
     Returns structured dict with sid, lead_id, property_id.
@@ -103,7 +124,9 @@ def send_message(to: str, body: str, from_number: str | None = None,
     while attempt < retries:
         try:
             # --- Send to TextGrid ---
-            resp = httpx.post(BASE_URL, data=payload, auth=(ACCOUNT_SID, AUTH_TOKEN), timeout=10)
+            resp = httpx.post(
+                BASE_URL, data=payload, auth=(ACCOUNT_SID, AUTH_TOKEN), timeout=10
+            )
             resp.raise_for_status()
             data = resp.json()
             msg_id = data.get("sid")
@@ -125,7 +148,7 @@ def send_message(to: str, body: str, from_number: str | None = None,
                     DIR_FIELD: "OUT",
                     TG_ID_FIELD: msg_id,
                     SENT_AT: iso_timestamp(),
-                    PROCESSED_BY: "TextGrid Sender"
+                    PROCESSED_BY: "TextGrid Sender",
                 }
                 if lead_id:
                     record["lead_id"] = [lead_id]
@@ -143,12 +166,12 @@ def send_message(to: str, body: str, from_number: str | None = None,
                 "to": to,
                 "from": sender,
                 "lead_id": lead_id,
-                "property_id": property_id
+                "property_id": property_id,
             }
 
         except Exception as e:
             attempt += 1
-            wait_time = 2 ** attempt
+            wait_time = 2**attempt
             err_msg = str(e)
 
             # --- Log failed attempt ---
@@ -161,7 +184,7 @@ def send_message(to: str, body: str, from_number: str | None = None,
                     DIR_FIELD: "OUT",
                     TG_ID_FIELD: None,
                     SENT_AT: iso_timestamp(),
-                    PROCESSED_BY: "TextGrid Sender"
+                    PROCESSED_BY: "TextGrid Sender",
                 }
                 try:
                     convos.create(fail_record)
@@ -179,5 +202,5 @@ def send_message(to: str, body: str, from_number: str | None = None,
                     "error": err_msg,
                     "to": to,
                     "body": body,
-                    "attempts": retries
+                    "attempts": retries,
                 }

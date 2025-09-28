@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pyairtable import Table
 
 AIRTABLE_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-PERF_BASE    = os.getenv("PERFORMANCE_BASE")
+PERF_BASE = os.getenv("PERFORMANCE_BASE")
 
 
 def _get_table():
@@ -18,13 +18,15 @@ def _get_table():
         return None
 
 
-def log_kpi(metric: str, value: int | float, campaign: str = "ALL", overwrite: bool = False):
+def log_kpi(
+    metric: str, value: int | float, campaign: str = "ALL", overwrite: bool = False
+):
     """
     Write a single KPI row into the KPIs table.
-    
+
     Example:
         log_kpi("OUTBOUND_SENT", 125)
-    
+
     Args:
         metric (str): KPI metric name (e.g. "OUTBOUND_SENT").
         value (int | float): KPI value (auto-cast to int).
@@ -44,13 +46,12 @@ def log_kpi(metric: str, value: int | float, campaign: str = "ALL", overwrite: b
         # Optional overwrite logic: avoid duplicate KPI rows per day
         if overwrite:
             try:
-                existing = kpi_tbl.all(formula=f"AND({{Metric}}='{metric}', {{Date}}='{today}', {{Campaign}}='{campaign}')")
+                existing = kpi_tbl.all(
+                    formula=f"AND({{Metric}}='{metric}', {{Date}}='{today}', {{Campaign}}='{campaign}')"
+                )
                 if existing:
                     rec_id = existing[0]["id"]
-                    kpi_tbl.update(rec_id, {
-                        "Value": val,
-                        "Timestamp": timestamp
-                    })
+                    kpi_tbl.update(rec_id, {"Value": val, "Timestamp": timestamp})
                     print(f"📊 Updated KPI → {metric}: {val} (overwrite)")
                     return
             except Exception:
