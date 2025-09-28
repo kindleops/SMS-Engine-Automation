@@ -1,4 +1,4 @@
-import os
+# sms/followup_flow.py
 from datetime import datetime, timedelta, timezone
 from sms.textgrid_sender import send_message
 from sms.tables import get_drip  # central table getter
