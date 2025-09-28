@@ -1,4 +1,3 @@
-import pytest
 from sms import outbound_batcher
 
 def test_reset_daily_quota_runs(monkeypatch):
