@@ -1,5 +1,3 @@
-# sms/metrics_tracker.py
-
 from __future__ import annotations
 import os
 import json
@@ -7,13 +5,17 @@ import traceback
 import requests
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 from sms.textgrid_sender import send_message
 
-try:
+if TYPE_CHECKING:
     from pyairtable import Table
-except ImportError:
-    Table = None
+else:
+    try:
+        from pyairtable import Table
+    except ImportError:
+        Table = object  # placeholder so runtime doesn't break
 
 
 # --- Alerts Config ---
