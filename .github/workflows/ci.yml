@@ -37,3 +37,15 @@ jobs:
 
     - name: Run pytest with coverage
       run: pytest --maxfail=1 --disable-warnings -q --cov=sms --cov-report=xml
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+       context: .
+       push: true
+       tags: |
+         ${{ secrets.DOCKERHUB_USERNAME }}/rei-sms-engine:latest
+         ${{ secrets.DOCKERHUB_USERNAME }}/rei-sms-engine:${{ github.sha }}
+         ${{ secrets.DOCKERHUB_USERNAME }}/rei-sms-engine:${{ github.sha::7 }}
+         ${{ secrets.DOCKERHUB_USERNAME }}/rei-sms-engine:${{ github.ref_name }}
+         ${{ secrets.DOCKERHUB_USERNAME }}/rei-sms-engine:${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
