@@ -1,14 +1,11 @@
+# sms/main.py
 import os
 import traceback
 from datetime import datetime, timezone
-from dotenv import load_dotenv
+
 from fastapi import FastAPI, Header, HTTPException, Query
 from pyairtable import Table
-
-# --- Load .env ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
-load_dotenv(dotenv_path=ENV_PATH, override=True)
+from dotenv import load_dotenv
 
 # --- SMS Engine Modules ---
 from sms.outbound_batcher import send_batch
@@ -21,7 +18,12 @@ from sms.kpi_aggregator import aggregate_kpis
 from sms.retry_runner import run_retry
 from sms.followup_flow import run_followups
 from sms.dispatcher import run_engine
-from sms.health_strict import strict_health   # ✅ moved out to its own module
+from sms.health_strict import strict_health   # ✅ also belongs up here
+
+# --- Load .env ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 # --- FastAPI app ---
 app = FastAPI(title="REI SMS Engine", version="1.0")
@@ -137,7 +139,7 @@ def startup_checks():
         print(err)
         try:
             _notify(err)
-        except:
+        except Exception:
             pass
         if STRICT_MODE:
             raise
