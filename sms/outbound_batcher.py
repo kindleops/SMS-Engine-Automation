@@ -2,6 +2,7 @@
 import os
 import traceback
 from datetime import datetime, timezone
+
 from pyairtable import Table
 from sms.quota_reset import reset_daily_quotas
 
@@ -194,7 +195,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             if property_id:
                 drip_payload["Property ID"] = property_id
 
-            record = drip.create(drip_payload)
+            drip.create(drip_payload)
             queued += 1
 
             print(
