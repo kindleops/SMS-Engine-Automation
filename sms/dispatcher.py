@@ -1,7 +1,6 @@
 # sms/dispatcher.py
 import traceback
 
-from sms.outbound_batcher import send_batch
 from sms.campaign_runner import run_campaigns
 from sms.autoresponder import run_autoresponder
 from sms.retry_runner import run_retry
