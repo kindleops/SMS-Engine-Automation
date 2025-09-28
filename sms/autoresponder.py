@@ -1,7 +1,10 @@
 # sms/autoresponder.py
-import os, random, traceback
+import os
+import random
+import traceback
 from datetime import datetime, timezone
 from functools import lru_cache
+
 from sms.message_processor import MessageProcessor
 
 try:
