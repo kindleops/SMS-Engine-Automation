@@ -274,3 +274,126 @@ async def status_handler(request: Request):
         print("❌ Status webhook error:")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    
+    # --- Test-friendly wrapper for status ---
+def process_status(data: dict):
+    """Sync wrapper for testing delivery receipts."""
+    msg_id = data.get("MessageSid")
+    status = data.get("MessageStatus")
+    to = data.get("To")
+    from_num = data.get("From")
+
+    if not status or not to:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    print(f"📡 [TEST] Delivery receipt for {to} [{status}]")
+
+    # Update number metrics
+    if status == "delivered":
+        increment_delivered(from_num)
+    elif status in ("failed", "undelivered"):
+        increment_failed(from_num)
+
+    # Update conversation record
+    if convos and msg_id:
+        try:
+            convos.update_by_fields(
+                {TG_ID_FIELD: msg_id}, {STATUS_FIELD: status.upper()}
+            )
+        except Exception as log_err:
+            print(f"⚠️ Failed to update delivery status in Conversations: {log_err}")
+
+    # Update lead metrics
+    if leads and to:
+        try:
+            results = leads.all(formula=f"{{phone}}='{to}'")
+            if results:
+                lead = results[0]
+                lead_id = lead["id"]
+
+                delivered_count = lead["fields"].get("Delivered Count", 0)
+                failed_count = lead["fields"].get("Failed Count", 0)
+
+                updates = {
+                    "Last Activity": iso_timestamp(),
+                    "Last Delivery Status": status.upper(),
+                }
+                if status == "delivered":
+                    updates["Delivered Count"] = delivered_count + 1
+                elif status in ("failed", "undelivered"):
+                    updates["Failed Count"] = failed_count + 1
+
+                leads.update(lead_id, updates)
+        except Exception as e:
+            print(f"⚠️ Failed to update lead delivery metrics: {e}")
+
+    return {"ok": True}
+    
+    # ------------------------
+# Test-friendly wrappers
+# ------------------------
+
+def handle_inbound(data: dict):
+    """Direct call version of inbound_handler for unit testing."""
+    from_number = data.get("From")
+    to_number = data.get("To")
+    body = data.get("Body")
+    msg_id = data.get("MessageSid")
+
+    if not from_number or not body:
+        raise HTTPException(status_code=400, detail="Missing From or Body")
+
+    lead_id, property_id = promote_prospect_to_lead(from_number)
+
+    payload = {
+        FROM_FIELD: from_number,
+        TO_FIELD: to_number,
+        MSG_FIELD: body,
+        STATUS_FIELD: "UNPROCESSED",
+        DIR_FIELD: "IN",
+        TG_ID_FIELD: msg_id,
+        RECEIVED_AT: iso_timestamp(),
+    }
+    if lead_id:
+        payload["lead_id"] = [lead_id]
+    if property_id:
+        payload["Property ID"] = property_id
+
+    log_conversation(payload)
+
+    if lead_id:
+        update_lead_activity(lead_id, body, "IN", reply_increment=True)
+
+    return {"status": "ok"}
+
+
+def process_optout(data: dict):
+    """Direct call version of optout_handler for unit testing."""
+    from_number = data.get("From")
+    body = (data.get("Body") or "").lower()
+
+    if "stop" in body or "unsubscribe" in body or "quit" in body:
+        increment_opt_out(from_number)
+
+        lead_id, property_id = promote_prospect_to_lead(from_number, source="Opt-Out")
+        if lead_id:
+            update_lead_activity(lead_id, body, "IN")
+
+        payload = {
+            FROM_FIELD: from_number,
+            MSG_FIELD: body,
+            STATUS_FIELD: "OPTOUT",
+            DIR_FIELD: "IN",
+            RECEIVED_AT: iso_timestamp(),
+            PROCESSED_BY: "OptOut Handler",
+        }
+        if lead_id:
+            payload["lead_id"] = [lead_id]
+        if property_id:
+            payload["Property ID"] = property_id
+
+        log_conversation(payload)
+
+        return {"status": "optout"}
+
+    return {"status": "ignored"}
