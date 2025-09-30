@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 
 from sms.message_processor import MessageProcessor
+from sms import templates as local_templates  # fallback if Airtable is missing
 
 try:
     from pyairtable import Table
@@ -19,55 +20,35 @@ PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
 TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
 
 
-# --- Lazy Airtable clients ---
+# -----------------
+# Airtable Clients (lazy init)
+# -----------------
 @lru_cache(maxsize=None)
 def get_convos():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
-        "AIRTABLE_LEADS_CONVOS_BASE_ID"
-    )
-    return (
-        Table(api_key, base_id, CONVERSATIONS_TABLE)
-        if api_key and base_id and Table
-        else None
-    )
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+    return Table(api_key, base_id, CONVERSATIONS_TABLE) if api_key and base_id and Table else None
 
 
 @lru_cache(maxsize=None)
 def get_leads():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
-        "AIRTABLE_LEADS_CONVOS_BASE_ID"
-    )
-    return (
-        Table(api_key, base_id, LEADS_TABLE) if api_key and base_id and Table else None
-    )
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+    return Table(api_key, base_id, LEADS_TABLE) if api_key and base_id and Table else None
 
 
 @lru_cache(maxsize=None)
 def get_prospects():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
-        "AIRTABLE_LEADS_CONVOS_BASE_ID"
-    )
-    return (
-        Table(api_key, base_id, PROSPECTS_TABLE)
-        if api_key and base_id and Table
-        else None
-    )
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+    return Table(api_key, base_id, PROSPECTS_TABLE) if api_key and base_id and Table else None
 
 
 @lru_cache(maxsize=None)
 def get_templates():
     api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv(
-        "AIRTABLE_LEADS_CONVOS_BASE_ID"
-    )
-    return (
-        Table(api_key, base_id, TEMPLATES_TABLE)
-        if api_key and base_id and Table
-        else None
-    )
+    base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+    return Table(api_key, base_id, TEMPLATES_TABLE) if api_key and base_id and Table else None
 
 
 # -----------------
@@ -93,7 +74,6 @@ FIELD_MAP = {
 
 
 def promote_to_lead(phone_number: str, source: str = "Autoresponder"):
-    """Ensure a phone has a Lead record, pulling from Prospects if needed."""
     leads = get_leads()
     prospects = get_prospects()
     if not phone_number or not leads:
@@ -111,15 +91,16 @@ def promote_to_lead(phone_number: str, source: str = "Autoresponder"):
             prospect_match = prospects.all(formula=f"{{phone}}='{phone_number}'")
             if prospect_match:
                 p_fields = prospect_match[0]["fields"]
-                fields = {
-                    leads_col: p_fields.get(prospects_col)
-                    for prospects_col, leads_col in FIELD_MAP.items()
-                }
+                fields = {leads_col: p_fields.get(prospects_col)
+                          for prospects_col, leads_col in FIELD_MAP.items()}
                 property_id = p_fields.get("Property ID")
 
-        new_lead = leads.create(
-            {**fields, "phone": phone_number, "Lead Status": "New", "Source": source}
-        )
+        new_lead = leads.create({
+            **fields,
+            "phone": phone_number,
+            "Lead Status": "New",
+            "Source": source,
+        })
         print(f"✨ Promoted {phone_number} → Lead")
         return new_lead["id"], property_id
     except Exception as e:
@@ -132,41 +113,46 @@ def update_lead_activity(lead_id: str, body: str, direction: str):
     if not lead_id or not leads:
         return
     try:
-        leads.update(
-            lead_id,
-            {
-                "Last Activity": iso_timestamp(),
-                "Last Direction": direction,
-                "Last Message": (body or "")[:500],
-            },
-        )
+        leads.update(lead_id, {
+            "Last Activity": iso_timestamp(),
+            "Last Direction": direction,
+            "Last Message": (body or "")[:500],
+        })
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")
 
 
 # -----------------
-# Templates
+# Template Selection (Airtable → fallback)
 # -----------------
 def get_template(intent: str, fields: dict) -> tuple[str, str | None]:
+    """
+    Fetch a reply template by intent.
+    Priority:
+      1. Airtable Templates table (track KPI, variation testing).
+      2. Local templates.py fallback.
+    """
     templates = get_templates()
-    if not templates:
-        return ("Hi, this is Ryan following up. Reply STOP to opt out.", None)
+    if templates:
+        try:
+            results = templates.all(formula=f"{{Internal ID}}='{intent}'")
+            if results:
+                template = random.choice(results)
+                msg = template["fields"].get("Message", "Hi there")
+                msg = msg.format(
+                    First=fields.get("First", "there"),
+                    Address=fields.get("Address", "your property"),
+                )
+                return msg, template["id"]
+        except Exception as e:
+            print(f"⚠️ Template lookup failed: {e}")
 
+    # Fallback → local templates.py
     try:
-        results = templates.all(formula=f"{{Internal ID}}='{intent}'")
-        if not results:
-            return ("Hi, this is Ryan following up. Reply STOP to opt out.", None)
-
-        template = random.choice(results)
-        msg = template["fields"].get("Message", "Hi there")
-        msg = msg.format(
-            First=fields.get("First", "there"),
-            Address=fields.get("Address", "your property"),
-        )
-        return (msg, template["id"])
-    except Exception as e:
-        print(f"⚠️ Template lookup failed: {e}")
-        return ("Hi, this is Ryan following up. Reply STOP to opt out.", None)
+        msg = local_templates.get_template(intent, fields)
+        return msg, None
+    except Exception:
+        return "Hi, this is Ryan following up. Reply STOP to opt out.", None
 
 
 # -----------------
@@ -235,17 +221,17 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
             else:
                 errors.append(f"Send failed for {from_num}")
 
-            # 4. Mark inbound as processed
+            # 4. Mark inbound as processed + log template KPI
             try:
-                convos.update(
-                    msg_id,
-                    {
-                        "status": "RESPONDED",
-                        "processed_by": "Autoresponder",
-                        "processed_at": iso_timestamp(),
-                        "intent_detected": intent,
-                    },
-                )
+                update_payload = {
+                    "status": "RESPONDED",
+                    "processed_by": "Autoresponder",
+                    "processed_at": iso_timestamp(),
+                    "intent_detected": intent,
+                }
+                if template_id:
+                    update_payload["template_id"] = template_id
+                convos.update(msg_id, update_payload)
             except Exception as mark_err:
                 errors.append(f"Failed to update inbound row {msg_id}: {mark_err}")
 
@@ -255,7 +241,7 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
         errors.append(str(e))
 
     return {
-        "ok": True if processed > 0 else False,
+        "ok": processed > 0,
         "type": "Inbound",
         "processed": processed,
         "breakdown": breakdown,
