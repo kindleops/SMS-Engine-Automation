@@ -18,7 +18,7 @@ from sms.kpi_aggregator import aggregate_kpis
 from sms.retry_runner import run_retry
 from sms.followup_flow import run_followups
 from sms.dispatcher import run_engine
-from sms.health_strict import strict_health  # ✅ also belongs up here
+from sms.health_strict import strict_health
 
 # --- Load .env ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -26,18 +26,18 @@ ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 # --- FastAPI app ---
-app = FastAPI(title="REI SMS Engine", version="1.0")
+app = FastAPI(title="REI SMS Engine", version="1.1")
 app.include_router(inbound_router)
 
 # --- ENV CONFIG ---
 CRON_TOKEN = os.getenv("CRON_TOKEN")
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
 
 PERF_BASE = os.getenv("PERFORMANCE_BASE")
 PERF_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 
-# Airtable defaults
 TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
 LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
 
@@ -57,6 +57,16 @@ leads = (
 # -------------------------
 # Helpers
 # -------------------------
+def log_error(context: str, err: Exception):
+    """Centralized error logger with optional Slack/email notify."""
+    msg = f"❌ {context}: {err}"
+    print(msg)
+    try:
+        _notify(msg)
+    except Exception:
+        pass
+
+
 def get_perf_tables():
     if not (PERF_KEY and PERF_BASE):
         return None, None
@@ -64,9 +74,8 @@ def get_perf_tables():
         runs = Table(PERF_KEY, PERF_BASE, "Runs/Logs")
         kpis = Table(PERF_KEY, PERF_BASE, "KPIs")
         return runs, kpis
-    except Exception:
-        print("⚠️ Failed to init Performance tables")
-        traceback.print_exc()
+    except Exception as e:
+        log_error("Init Performance tables", e)
         return None, None
 
 
@@ -92,8 +101,8 @@ def log_run(runs, step: str, result: dict):
                 "Timestamp": iso_timestamp(),
             }
         )
-    except Exception:
-        traceback.print_exc()
+    except Exception as e:
+        log_error(f"Log Run {step}", e)
         return None
 
 
@@ -107,13 +116,13 @@ def log_kpi(kpis, metric: str, value: int):
                 "Date": datetime.now(timezone.utc).date().isoformat(),
             }
         )
-    except Exception:
-        traceback.print_exc()
+    except Exception as e:
+        log_error(f"Log KPI {metric}", e)
         return None
 
 
 # -------------------------
-# Startup Checks (merged)
+# Startup Checks
 # -------------------------
 STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
 
@@ -124,41 +133,30 @@ def startup_checks():
         print("✅ Environment loaded:")
         print(f"   LEADS_CONVOS_BASE: {LEADS_CONVOS_BASE}")
         print(f"   PERFORMANCE_BASE: {PERF_BASE}")
-        print(
-            f"   CONVERSATIONS_TABLE: {os.getenv('CONVERSATIONS_TABLE', 'Conversations')}"
-        )
-        print(f"   STRICT_MODE: {STRICT_MODE}")
+        print(f"   STRICT_MODE: {STRICT_MODE}, TEST_MODE: {TEST_MODE}")
 
-        # Sanity check env vars
-        missing = []
-        for key in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"]:
-            if not os.getenv(key):
-                missing.append(key)
-
+        # Env var sanity
+        missing = [
+            k for k in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"]
+            if not os.getenv(k)
+        ]
         if missing:
             msg = f"🚨 Missing env vars → {', '.join(missing)}"
-            print(msg)
-            _notify(msg)
+            log_error("Startup checks", RuntimeError(msg))
             if STRICT_MODE:
                 raise RuntimeError(msg)
 
         # Airtable smoke test
         if not templates or not leads:
             msg = "🚨 Airtable tables not initialized"
-            print(msg)
-            _notify(msg)
+            log_error("Startup checks", RuntimeError(msg))
             if STRICT_MODE:
                 raise RuntimeError(msg)
 
         print("✅ Startup checks passed")
 
     except Exception as e:
-        err = f"❌ Startup exception: {e}"
-        print(err)
-        try:
-            _notify(err)
-        except Exception:
-            pass
+        log_error("Startup exception", e)
         if STRICT_MODE:
             raise
 
@@ -166,8 +164,6 @@ def startup_checks():
 # -------------------------
 # Routes
 # -------------------------
-
-
 @app.get("/health")
 def health():
     return {"ok": True, "timestamp": datetime.now(timezone.utc).isoformat()}
@@ -177,7 +173,6 @@ def health():
 def health_strict_endpoint(
     mode: str = Query("prospects", description="prospects | leads | inbounds")
 ):
-    """Strict Airtable connectivity check."""
     return strict_health(mode=mode)
 
 
@@ -188,39 +183,26 @@ async def send_endpoint(
     limit: int = Query(500),
 ):
     check_token(x_cron_token)
+    if TEST_MODE:
+        return {"ok": True, "status": "mock_send", "campaign": campaign_id}
     return send_batch(campaign_id=campaign_id, limit=limit)
 
 
-@app.post("/autoresponder")
+# --- Unified Autoresponder ---
+@app.post("/autoresponder/{mode}")
 async def autoresponder_endpoint(
+    mode: str,
     limit: int = 50,
     view: str = "Unprocessed Inbounds",
     x_cron_token: str | None = Header(None),
 ):
+    """
+    Modes: autoresponder | ai-closer | manual-qa
+    """
     check_token(x_cron_token)
-    os.environ["PROCESSED_BY_LABEL"] = "Autoresponder"
-    return run_autoresponder(limit=limit, view=view)
-
-
-@app.post("/ai-closer")
-async def ai_closer_endpoint(
-    limit: int = 50,
-    view: str = "Unprocessed Inbounds",
-    x_cron_token: str | None = Header(None),
-):
-    check_token(x_cron_token)
-    os.environ["PROCESSED_BY_LABEL"] = "AI Closer"
-    return run_autoresponder(limit=limit, view=view)
-
-
-@app.post("/manual-qa")
-async def manual_qa_endpoint(
-    limit: int = 50,
-    view: str = "Unprocessed Inbounds",
-    x_cron_token: str | None = Header(None),
-):
-    check_token(x_cron_token)
-    os.environ["PROCESSED_BY_LABEL"] = "Manual QA"
+    os.environ["PROCESSED_BY_LABEL"] = mode.replace("-", " ").title()
+    if TEST_MODE:
+        return {"ok": True, "status": "mock_autoresponder", "mode": mode}
     return run_autoresponder(limit=limit, view=view)
 
 
@@ -255,103 +237,56 @@ async def run_campaigns_endpoint(
     limit: str = Query("ALL"), x_cron_token: str | None = Header(None)
 ):
     check_token(x_cron_token)
-    lim = 9999 if str(limit).upper() == "ALL" else int(limit)
+    lim = None if str(limit).upper() == "ALL" else int(limit)
     return run_campaigns(limit=lim)
 
 
 @app.post("/cron/all")
 async def cron_all_endpoint(limit: int = 500, x_cron_token: str | None = Header(None)):
     check_token(x_cron_token)
-    results = {}
+    results, totals = {}, {"processed": 0, "errors": 0}
     runs, kpis = get_perf_tables()
-    totals = {"processed": 0, "errors": 0}
 
-    # Strict preflight for all modes
     for mode in ["prospects", "leads", "inbounds"]:
         health_result = strict_health(mode)
         results[f"{mode}_health"] = health_result
         if not health_result.get("ok"):
             if runs:
                 log_run(runs, f"{mode.upper()}_HEALTH_FAIL", health_result)
-            return {
-                "ok": False,
-                "error": f"Health check failed for {mode}",
-                "results": results,
-                "totals": totals,
-                "timestamp": iso_timestamp(),
-            }
+            return {"ok": False, "error": f"Health check failed for {mode}", "results": results}
 
     steps = [
         ("OUTBOUND", lambda: send_batch(limit=limit)),
-        (
-            "AUTORESPONDER",
-            lambda: run_autoresponder(limit=50, view="Unprocessed Inbounds"),
-        ),
+        ("AUTORESPONDER", lambda: run_autoresponder(limit=50, view="Unprocessed Inbounds")),
         ("FOLLOWUPS", run_followups),
         ("METRICS", update_metrics),
         ("RETRY", lambda: run_retry(limit=100)),
         ("AGGREGATE_KPIS", aggregate_kpis),
-        ("CAMPAIGN_RUNNER", lambda: run_campaigns(limit=9999)),
+        ("CAMPAIGN_RUNNER", lambda: run_campaigns(limit=None)),
     ]
 
     for step, func in steps:
         try:
-            result = func()
+            result = func() if not TEST_MODE else {"ok": True, "status": f"mock_{step.lower()}"}
             results[step.lower()] = result
             if runs:
                 log_run(runs, step, result)
-            processed = (
-                result.get("processed")
-                or result.get("total_sent")
-                or result.get("sent")
-                or 0
-            )
-            totals["processed"] += processed
+            totals["processed"] += result.get("processed", 0)
         except Exception as e:
-            err = str(e)
-            results[f"{step.lower()}_error"] = err
+            log_error(step, e)
             totals["errors"] += 1
-            if runs:
-                log_run(runs, step, {"error": err})
 
     if kpis:
         log_kpi(kpis, "TOTAL_PROCESSED", totals["processed"])
         log_kpi(kpis, "TOTAL_ERRORS", totals["errors"])
 
-    if runs:
-        try:
-            runs.create(
-                {
-                    "Type": "DAILY_SUMMARY",
-                    "Processed": totals["processed"],
-                    "Breakdown": str(results),
-                    "Timestamp": iso_timestamp(),
-                }
-            )
-        except Exception:
-            traceback.print_exc()
-
-    return {
-        "ok": True,
-        "results": results,
-        "totals": totals,
-        "timestamp": iso_timestamp(),
-    }
+    return {"ok": True, "results": results, "totals": totals, "timestamp": iso_timestamp()}
 
 
 @app.get("/engine")
-def trigger_engine(
-    mode: str = Query(..., description="prospects | leads | inbounds"),
-    limit: int = 50,
-    retry_limit: int = 100,
-):
+def trigger_engine(mode: str, limit: int = 50, retry_limit: int = 100):
     valid_modes = {"prospects", "leads", "inbounds"}
     if mode not in valid_modes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid mode '{mode}'. Must be one of {', '.join(valid_modes)}.",
-        )
-
-    strict_health(mode)  # ✅ preflight check
-    result = run_engine(mode, limit=limit, retry_limit=retry_limit)
-    return {"ok": True, "mode": mode, "result": result}
+        raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'")
+    strict_health(mode)
+    return {"ok": True, "mode": mode, "result": run_engine(mode, limit=limit, retry_limit=retry_limit)}

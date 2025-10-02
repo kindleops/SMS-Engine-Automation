@@ -1,10 +1,10 @@
 services:
+  # 🚀 SMS Engine Service
   - type: web
     name: rei-sms-engine
-    env: python
+    env: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
+    dockerfilePath: ./Dockerfile.sms
     envVars:
       - key: AIRTABLE_API_KEY
         sync: false
@@ -20,65 +20,91 @@ services:
         sync: false
       - key: CRON_TOKEN
         sync: false
+    healthCheckPath: /health
+    autoDeploy: true
 
+  # ⚙️ DevOps Service
+  - type: web
+    name: rei-devops
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.ops
+    envVars:
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: DEVOPS_BASE
+        sync: false
+      - key: CRON_TOKEN
+        sync: false
+    healthCheckPath: /healthz
+    autoDeploy: true
+
+# 🔄 Cronjobs
 cronjobs:
-  # 🔄 Autoresponder (always on, every 10 min)
+  # --- SMS Engine Core ---
   - name: run-autoresponder
     schedule: "*/10 * * * *"
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/autoresponder" \
         -H "x-cron-token: $CRON_TOKEN"
 
-  # 🚀 Campaign runner — checks Airtable for scheduled campaigns
   - name: run-campaigns
-    schedule: "*/10 * * * *"   # every 10 minutes
+    schedule: "*/10 * * * *"
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL" \
         -H "x-cron-token: $CRON_TOKEN"
 
-  # 📊 Update metrics every 30 minutes
-  - name: update-metrics
-    schedule: "*/30 * * * *"
-    command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/metrics" \
-        -H "x-cron-token: $CRON_TOKEN"
-
-  # 🔁 Retry runner — every 30 minutes
   - name: sms-retry-runner
     schedule: "*/30 * * * *"
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/retry" \
         -H "x-cron-token: $CRON_TOKEN"
 
-  # 🌙 Reset quotas — nightly at midnight UTC
   - name: reset-daily-quotas
     schedule: "0 0 * * *"
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/reset-quotas" \
         -H "x-cron-token: $CRON_TOKEN"
 
-  # ❤️ Health ping — every 5 minutes to keep service warm
-  - name: health-ping
-    schedule: "*/5 * * * *"
-    command: |
-      curl -sS "https://rei-sms-engine.onrender.com/health"
-
-  # 📈 KPI Aggregation 
   - name: aggregate-kpis-daily
-    schedule: "0 1 * * *" # daily at 1 AM UTC
+    schedule: "0 1 * * *"
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
         -H "x-cron-token: $CRON_TOKEN"
 
   - name: aggregate-kpis-weekly
-    schedule: "0 2 * * 1" # every Monday at 2 AM UTC
+    schedule: "0 2 * * 1"
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
         -H "x-cron-token: $CRON_TOKEN"
 
   - name: aggregate-kpis-monthly
-    schedule: "0 3 1 * *" # first of the month at 3 AM UTC
+    schedule: "0 3 1 * *"
     command: |
       curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  - name: health-ping
+    schedule: "*/5 * * * *"
+    command: |
+      curl -sS "https://rei-sms-engine.onrender.com/health"
+
+  # --- DevOps Cronjobs ---
+  - name: sync-error-logs
+    schedule: "*/15 * * * *"
+    command: |
+      curl -sS -X POST "https://rei-devops.onrender.com/sync-logs" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  - name: sync-server-metrics
+    schedule: "*/30 * * * *"
+    command: |
+      curl -sS -X POST "https://rei-devops.onrender.com/sync-metrics" \
+        -H "x-cron-token: $CRON_TOKEN"
+
+  - name: error-alerts
+    schedule: "*/10 * * * *"
+    command: |
+      curl -sS -X POST "https://rei-devops.onrender.com/alerts" \
         -H "x-cron-token: $CRON_TOKEN"
   

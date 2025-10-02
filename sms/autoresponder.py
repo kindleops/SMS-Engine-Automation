@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 
 from sms.message_processor import MessageProcessor
-from sms import templates as local_templates  # fallback if Airtable is missing
+from sms import templates as local_templates  # fallback if Airtable missing
+from sms.ai_closer import run_ai_closer  # 🚀 AI takeover after Stage 3
 
 try:
     from pyairtable import Table
@@ -19,9 +20,8 @@ LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
 PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
 TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
 
-
 # -----------------
-# Airtable Clients (lazy init)
+# Airtable Clients
 # -----------------
 @lru_cache(maxsize=None)
 def get_convos():
@@ -29,13 +29,11 @@ def get_convos():
     base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
     return Table(api_key, base_id, CONVERSATIONS_TABLE) if api_key and base_id and Table else None
 
-
 @lru_cache(maxsize=None)
 def get_leads():
     api_key = os.getenv("AIRTABLE_API_KEY")
     base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
     return Table(api_key, base_id, LEADS_TABLE) if api_key and base_id and Table else None
-
 
 @lru_cache(maxsize=None)
 def get_prospects():
@@ -43,13 +41,11 @@ def get_prospects():
     base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
     return Table(api_key, base_id, PROSPECTS_TABLE) if api_key and base_id and Table else None
 
-
 @lru_cache(maxsize=None)
 def get_templates():
     api_key = os.getenv("AIRTABLE_API_KEY")
     base_id = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
     return Table(api_key, base_id, TEMPLATES_TABLE) if api_key and base_id and Table else None
-
 
 # -----------------
 # Helpers
@@ -57,10 +53,6 @@ def get_templates():
 def iso_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-
-# -----------------
-# Promote Prospects → Leads
-# -----------------
 FIELD_MAP = {
     "phone": "phone",
     "Property ID": "Property ID",
@@ -72,28 +64,38 @@ FIELD_MAP = {
     "Property Type": "Property Type",
 }
 
+STAGE_MAP = {
+    "intro": "Stage 1 - Owner Check",
+    "followup_yes": "Stage 2 - Offer Interest",
+    "followup_no": "Stage 2 - Offer Declined",
+    "followup_wrong": "Stage 2 - Wrong Number",
+    "not_owner": "Stage 2 - Not Owner",
+    "price_response": "Stage 3 - Price Discussion",
+    "condition_response": "Stage 3 - Condition Discussion",
+    "optout": "Opt-Out",
+}
 
+# -----------------
+# Lead Handling
+# -----------------
 def promote_to_lead(phone_number: str, source: str = "Autoresponder"):
     leads = get_leads()
     prospects = get_prospects()
     if not phone_number or not leads:
         return None, None
-
     try:
         existing = leads.all(formula=f"{{phone}}='{phone_number}'")
         if existing:
             lead = existing[0]
             return lead["id"], lead["fields"].get("Property ID")
 
-        # Pull from Prospects
         fields, property_id = {}, None
         if prospects:
-            prospect_match = prospects.all(formula=f"{{phone}}='{phone_number}'")
-            if prospect_match:
-                p_fields = prospect_match[0]["fields"]
-                fields = {leads_col: p_fields.get(prospects_col)
-                          for prospects_col, leads_col in FIELD_MAP.items()}
-                property_id = p_fields.get("Property ID")
+            match = prospects.all(formula=f"{{phone}}='{phone_number}'")
+            if match:
+                pf = match[0]["fields"]
+                fields = {leads_col: pf.get(prospects_col) for prospects_col, leads_col in FIELD_MAP.items()}
+                property_id = pf.get("Property ID")
 
         new_lead = leads.create({
             **fields,
@@ -104,34 +106,29 @@ def promote_to_lead(phone_number: str, source: str = "Autoresponder"):
         print(f"✨ Promoted {phone_number} → Lead")
         return new_lead["id"], property_id
     except Exception as e:
-        print(f"⚠️ Lead promotion failed for {phone_number}: {e}")
+        print(f"⚠️ Lead promotion failed: {e}")
         return None, None
 
-
-def update_lead_activity(lead_id: str, body: str, direction: str):
+def update_lead_activity(lead_id: str, body: str, direction: str, intent: str = None):
     leads = get_leads()
     if not lead_id or not leads:
         return
     try:
-        leads.update(lead_id, {
+        updates = {
             "Last Activity": iso_timestamp(),
             "Last Direction": direction,
             "Last Message": (body or "")[:500],
-        })
+        }
+        if intent == "followup_yes":
+            updates["Lead Status"] = "Interested"
+        leads.update(lead_id, updates)
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")
 
-
 # -----------------
-# Template Selection (Airtable → fallback)
+# Templates (Airtable → local fallback)
 # -----------------
 def get_template(intent: str, fields: dict) -> tuple[str, str | None]:
-    """
-    Fetch a reply template by intent.
-    Priority:
-      1. Airtable Templates table (track KPI, variation testing).
-      2. Local templates.py fallback.
-    """
     templates = get_templates()
     if templates:
         try:
@@ -147,29 +144,30 @@ def get_template(intent: str, fields: dict) -> tuple[str, str | None]:
         except Exception as e:
             print(f"⚠️ Template lookup failed: {e}")
 
-    # Fallback → local templates.py
-    try:
-        msg = local_templates.get_template(intent, fields)
-        return msg, None
-    except Exception:
-        return "Hi, this is Ryan following up. Reply STOP to opt out.", None
-
+    # fallback → local templates.py
+    msg = local_templates.get_template(intent, fields)
+    return msg, None
 
 # -----------------
 # Intent Classifier
 # -----------------
 def classify_intent(body: str) -> str:
     text = (body or "").lower().strip()
-    if any(w in text for w in ["yes", "yeah", "yep", "sure", "of course"]):
+    if any(w in text for w in ["yes", "yeah", "yep", "sure", "i do", "that's me", "of course"]):
         return "followup_yes"
-    if any(w in text for w in ["no", "nope", "nah", "not interested"]):
+    if any(w in text for w in ["no", "nope", "nah", "not interested", "dont want to sell"]):
         return "followup_no"
-    if "wrong" in text or "don't own" in text:
+    if any(w in text for w in ["wrong", "don't own", "not mine", "wrong number", "who is this"]):
         return "followup_wrong"
-    if "stop" in text or "unsubscribe" in text:
+    if any(w in text for w in ["stop", "unsubscribe", "remove", "quit", "cancel"]):
         return "optout"
+    if "$" in text or "k" in text or "price" in text or "asking" in text or "want" in text:
+        return "price_response"
+    if any(w in text for w in ["condition", "repairs", "needs work", "renovated", "tenant"]):
+        return "condition_response"
+    if any(w in text for w in ["maybe", "not sure", "thinking", "depends"]):
+        return "neutral"
     return "intro"
-
 
 # -----------------
 # Core Autoresponder
@@ -177,36 +175,42 @@ def classify_intent(body: str) -> str:
 def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
     convos = get_convos()
     if not convos:
-        return {
-            "ok": False,
-            "type": "Inbound",
-            "processed": 0,
-            "breakdown": {},
-            "errors": ["Missing Airtable Conversations table"],
-        }
+        return {"ok": False, "processed": 0, "breakdown": {}, "errors": ["Missing Conversations table"]}
 
     processed, breakdown, errors = 0, {}, []
+    processed_by = os.getenv("PROCESSED_BY_LABEL", "Autoresponder")
+
     try:
         rows = convos.all(view=view, max_records=limit)
         for r in rows:
             f = r.get("fields", {})
-            msg_id = r.get("id")
-            from_num = f.get("phone")
-            body = f.get("message")
-
+            msg_id, from_num, body = r.get("id"), f.get("phone"), f.get("message")
             if not from_num or not body:
                 continue
 
-            print(f"🤖 Processing inbound from {from_num}: {body}")
-
-            # 1. Classify + template
+            print(f"🤖 {processed_by} inbound {from_num}: {body}")
             intent = classify_intent(body)
+
+            # 🚀 Stage 3 → AI takeover
+            if intent in ("price_response", "condition_response"):
+                try:
+                    ai_result = run_ai_closer(from_num, body, f)
+                    convos.update(msg_id, {
+                        "status": "AI_HANDOFF",
+                        "processed_by": "AI Closer",
+                        "processed_at": iso_timestamp(),
+                        "intent_detected": intent,
+                        "stage": STAGE_MAP.get(intent, "Stage 3 - AI Closing"),
+                        "ai_result": str(ai_result),
+                    })
+                except Exception as e:
+                    errors.append({"phone": from_num, "error": f"AI closer failed: {e}"})
+                continue
+
+            # Normal flow (Stage 1-2)
             reply_text, template_id = get_template(intent, f)
+            lead_id, property_id = promote_to_lead(from_num, source=processed_by)
 
-            # 2. Promote → Lead
-            lead_id, property_id = promote_to_lead(from_num, source="Autoresponder")
-
-            # 3. Send reply
             send_result = MessageProcessor.send(
                 phone=from_num,
                 body=reply_text,
@@ -219,31 +223,27 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
                 processed += 1
                 breakdown[intent] = breakdown.get(intent, 0) + 1
             else:
-                errors.append(f"Send failed for {from_num}")
+                errors.append({"phone": from_num, "error": send_result.get("error", "Send failed")})
 
-            # 4. Mark inbound as processed + log template KPI
             try:
                 update_payload = {
                     "status": "RESPONDED",
-                    "processed_by": "Autoresponder",
+                    "processed_by": processed_by,
                     "processed_at": iso_timestamp(),
                     "intent_detected": intent,
+                    "stage": STAGE_MAP.get(intent, "Stage 1 - Owner Check"),
                 }
                 if template_id:
                     update_payload["template_id"] = template_id
                 convos.update(msg_id, update_payload)
-            except Exception as mark_err:
-                errors.append(f"Failed to update inbound row {msg_id}: {mark_err}")
+                if lead_id:
+                    update_lead_activity(lead_id, body, "IN", intent=intent)
+            except Exception as e:
+                errors.append({"phone": from_num, "error": f"Failed to update row: {e}"})
 
     except Exception as e:
         print("❌ Autoresponder error:")
         traceback.print_exc()
         errors.append(str(e))
 
-    return {
-        "ok": processed > 0,
-        "type": "Inbound",
-        "processed": processed,
-        "breakdown": breakdown,
-        "errors": errors,
-    }
+    return {"ok": processed > 0, "processed": processed, "breakdown": breakdown, "errors": errors}

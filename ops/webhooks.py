@@ -1,53 +1,102 @@
 # ops/webhooks.py
-from __future__ import annotations
 import os
-from fastapi import FastAPI, Request, HTTPException
-from ops.airtable_sync import AirtableSync
+import traceback
+import platform
+import psutil  # pip install psutil
+from datetime import datetime, timezone
+from fastapi import FastAPI, HTTPException
+from pyairtable import Table
 
-app = FastAPI(title="Ops Webhooks")
+app = FastAPI(title="REI DevOps Service")
 
-SYNC = AirtableSync()  # uses env
+CRON_TOKEN = os.getenv("CRON_TOKEN")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+DEVOPS_BASE = os.getenv("AIRTABLE_DEVOPS_BASE_ID")
 
-# ---------- GitHub webhook ----------
-@app.post("/webhooks/github")
-async def github_webhook(request: Request):
+# Airtable tables
+logs_table = Table(AIRTABLE_API_KEY, DEVOPS_BASE, "Logs")
+metrics_table = Table(AIRTABLE_API_KEY, DEVOPS_BASE, "Metrics")
+alerts_table = Table(AIRTABLE_API_KEY, DEVOPS_BASE, "Alerts")
+
+
+def check_token(token: str):
+    if not CRON_TOKEN or token != CRON_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid cron token")
+
+
+def iso_timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
+@app.post("/sync-logs")
+async def sync_logs(x_cron_token: str = None):
     try:
-        payload = await request.json()
-        event = request.headers.get("X-GitHub-Event", "unknown")
+        check_token(x_cron_token)
+        print("📝 [DevOps] Syncing error logs...")
 
-        # Push events to Issues table if relevant
-        if event == "issues":
-            action = payload.get("action")
-            issue = payload.get("issue", {})
-            title = issue.get("title")
-            url = issue.get("html_url")
-            severity = "INFO" if action in ("opened", "edited") else "LOW"
-            SYNC.log_issue(source="GitHub", title=f"[{action}] {title}", severity=severity, url=url, meta=payload)
-        elif event == "push":
-            repo = payload.get("repository", {}).get("full_name", "unknown")
-            sha = payload.get("after", "")[:7]
-            branch = payload.get("ref", "").split("/")[-1]
-            SYNC.log_deploy(service=repo, env=os.getenv("ENVIRONMENT", "prod"), git_sha=sha, outcome="PUSH", meta={"branch": branch})
-        else:
-            SYNC.log_issue(source="GitHub", title=f"Unhandled event: {event}", severity="INFO")
+        # Example: capture latest errors from file/stdout (stubbed here)
+        sample_log = {
+            "Service": "rei-sms-engine",
+            "Level": "ERROR",
+            "Message": "Sample error for debugging",
+            "Timestamp": iso_timestamp(),
+        }
 
-        return {"ok": True}
+        logs_table.create(sample_log)
+        return {"ok": True, "message": "Logs synced", "data": sample_log}
     except Exception as e:
-        SYNC.log_error(service="webhooks", message=f"GitHub webhook error: {e}")
-        raise HTTPException(status_code=500, detail="github webhook failed")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
-# ---------- Render deploy hook ----------
-@app.post("/webhooks/render")
-async def render_webhook(request: Request):
+
+@app.post("/sync-metrics")
+async def sync_metrics(x_cron_token: str = None):
     try:
-        payload = await request.json()
-        service = payload.get("service", "render")
-        status = payload.get("status", "unknown")
-        commit = payload.get("commit", "")[:7]
-        env = payload.get("environment", os.getenv("ENVIRONMENT", "prod"))
+        check_token(x_cron_token)
+        print("📊 [DevOps] Syncing server metrics...")
 
-        SYNC.log_deploy(service=service, env=env, git_sha=commit or "unknown", outcome=status, meta=payload)
-        return {"ok": True}
+        cpu = psutil.cpu_percent(interval=1)
+        mem = psutil.virtual_memory().percent
+
+        metric = {
+            "Service": "rei-sms-engine",
+            "CPU %": cpu,
+            "Memory %": mem,
+            "Host": platform.node(),
+            "Timestamp": iso_timestamp(),
+        }
+
+        metrics_table.create(metric)
+        return {"ok": True, "message": "Metrics synced", "data": metric}
     except Exception as e:
-        SYNC.log_error(service="webhooks", message=f"Render webhook error: {e}")
-        raise HTTPException(status_code=500, detail="render webhook failed")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/alerts")
+async def alerts(x_cron_token: str = None):
+    try:
+        check_token(x_cron_token)
+        print("🚨 [DevOps] Checking for alerts...")
+
+        # Example: alert if CPU > 80%
+        cpu = psutil.cpu_percent(interval=1)
+        if cpu > 80:
+            alert = {
+                "Service": "rei-sms-engine",
+                "Alert": f"High CPU usage detected: {cpu}%",
+                "Severity": "HIGH",
+                "Timestamp": iso_timestamp(),
+            }
+            alerts_table.create(alert)
+            return {"ok": True, "alert_triggered": True, "data": alert}
+
+        return {"ok": True, "alert_triggered": False}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok", "service": "rei-devops"}
