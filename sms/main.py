@@ -1,6 +1,5 @@
 # sms/main.py
 import os
-import traceback
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Header, HTTPException, Query

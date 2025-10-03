@@ -1,77 +1,100 @@
+# sms/metrics_tracker.py
 from __future__ import annotations
+
 import os
 import json
+import re
 import traceback
-import requests
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
-from typing import TYPE_CHECKING
 
+from dotenv import load_dotenv
+load_dotenv()  # ensure .env is loaded
+
+from pyairtable import Api
 from sms.textgrid_sender import send_message
 
-if TYPE_CHECKING:
-    from pyairtable import Table
-else:
-    try:
-        from pyairtable import Table
-    except ImportError:
-        Table = object  # placeholder so runtime doesn't break
-
-
-# --- Alerts Config ---
+# ======================
+# Alerts / thresholds
+# ======================
 ALERT_PHONE: str | None = os.getenv("ALERT_PHONE")
 ALERT_EMAIL_WEBHOOK: str | None = os.getenv("ALERT_EMAIL_WEBHOOK")
 OPT_OUT_THRESHOLD: float = float(os.getenv("OPT_OUT_ALERT_THRESHOLD", "2.5"))  # %
 DELIVERY_THRESHOLD: float = float(os.getenv("DELIVERY_ALERT_THRESHOLD", "90"))  # %
 COOLDOWN_HOURS: int = int(os.getenv("OPT_OUT_ALERT_COOLDOWN_HOURS", "24"))
 
+# ======================
+# Env: keys + bases
+# ======================
+MAIN_KEY = os.getenv("AIRTABLE_API_KEY")                           # access to LEADS_CONVOS_BASE
+REPORTING_KEY = os.getenv("AIRTABLE_REPORTING_KEY", MAIN_KEY)      # access to PERFORMANCE_BASE
 
-# -----------------------
-# Airtable Factories
-# -----------------------
+LEADS_BASE = os.getenv("LEADS_CONVOS_BASE")      # e.g., appMn2MKocaJ9I3rW
+PERF_BASE  = os.getenv("PERFORMANCE_BASE")       # e.g., appzRWrpFggxlRBgL
+
+# ======================
+# Table names
+# ======================
+CAMPAIGNS_TABLE     = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+KPIS_TABLE          = "KPIs"
+RUNS_TABLE          = "Runs/Logs"
+
+# ======================
+# Conversations field mappings (from .env)
+# ======================
+CONV_FROM_FIELD         = os.getenv("CONV_FROM_FIELD", "phone")
+CONV_TO_FIELD           = os.getenv("CONV_TO_FIELD", "to_number")
+CONV_MESSAGE_FIELD      = os.getenv("CONV_MESSAGE_FIELD", "message")
+CONV_STATUS_FIELD       = os.getenv("CONV_STATUS_FIELD", "status")
+CONV_DIRECTION_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
+CONV_TEXTGRID_ID_FIELD  = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
+CONV_RECEIVED_AT_FIELD  = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
+CONV_INTENT_FIELD       = os.getenv("CONV_INTENT_FIELD", "intent_detected")
+CONV_PROCESSED_BY_FIELD = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
+CONV_SENT_AT_FIELD      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
+
+# Normalize statuses to UPPER for matching
+DELIVERED_STATES = {"DELIVERED", "SENT"}
+FAILED_STATES    = {"FAILED", "UNDELIVERED"}
+
+# ======================
+# Airtable clients (cached, lazy)
+# ======================
 @lru_cache(maxsize=None)
-def get_runs() -> Table | None:
-    api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("PERFORMANCE_BASE")
-    return (
-        Table(api_key, base_id, "Runs/Logs") if api_key and base_id and Table else None
-    )
-
+def _api_main() -> Api | None:
+    return Api(MAIN_KEY) if MAIN_KEY else None
 
 @lru_cache(maxsize=None)
-def get_kpis() -> Table | None:
-    api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("PERFORMANCE_BASE")
-    return Table(api_key, base_id, "KPIs") if api_key and base_id and Table else None
-
+def _api_reporting() -> Api | None:
+    return Api(REPORTING_KEY) if REPORTING_KEY else None
 
 @lru_cache(maxsize=None)
-def get_campaigns() -> Table | None:
-    api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("CAMPAIGN_CONTROL_BASE")
-    table = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
-    return Table(api_key, base_id, table) if api_key and base_id and Table else None
-
+def _t_campaigns():
+    api = _api_main()
+    return api.table(LEADS_BASE, CAMPAIGNS_TABLE) if api and LEADS_BASE else None
 
 @lru_cache(maxsize=None)
-def get_convos() -> Table | None:
-    api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE")
-    table = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-    return Table(api_key, base_id, table) if api_key and base_id and Table else None
-
+def _t_convos():
+    api = _api_main()
+    return api.table(LEADS_BASE, CONVERSATIONS_TABLE) if api and LEADS_BASE else None
 
 @lru_cache(maxsize=None)
-def get_templates() -> Table | None:
-    api_key = os.getenv("AIRTABLE_API_KEY")
-    base_id = os.getenv("LEADS_CONVOS_BASE")
-    table = os.getenv("TEMPLATES_TABLE", "Templates")
-    return Table(api_key, base_id, table) if api_key and base_id and Table else None
+def _t_kpis():
+    api = _api_reporting()
+    return api.table(PERF_BASE, KPIS_TABLE) if api and PERF_BASE else None
 
+@lru_cache(maxsize=None)
+def _t_runs():
+    api = _api_reporting()
+    return api.table(PERF_BASE, RUNS_TABLE) if api and PERF_BASE else None
 
-# -----------------------
+# ======================
 # Helpers
-# -----------------------
+# ======================
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 def _parse_dt(s: str | None) -> datetime | None:
     if not s:
         return None
@@ -80,9 +103,7 @@ def _parse_dt(s: str | None) -> datetime | None:
     except Exception:
         return None
 
-
 def _should_alert(last_alert_at, rate: float, threshold: float) -> bool:
-    """Check if alert should trigger (threshold + cooldown)."""
     if rate < threshold:
         return False
     if isinstance(last_alert_at, list):
@@ -92,9 +113,7 @@ def _should_alert(last_alert_at, rate: float, threshold: float) -> bool:
         return True
     return datetime.now(timezone.utc) - dt >= timedelta(hours=COOLDOWN_HOURS)
 
-
 def _notify(msg: str) -> None:
-    """Send alert via SMS and/or webhook."""
     print(f"🚨 ALERT: {msg}")
     if ALERT_PHONE:
         try:
@@ -103,100 +122,134 @@ def _notify(msg: str) -> None:
             print(f"❌ SMS alert failed: {e}")
     if ALERT_EMAIL_WEBHOOK:
         try:
+            import requests
             requests.post(ALERT_EMAIL_WEBHOOK, json={"text": msg}, timeout=10)
         except Exception as e:
             print(f"❌ Webhook alert failed: {e}")
 
+def _norm(s: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '', s.strip().lower()) if isinstance(s, str) else s
 
-# -----------------------
-# Metrics Update
-# -----------------------
+def _auto_field_map(table, sample_record_id=None) -> dict[str, str]:
+    """normalized_field_name -> actual Airtable field name for this table."""
+    keys: list[str] = []
+    try:
+        rec = table.get(sample_record_id) if sample_record_id else None
+        if not rec:
+            page = table.all(max_records=1)
+            rec = page[0] if page else {"fields": {}}
+        keys = list(rec.get("fields", {}).keys())
+    except Exception:
+        pass
+    return {_norm(k): k for k in keys}
+
+def _remap_existing_only(table, payload: dict, sample_record_id=None) -> dict:
+    """Keep only keys that already exist on the table (prevents 422 UNKNOWN_FIELD_NAME)."""
+    amap = _auto_field_map(table, sample_record_id)
+    out: dict = {}
+    for k, v in payload.items():
+        ak = amap.get(_norm(k))
+        if ak:
+            out[ak] = v
+    return out
+
+def _fbf_equals(field_name: str, value: str) -> str:
+    """Safe filterByFormula '=' for string."""
+    safe = (value or "").replace("'", r"\'")
+    return f"{{{field_name}}}='{safe}'"
+
+# ======================
+# Core
+# ======================
 def update_metrics() -> dict:
     """
     Pull campaign + conversation data from Airtable,
-    calculate metrics, push KPIs + logs, and trigger alerts.
+    compute metrics, write KPIs & Runs, and (optionally) alert.
+
+    - Reads Campaigns & Conversations from LEADS_CONVOS_BASE
+    - Writes KPIs & Runs to PERFORMANCE_BASE
+    - Updates ONLY existing fields on Campaigns (no 422s)
     """
-    campaigns = get_campaigns()
-    convos = get_convos()
-    runs = get_runs()
-    kpis = get_kpis()
+    campaigns = _t_campaigns()
+    convos    = _t_convos()
+    runs      = _t_runs()
+    kpis      = _t_kpis()
 
     if not campaigns or not convos:
-        return {"ok": False, "error": "Missing Airtable setup"}
+        return {"ok": False, "error": "Missing Airtable setup (campaigns/conversations tables)"}
 
     today = datetime.now(timezone.utc).date().isoformat()
     summary: list[dict] = []
-    global_stats = {
-        "sent": 0,
-        "delivered": 0,
-        "failed": 0,
-        "responses": 0,
-        "optouts": 0,
-    }
+    global_stats = {"sent": 0, "delivered": 0, "failed": 0, "responses": 0, "optouts": 0}
     run_id: str | None = None
 
-    for camp in campaigns.all():
+    try:
+        all_campaigns = campaigns.all()
+    except Exception:
+        traceback.print_exc()
+        return {"ok": False, "error": "Failed to fetch Campaigns"}
+
+    for camp in all_campaigns:
         try:
             cf = camp.get("fields", {})
-            camp_name = cf.get("Name") or "Unknown"
-            last_alert_at = cf.get("last_alert_at")
+            camp_id = camp.get("id")
+            camp_name = cf.get("Name") or cf.get("name") or "Unknown"
 
-            # outbound sent
-            sent = convos.all(
-                formula=f"AND({{direction}}='OUT',{{Campaign}}='{camp_name}')"
-            )
+            # ---- select conversations by campaign
+            fbf_campaign = _fbf_equals("Campaign", camp_name)
+
+            try:
+                sent = convos.all(formula=f"AND({{{CONV_DIRECTION_FIELD}}}='OUT', {fbf_campaign})")
+            except Exception:
+                traceback.print_exc()
+                sent = []
+
             total_sent = len(sent)
+            def _status(rec) -> str:
+                return str(rec["fields"].get(CONV_STATUS_FIELD, "")).strip().upper()
 
-            delivered = [r for r in sent if r["fields"].get("status") == "DELIVERED"]
-            failed = [r for r in sent if r["fields"].get("status") == "FAILED"]
+            delivered = [r for r in sent if _status(r) in DELIVERED_STATES]
+            failed    = [r for r in sent if _status(r) in FAILED_STATES]
 
-            inbound = convos.all(
-                formula=f"AND({{direction}}='IN',{{Campaign}}='{camp_name}')"
-            )
+            try:
+                inbound = convos.all(formula=f"AND({{{CONV_DIRECTION_FIELD}}}='IN', {fbf_campaign})")
+            except Exception:
+                traceback.print_exc()
+                inbound = []
+
             responses = len(inbound)
-
-            optouts = [
-                r
-                for r in inbound
-                if "stop" in str(r["fields"].get("message", "")).lower()
-            ]
+            optouts = [r for r in inbound if "stop" in str(r["fields"].get(CONV_MESSAGE_FIELD, "")).lower()]
             total_optouts = len(optouts)
 
-            delivery_rate = (
-                round((len(delivered) / total_sent * 100), 2) if total_sent else 0.0
-            )
-            response_rate = (
-                round((responses / total_sent * 100), 2) if total_sent else 0.0
-            )
-            optout_rate = (
-                round((total_optouts / total_sent * 100), 2) if total_sent else 0.0
-            )
+            delivery_rate = round((len(delivered) / total_sent * 100), 2) if total_sent else 0.0
+            optout_rate   = round((total_optouts / total_sent * 100), 2) if total_sent else 0.0
 
-            # update Airtable
-            campaigns.update(
-                camp["id"],
-                {
-                    "total_sent": total_sent,
-                    "delivered": len(delivered),
-                    "failed": len(failed),
-                    "responses": responses,
-                    "optouts": total_optouts,
-                    "delivery_rate": delivery_rate,
-                    "response_rate": response_rate,
-                    "optout_rate": optout_rate,
-                    "last_metrics_update": datetime.now(timezone.utc).isoformat(),
-                },
-            )
+            # ---- update Campaigns (existing fields only)
+            payload = {
+                "total_sent": total_sent,
+                "total_delivered": len(delivered),
+                "total_failed": len(failed),
+                "total_replies": responses,
+                "total_opt_outs": total_optouts,
+                "delivery_rate": delivery_rate,
+                "opt_out_rate": optout_rate,
+                "last_run_at": _now_iso(),
+            }
+            mapped = _remap_existing_only(campaigns, payload, sample_record_id=camp_id)
+            if mapped:
+                try:
+                    campaigns.update(camp_id, mapped)
+                except Exception:
+                    traceback.print_exc()
 
-            # alerts
+            # ---- alerts (cooldown via optional 'last_alert_at' if you add that field)
+            last_alert_at = cf.get("last_alert_at")
             if _should_alert(last_alert_at, optout_rate, OPT_OUT_THRESHOLD):
                 _notify(f"⚠️ High opt-out rate for {camp_name}: {optout_rate}%")
-            if _should_alert(
-                last_alert_at, 100 - delivery_rate, 100 - DELIVERY_THRESHOLD
-            ):
+            if _should_alert(last_alert_at, 100 - delivery_rate, 100 - DELIVERY_THRESHOLD):
                 _notify(f"⚠️ Low delivery rate for {camp_name}: {delivery_rate}%")
 
-            # KPIs
+            # ---- KPIs
             if kpis:
                 for metric, value in [
                     ("TOTAL_SENT", total_sent),
@@ -205,78 +258,73 @@ def update_metrics() -> dict:
                     ("RESPONSES", responses),
                     ("OPTOUTS", total_optouts),
                     ("DELIVERY_RATE", delivery_rate),
-                    ("RESPONSE_RATE", response_rate),
                     ("OPTOUT_RATE", optout_rate),
                 ]:
-                    kpis.create(
-                        {
+                    try:
+                        kpis.create({
                             "Campaign": camp_name,
                             "Metric": metric,
-                            "Value": value,
+                            "Value": float(value) if isinstance(value, (int, float)) else value,
                             "Date": today,
-                        }
-                    )
+                        })
+                    except Exception:
+                        traceback.print_exc()
 
-            # append summary
-            summary.append(
-                {
-                    "campaign": camp_name,
-                    "sent": total_sent,
-                    "delivered": len(delivered),
-                    "failed": len(failed),
-                    "responses": responses,
-                    "optouts": total_optouts,
-                    "delivery_rate": delivery_rate,
-                    "response_rate": response_rate,
-                    "optout_rate": optout_rate,
-                }
-            )
+            # ---- summary
+            summary.append({
+                "campaign": camp_name,
+                "sent": total_sent,
+                "delivered": len(delivered),
+                "failed": len(failed),
+                "responses": responses,
+                "optouts": total_optouts,
+                "delivery_rate": delivery_rate,
+                "optout_rate": optout_rate,
+            })
 
-            # accumulate global stats
-            global_stats["sent"] += total_sent
+            # ---- globals
+            global_stats["sent"]      += total_sent
             global_stats["delivered"] += len(delivered)
-            global_stats["failed"] += len(failed)
+            global_stats["failed"]    += len(failed)
             global_stats["responses"] += responses
-            global_stats["optouts"] += total_optouts
+            global_stats["optouts"]   += total_optouts
 
         except Exception:
             print(f"❌ Metrics update failed for {camp.get('id')}")
             traceback.print_exc()
 
-    # global KPIs
+    # ---- Global KPIs
     if kpis:
         for metric, value in [
             ("TOTAL_SENT", global_stats["sent"]),
-            ("DELIVERED", global_stats["delivered"]),
-            ("FAILED", global_stats["failed"]),
-            ("RESPONSES", global_stats["responses"]),
-            ("OPTOUTS", global_stats["optouts"]),
+            ("DELIVERED",  global_stats["delivered"]),
+            ("FAILED",     global_stats["failed"]),
+            ("RESPONSES",  global_stats["responses"]),
+            ("OPTOUTS",    global_stats["optouts"]),
         ]:
             try:
-                kpis.create(
-                    {
-                        "Campaign": "ALL",
-                        "Metric": metric,
-                        "Value": value,
-                        "Date": today,
-                    }
-                )
+                kpis.create({
+                    "Campaign": "ALL",
+                    "Metric": metric,
+                    "Value": float(value),
+                    "Date": today,
+                })
             except Exception:
                 traceback.print_exc()
 
-    # runs log
-    if runs:
+    # ---- Runs / Logs
+    run_id = None
+    runs_tbl = _t_runs()
+    if runs_tbl:
         try:
-            run_record = runs.create(
-                {
-                    "Type": "METRICS_UPDATE",
-                    "Processed": global_stats["sent"],
-                    "Breakdown": json.dumps(summary, indent=2),
-                    "Timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            run_id = run_record["id"]
+            run_record = runs_tbl.create({
+                "Type": "METRICS_UPDATE",
+                "Processed": float(global_stats["sent"]),
+                "Breakdown": json.dumps(summary, indent=2),
+                "Timestamp": _now_iso(),
+            })
+            run_id = run_record.get("id")
         except Exception:
             traceback.print_exc()
 
-    return {"summary": summary, "global": global_stats, "run_id": run_id}
+    return {"summary": summary, "global": global_stats, "run_id": run_id, "ok": True}

@@ -5,7 +5,7 @@ import math
 import statistics
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # Re-use your existing sender
 from sms.message_processor import MessageProcessor
