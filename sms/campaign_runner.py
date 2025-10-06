@@ -8,10 +8,10 @@ import random
 import traceback
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
-from typing import Any, Dict, Tuple, List
+from typing import Any, Dict, Tuple, List, Optional
 
 from dotenv import load_dotenv
-load_dotenv()  # ensure .env is loaded
+load_dotenv()
 
 from pyairtable import Api
 
@@ -23,25 +23,21 @@ from sms.retry_runner import run_retry  # 🔁 retry handler
 # ======================
 # Airtable config
 # ======================
-CAMPAIGNS_TABLE = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
-TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
-DRIP_QUEUE_TABLE = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
+CAMPAIGNS_TABLE   = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+TEMPLATES_TABLE   = os.getenv("TEMPLATES_TABLE", "Templates")
+DRIP_QUEUE_TABLE  = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
+PROSPECTS_TABLE   = os.getenv("PROSPECTS_TABLE", "Prospects")
 
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")       # e.g., appMn2MKocaJ9I3rW
-PERFORMANCE_BASE  = os.getenv("PERFORMANCE_BASE")        # e.g., appzRWrpFggxlRBgL
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
+PERFORMANCE_BASE  = os.getenv("PERFORMANCE_BASE")
 
-MAIN_KEY      = os.getenv("AIRTABLE_API_KEY")
-REPORTING_KEY = os.getenv("AIRTABLE_REPORTING_KEY", MAIN_KEY)
+MAIN_KEY          = os.getenv("AIRTABLE_API_KEY")
+REPORTING_KEY     = os.getenv("AIRTABLE_REPORTING_KEY", MAIN_KEY)
 
-# Prospect table aliases (your tables are literally "(P1)".."(P4)")
-TABLE_ALIASES = {
-    "P1": os.getenv("P1_TABLE", "(P1)"),
-    "P2": os.getenv("P2_TABLE", "(P2)"),
-    "P3": os.getenv("P3_TABLE", "(P3)"),
-    "P4": os.getenv("P4_TABLE", "(P4)"),
-}
+# Toggle immediate sending after queuing (default False → queue-only)
+RUNNER_SEND_AFTER_QUEUE = (os.getenv("RUNNER_SEND_AFTER_QUEUE", "false").lower() == "true")
 
-# Common phone field variants (covers your P1 linked-owner fields)
+# Phone field variants commonly seen in your Prospects schema
 PHONE_FIELDS = [
     "phone", "Phone", "Mobile", "Cell",
     "Owner Phone", "Owner Phone 1", "Owner Phone 2",
@@ -62,7 +58,7 @@ def _norm(s: Any) -> Any:
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
 
 
-def _auto_field_map(table, sample_record_id: str | None = None) -> Dict[str, str]:
+def _auto_field_map(table, sample_record_id: Optional[str] = None) -> Dict[str, str]:
     """normalized_field_name -> actual Airtable field name for this table."""
     try:
         if sample_record_id:
@@ -76,7 +72,7 @@ def _auto_field_map(table, sample_record_id: str | None = None) -> Dict[str, str
     return {_norm(k): k for k in keys}
 
 
-def _remap_existing_only(table, payload: Dict, sample_record_id: str | None = None) -> Dict:
+def _remap_existing_only(table, payload: Dict, sample_record_id: Optional[str] = None) -> Dict:
     """Include only keys that already exist on the table (prevents 422 UNKNOWN_FIELD_NAME)."""
     amap = _auto_field_map(table, sample_record_id)
     out: Dict[str, Any] = {}
@@ -87,56 +83,74 @@ def _remap_existing_only(table, payload: Dict, sample_record_id: str | None = No
     return out
 
 
-def _safe_create(table, payload: Dict, sample_record_id: str | None = None) -> None:
+def _safe_create(table, payload: Dict, sample_record_id: Optional[str] = None) -> Optional[Dict]:
     """
-    Create with field-remap shielding.
-    If the table is empty (no sample), try an optimistic create first.
-    On 422, progressively trim to a conservative subset.
+    Create with graceful 422 handling:
+    - Try full payload
+    - On UNKNOWN_FIELD_NAME, drop just that field and retry (up to a few passes)
+    - If table has no discoverable fields yet, try optimistic then conservative/minimal fallbacks
     """
+    if not (table and payload):
+        return None
     try:
         amap = _auto_field_map(table, sample_record_id)
-
-        # Case A: we have a map -> remap + create
         if amap:
-            mapped = {amap.get(_norm(k)): v for k, v in payload.items() if amap.get(_norm(k))}
-            if mapped:
-                table.create(mapped)
-                return
-            # Nothing mapped (unexpected) -> try optimistic create
-            table.create(payload)
-            return
+            to_send = {amap.get(_norm(k)): v for k, v in payload.items() if amap.get(_norm(k))}
+            if not to_send:
+                to_send = dict(payload)  # optimistic
+        else:
+            to_send = dict(payload)
 
-        # Case B: table looks empty -> optimistic create, then fallbacks
-        try:
-            table.create(payload)
-            return
-        except Exception:
-            # Trim to likely-safe keys
-            conservative_keys = [
-                "Prospect", "Leads", "Lead", "Contact",
-                "Campaign", "Template",
-                "phone", "Phone", "to", "To",
-                "message_preview", "Message Preview", "Message",
-                "status", "Status",
-                "from_number", "From Number",
-                "next_send_date", "Next Send Date",
-                "Property ID", "property_id",
-            ]
-            trimmed = {k: v for k, v in payload.items() if k in conservative_keys}
-            if trimmed:
-                try:
-                    table.create(trimmed)
-                    return
-                except Exception:
-                    pass
-            # Minimal last-ditch
-            minimal = {k: v for k, v in payload.items() if k.lower() in ("phone", "status")}
-            if minimal:
-                table.create(minimal)
-                return
-            raise
+        for _ in range(6):
+            try:
+                return table.create(to_send)
+            except Exception as e:
+                msg = str(e)
+                bad = re.findall(r'Unknown field name: "([^"]+)"', msg) or \
+                      re.findall(r"Unknown field name: '([^']+)'", msg)
+                if bad:
+                    for b in bad:
+                        to_send.pop(b, None)
+                    continue
+
+                # if first optimistic failed and we have no amap, try conservative/minimal
+                if not amap:
+                    conservative_keys = {
+                        "prospect", "leads", "lead", "contact",
+                        "campaign", "template",
+                        "phone", "to",
+                        "messagepreview", "message",
+                        "status",
+                        "fromnumber",
+                        "nextsenddate",
+                        "propertyid",
+                        "market", "address", "ownername",
+                    }
+                    conservative = {k: v for k, v in to_send.items() if _norm(k) in conservative_keys}
+                    minimal      = {k: v for k, v in to_send.items() if _norm(k) in {"phone", "status"}}
+                    for candidate in (conservative, minimal):
+                        if candidate:
+                            try:
+                                return table.create(candidate)
+                            except Exception:
+                                pass
+                raise
     except Exception:
         traceback.print_exc()
+        return None
+
+
+def _safe_update(table, rec_id: str, payload: Dict, sample_record_id: Optional[str] = None) -> Optional[Dict]:
+    """Update only fields that exist."""
+    if not (table and rec_id and payload):
+        return None
+    try:
+        to_send = _remap_existing_only(table, payload, sample_record_id=rec_id if sample_record_id is None else sample_record_id)
+        if to_send:
+            return table.update(rec_id, to_send)
+    except Exception:
+        traceback.print_exc()
+    return None
 
 
 def _get(f: Dict, *names) -> Any:
@@ -152,14 +166,14 @@ def _get(f: Dict, *names) -> Any:
     return None
 
 
-def _digits_only(s: str | None) -> str | None:
+def _digits_only(s: Any) -> Optional[str]:
     if not isinstance(s, str):
         return None
     ds = "".join(re.findall(r"\d+", s))
     return ds if len(ds) >= 10 else None
 
 
-def get_phone(f: Dict[str, Any]) -> str | None:
+def get_phone(f: Dict[str, Any]) -> Optional[str]:
     for k in PHONE_FIELDS:
         v = f.get(k)
         d = _digits_only(v)
@@ -168,15 +182,11 @@ def get_phone(f: Dict[str, Any]) -> str | None:
     return None
 
 
-def pick_template(template_ids: List[str] | None, templates_table) -> Tuple[str | None, str | None]:
-    """Pick a random template from linked templates in campaign."""
+def pick_template(template_ids: Any, templates_table) -> Tuple[Optional[str], Optional[str]]:
+    """Pick a random template from linked templates in campaign (list or single id)."""
     if not template_ids:
         return None, None
-    # linked fields can be a list of ids or a single id/string
-    if isinstance(template_ids, list) and template_ids:
-        tid = random.choice(template_ids)
-    else:
-        tid = str(template_ids)
+    tid = random.choice(template_ids) if isinstance(template_ids, list) and template_ids else str(template_ids)
     try:
         tmpl = templates_table.get(tid)
     except Exception:
@@ -185,28 +195,6 @@ def pick_template(template_ids: List[str] | None, templates_table) -> Tuple[str 
         return None, None
     msg = _get(tmpl.get("fields", {}), "Message", "message")
     return (msg, tid) if msg else (None, None)
-
-
-def _resolve_table_name(prefix: str) -> str:
-    """Accepts 'P1' or '(P1)' etc. Returns the real table name, defaulting to '(P#)'."""
-    p = prefix.strip().upper().replace("(", "").replace(")", "")
-    return TABLE_ALIASES.get(p, f"({p})")
-
-
-def _parse_view_segment(value: str) -> Tuple[str | None, str | None]:
-    """
-    Parse inputs like:
-      'P2 / Ramsey County, MN - Tax Delinquent'
-      '(P3)/Some View'
-      'Some View'  -> (no prefix returned)
-    Returns (prefix, view) where prefix is 'P#' or None.
-    """
-    if not value:
-        return None, None
-    m = re.match(r"^\(?\s*(P[1-4])\s*\)?(?:\s*/\s*(.+))?$", value.strip(), flags=re.I)
-    if m:
-        return m.group(1).upper(), (m.group(2) or "").strip() or None
-    return None, value.strip() or None
 
 
 # ======================
@@ -234,9 +222,10 @@ def get_templates():
     return api.table(LEADS_CONVOS_BASE, TEMPLATES_TABLE) if api else None
 
 
-def get_prospects(table_name: str):
+@lru_cache(maxsize=None)
+def get_prospects():
     api = _api_main()
-    return api.table(LEADS_CONVOS_BASE, table_name) if api else None
+    return api.table(LEADS_CONVOS_BASE, PROSPECTS_TABLE) if api else None
 
 
 @lru_cache(maxsize=None)
@@ -260,23 +249,32 @@ def get_kpis():
 # ======================
 # Main runner
 # ======================
-def run_campaigns(limit: str | int = 1, retry_limit: int = 3) -> Dict[str, Any]:
+def run_campaigns(
+    limit: str | int = 1,
+    retry_limit: int = 3,
+    send_after_queue: Optional[bool] = None,
+) -> Dict[str, Any]:
     """
-    Execute scheduled campaigns:
-      • Supports prospect tables (P1..P4) whose actual table names are '(P1)'..'(P4)'
+    Execute eligible campaigns from the Prospects table:
+      • Prospects-only (single source of truth)
       • Rotates templates
       • Throttles outbound to ~20 msgs/minute
-      • Retries failed sends
-      • Updates only existing fields on Airtable (prevents 422s)
-      • Logs to Runs + KPIs and triggers a metrics refresh at the end
+      • Optionally sends + retries after queueing
+      • Creates Drip Queue rows with linked Campaign/Prospect/Template + Address/Market/Owner
+      • Updates Campaign status + counters
+      • Best-effort cross-campaign metrics refresh (update_metrics)
     """
+    if send_after_queue is None:
+        send_after_queue = RUNNER_SEND_AFTER_QUEUE
+
     campaigns = get_campaigns()
     templates = get_templates()
     drip      = get_drip()
+    prospects = get_prospects()
     runs      = get_runs()
     kpis      = get_kpis()
 
-    if not (campaigns and templates and drip):
+    if not (campaigns and templates and drip and prospects):
         print("⚠️ CampaignRunner: Missing Airtable tables or API env. Check .env / load_dotenv().")
         return {"ok": False, "processed": 0, "results": [], "errors": ["Missing Airtable tables"]}
 
@@ -293,12 +291,13 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3) -> Dict[str, Any]:
         traceback.print_exc()
         return {"ok": False, "processed": 0, "results": [], "errors": ["Failed to fetch campaigns"]}
 
-    # Accept both Scheduled and Running so you can resume a partial run
+    # Accept Scheduled/Running AND must have Go Live checked
     eligible_campaigns = []
     for c in all_campaigns:
         f = c.get("fields", {})
         status_val = str(_get(f, "status", "Status") or "")
-        if status_val in ("Scheduled", "Running"):
+        go_live = bool(_get(f, "Go Live", "go_live"))
+        if go_live and status_val in ("Scheduled", "Running"):
             eligible_campaigns.append(c)
 
     processed = 0
@@ -308,193 +307,208 @@ def run_campaigns(limit: str | int = 1, retry_limit: int = 3) -> Dict[str, Any]:
         if processed >= int(limit):
             break
 
-        f: Dict[str, Any] = camp.get("fields", {})
         cid = camp["id"]
+        f: Dict[str, Any] = camp.get("fields", {})
         name = _get(f, "Name", "name") or "Unnamed"
 
-        # Skip paused/cancelled if they slipped through
-        if _get(f, "status", "Status") in ("Paused", "Cancelled"):
-            continue
+        try:
+            # Skip paused/cancelled if they slipped through
+            if _get(f, "status", "Status") in ("Paused", "Cancelled"):
+                continue
 
-        # Time window
-        start_str = _get(f, "start_time", "Start Time")
-        end_str   = _get(f, "end_time", "End Time")
-        start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")) if start_str else None
-        end_dt   = datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else None
+            # Time window
+            start_str = _get(f, "Start Time", "start_time")
+            end_str   = _get(f, "End Time", "end_time")
+            start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")) if start_str else None
+            end_dt   = datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else None
 
-        if start_dt and now < start_dt:
-            continue
-        if end_dt and now > end_dt:
-            payload = {"status": "Completed", "last_run_at": now_iso}
-            mapped = _remap_existing_only(campaigns, payload, sample_record_id=cid)
-            if mapped:
+            if start_dt and now < start_dt:
+                continue
+            if end_dt and now > end_dt:
+                _safe_update(campaigns, cid, {"status": "Completed", "last_run_at": now_iso})
+                continue
+
+            # Templates (linked records)
+            template_ids = _get(f, "templates", "Templates") or []
+            if not template_ids:
+                print(f"⚠️ Campaign '{name}' missing templates; skipping")
+                continue
+
+            # Prospects source parsing (Prospects-only)
+            view = (_get(f, "View/Segment", "view", "View", "Segment") or "").strip() or None
+
+            # Fetch prospects; if the token lacks permission for the view, try without the view as a fallback
+            try:
+                prospect_records = prospects.all(view=view) if view else prospects.all()
+            except Exception as e:
+                print(f"⚠️ Prospects fetch failed (view={view!r}). {e}")
                 try:
-                    campaigns.update(cid, mapped)
+                    prospect_records = prospects.all()
+                    view = None
                 except Exception:
                     traceback.print_exc()
-            continue
+                    continue
 
-        # Templates (linked records)
-        template_ids = _get(f, "templates", "Templates") or []
-        if not template_ids:
-            print(f"⚠️ Campaign '{name}' missing templates; skipping")
-            continue
+            total_prospects = len(prospect_records)
+            queued = 0
 
-        # Prospect source parsing
-        # Accept fields: "View/Segment", "view", "View", "Segment"
-        view_raw = (_get(f, "View/Segment", "view", "View", "Segment") or "").strip()
-        prefix_from_view, view = _parse_view_segment(view_raw)
+            # Queue prospects (throttled)
+            for idx, prospect in enumerate(prospect_records):
+                pf = prospect.get("fields", {})
+                phone = get_phone(pf)
+                if not phone:
+                    continue
 
-        # Default table field (accept both 'Prospect Table' and 'prospect_table'); fallback to P1
-        table_field = _get(f, "Prospect Table", "prospect_table") or "P1"
-        # If the "Prospect Table" is already a P#/ (P#), keep parsing; otherwise treat as literal table
-        if re.fullmatch(r"\(?\s*P[1-4]\s*\)?", str(table_field), flags=re.I):
-            table_name = _resolve_table_name(str(table_field))
-        else:
-            table_name = str(table_field).strip()
-        # If the view cell included a prefix, it wins
-        if prefix_from_view:
-            table_name = _resolve_table_name(prefix_from_view)
+                template_text, chosen_tid = pick_template(template_ids, templates)
+                if not template_text:
+                    continue
 
-        prospects_table = get_prospects(table_name)
-        if not prospects_table:
-            print(f"⚠️ Campaign '{name}' missing prospect table {table_name}")
-            continue
+                personalized_text = format_template(template_text, pf)
+                next_send = now + timedelta(seconds=idx * 3)  # ~20 msg/min
 
-        # Fetch prospects; if the token lacks permission for the view, try without the view as a fallback
-        try:
-            prospect_records = prospects_table.all(view=view) if view else prospects_table.all()
-        except Exception as e:
-            print(f"⚠️ Prospect fetch failed for {table_name} (view={view!r}). Retrying without view. Error: {e}")
-            try:
-                prospect_records = prospects_table.all()
-                view = None
-            except Exception:
-                traceback.print_exc()
-                continue
+                # Resolve market/address/owner from campaign first, then prospect
+                market = _get(f, "Market", "market") or _get(pf, "Market", "market")
+                address = _get(pf, "Property Address", "Address")
+                owner = _get(pf, "Owner Name") or " ".join(
+                    [x for x in [pf.get("Owner First Name"), pf.get("Owner Last Name")] if x]
+                ).strip() or None
+                prop_id = _get(pf, "Property ID", "property_id")
 
-        total_prospects = len(prospect_records)
-        queued = 0
+                # Include snake + Title variants; _safe_create will prune to what's present
+                payload = {
+                    # linked record fields
+                    "Prospect": [prospect["id"]],
+                    "Campaign": [cid],
+                    "Template": [chosen_tid],
 
-        # Queue prospects (throttled)
-        for idx, prospect in enumerate(prospect_records):
-            pf = prospect.get("fields", {})
-            phone = get_phone(pf)
-            if not phone:
-                continue
+                    # phone (both)
+                    "phone": phone,
+                    "Phone": phone,
 
-            template_text, chosen_tid = pick_template(template_ids, templates)
-            if not template_text:
-                continue
+                    # message preview (both)
+                    "message_preview": personalized_text,
+                    "Message Preview": personalized_text,
 
-            personalized_text = format_template(template_text, pf)
-            next_send = now + timedelta(seconds=idx * 3)  # ~20 msg/min
+                    # status (both)
+                    "status": "QUEUED",
+                    "Status": "QUEUED",
 
-            try:
-                _safe_create(
-                    drip,
-                    {
-                        # Drip queue may use different link field names; _safe_create only keeps valid ones
-                        "Prospect": [prospect["id"]],
-                        "Leads": [prospect["id"]],
-                        "Campaign": [cid],
-                        "Template": [chosen_tid],
-                        "phone": phone,
-                        "message_preview": personalized_text,
-                        "status": "QUEUED",
-                        "from_number": None,  # plug number pools later
-                        "next_send_date": next_send.isoformat(),
-                        "Property ID": _get(pf, "Property ID", "property_id"),
-                    },
-                )
-                queued += 1
-            except Exception:
-                print(f"❌ Failed to queue {phone}")
-                traceback.print_exc()
+                    # from number (both)
+                    "from_number": None,
+                    "From Number": None,
 
-        # Send a batch (scope to this campaign id so we don’t pick a different one)
-        batch_result = send_batch(campaign_id=cid, limit=500)
+                    # schedule (both)
+                    "next_send_date": next_send.isoformat(),
+                    "Next Send Date": next_send.isoformat(),
 
-        # Retry loop
-        retry_result: Dict[str, Any] = {}
-        if batch_result.get("total_sent", 0) < queued:
-            for _ in range(int(retry_limit)):
-                retry_result = run_retry(limit=100, view="Failed Sends")
-                if retry_result.get("retried", 0) == 0:
-                    break
+                    # property id (both)
+                    "Property ID": prop_id,
+                    "property_id": prop_id,
 
-        # Compute progress
-        current_sent = _get(f, "messages_sent", "Messages Sent") or 0
-        sent_so_far = (current_sent or 0) + (batch_result.get("total_sent", 0) or 0) + (retry_result.get("retried", 0) or 0)
-        completed = total_prospects > 0 and (sent_so_far >= total_prospects)
-
-        # Update campaign (only fields that actually exist)
-        payload = {
-            "status": "Completed" if completed else "Running",
-            "total_sent": sent_so_far,  # your schema has this field
-            "Last Run Result": json.dumps(
-                {
-                    "Queued": queued,
-                    "Sent": batch_result.get("total_sent", 0),
-                    "Retries": retry_result.get("retried", 0),
-                    "Completed": completed,
-                    "Table": table_name,
-                    "View": view,
+                    # context (pruned if fields don't exist)
+                    "Market": market,
+                    "market": market,
+                    "Address": address,
+                    "Property Address": address,
+                    "Owner Name": owner,
                 }
-            ),
-            "last_run_at": now_iso,
-        }
-        mapped = _remap_existing_only(campaigns, payload, sample_record_id=cid)
-        if mapped:
-            try:
-                campaigns.update(cid, mapped)
-            except Exception:
-                traceback.print_exc()
 
-        # Logs/KPIs
-        if runs:
-            try:
-                _safe_create(
-                    runs,
+                _safe_create(drip, payload)
+                queued += 1
+
+            # --- Optionally send a batch (scope to this campaign id) ---
+            batch_result: Dict[str, Any] = {"total_sent": 0}
+            retry_result: Dict[str, Any] = {}
+            if send_after_queue and queued > 0:
+                try:
+                    batch_result = send_batch(campaign_id=cid, limit=500) or {"total_sent": 0}
+                except Exception:
+                    traceback.print_exc()
+                    batch_result = {"total_sent": 0}
+
+                # Retry loop
+                if batch_result.get("total_sent", 0) < queued:
+                    for _ in range(int(retry_limit)):
+                        try:
+                            rr = run_retry(limit=100, view="Failed Sends") or {}
+                        except Exception:
+                            rr = {}
+                        retry_result = rr
+                        if rr.get("retried", 0) == 0:
+                            break
+
+            # Compute progress
+            current_sent = _get(f, "messages_sent", "total_sent", "Messages Sent", "Total Sent") or 0
+            sent_so_far = (current_sent or 0) + (batch_result.get("total_sent", 0) or 0) + (retry_result.get("retried", 0) or 0)
+            completed = (total_prospects > 0) and (sent_so_far >= total_prospects)
+
+            # Update campaign (mirror messages_sent and total_sent)
+            update_payload = {
+                "status": "Completed" if completed else "Running",
+                "total_sent": sent_so_far,
+                "messages_sent": sent_so_far,
+                "Last Run Result": json.dumps(
                     {
-                        "Type": "CAMPAIGN_RUN",
-                        "Campaign": name,
-                        "Processed": float(sent_so_far),
-                        "Breakdown": json.dumps({"initial": batch_result, "retries": retry_result}),
-                        "Timestamp": now_iso,
-                    },
-                )
-            except Exception:
-                traceback.print_exc()
-
-        if kpis:
-            try:
-                _safe_create(
-                    kpis,
-                    {
-                        "Campaign": name,
-                        "Metric": "OUTBOUND_SENT",
-                        "Value": float(sent_so_far),
-                        "Date": now.date().isoformat(),
-                    },
-                )
-            except Exception:
-                traceback.print_exc()
-
-        results.append(
-            {
-                "campaign": name,
-                "queued": queued,
-                "sent": sent_so_far,
-                "completed": completed,
-                "retries": retry_result.get("retried", 0),
-                "table": table_name,
-                "view": view,
+                        "Queued": queued,
+                        "Sent": batch_result.get("total_sent", 0),
+                        "Retries": retry_result.get("retried", 0) if retry_result else 0,
+                        "Completed": completed,
+                        "Table": PROSPECTS_TABLE,
+                        "View": view,
+                    }
+                ),
+                "last_run_at": now_iso,
             }
-        )
-        processed += 1
+            _safe_update(campaigns, cid, update_payload)
 
-    # Cross-campaign metrics
+            # Logs/KPIs
+            if runs:
+                try:
+                    _safe_create(
+                        runs,
+                        {
+                            "Type": "CAMPAIGN_RUN",
+                            "Campaign": name,
+                            "Processed": float(sent_so_far),
+                            "Breakdown": json.dumps({"initial": batch_result, "retries": retry_result}),
+                            "Timestamp": now_iso,
+                        },
+                    )
+                except Exception:
+                    traceback.print_exc()
+
+            if kpis:
+                try:
+                    _safe_create(
+                        kpis,
+                        {
+                            "Campaign": name,
+                            "Metric": "OUTBOUND_SENT" if send_after_queue else "MESSAGES_QUEUED",
+                            "Value": float(sent_so_far if send_after_queue else queued),
+                            "Date": now.date().isoformat(),
+                        },
+                    )
+                except Exception:
+                    traceback.print_exc()
+
+            results.append(
+                {
+                    "campaign": name,
+                    "queued": queued,
+                    "sent": sent_so_far if send_after_queue else 0,
+                    "completed": completed if send_after_queue else False,
+                    "retries": (retry_result or {}).get("retried", 0),
+                    "table": PROSPECTS_TABLE,
+                    "view": view,
+                }
+            )
+            processed += 1
+
+        except Exception as e:
+            traceback.print_exc()
+            _safe_update(campaigns, cid, {"last_error": str(e)[:500], "last_run_at": now_iso})
+
+    # Cross-campaign metrics (best-effort)
     try:
         update_metrics()
     except Exception:
