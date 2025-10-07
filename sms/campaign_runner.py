@@ -1,581 +1,456 @@
-# sms/campaign_runner.py
 from __future__ import annotations
 
-import os
-import re
-import json
-import random
-import traceback
+import os, re, json, random, math, traceback
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
-from typing import Any, Dict, Tuple, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-load_dotenv()
-
 from pyairtable import Api
 
-from sms.outbound_batcher import send_batch, format_template
-from sms.metrics_tracker import update_metrics
-from sms.retry_runner import run_retry  # 🔁 retry handler
+load_dotenv()
 
-# ======================
-# Airtable config
-# ======================
-CAMPAIGNS_TABLE    = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
-TEMPLATES_TABLE    = os.getenv("TEMPLATES_TABLE", "Templates")
-PROSPECTS_TABLE    = os.getenv("PROSPECTS_TABLE", "Prospects")
-DRIP_QUEUE_TABLE   = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
+# Optional project pieces
+try:
+    from sms.outbound_batcher import send_batch, format_template
+except Exception:
+    def send_batch(*args, **kwargs): return {"total_sent": 0}
+    def format_template(t: str, f: Dict[str, Any]) -> str: return t
+try:
+    from sms.retry_runner import run_retry
+except Exception:
+    def run_retry(*args, **kwargs): return {"retried": 0}
+try:
+    from sms.metrics_tracker import update_metrics
+except Exception:
+    def update_metrics(*args, **kwargs): pass
 
-LEADS_CONVOS_BASE  = os.getenv("LEADS_CONVOS_BASE")
-PERFORMANCE_BASE   = os.getenv("PERFORMANCE_BASE")
+# ============== ENV / CONFIG ==============
+AIRTABLE_KEY            = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE       = os.getenv("LEADS_CONVOS_BASE")
+CAMPAIGN_CONTROL_BASE   = os.getenv("CAMPAIGN_CONTROL_BASE")
+PERFORMANCE_BASE        = os.getenv("PERFORMANCE_BASE")
 
-MAIN_KEY           = os.getenv("AIRTABLE_API_KEY")
-REPORTING_KEY      = os.getenv("AIRTABLE_REPORTING_KEY", MAIN_KEY)
+PROSPECTS_TABLE         = os.getenv("PROSPECTS_TABLE", "Prospects")
+CAMPAIGNS_TABLE         = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+TEMPLATES_TABLE         = os.getenv("TEMPLATES_TABLE", "Templates")
+DRIP_QUEUE_TABLE        = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
+NUMBERS_TABLE           = os.getenv("NUMBERS_TABLE", "Numbers")
 
-# Numbers table (for From Number assignment)
-NUMBERS_TABLE      = os.getenv("NUMBERS_TABLE", "Numbers")
-NUMBERS_BASE       = os.getenv("NUMBERS_BASE") or os.getenv("CAMPAIGN_CONTROL_BASE") or LEADS_CONVOS_BASE
+RUNNER_SEND_AFTER_QUEUE = (os.getenv("RUNNER_SEND_AFTER_QUEUE", "false").lower() == "true")
+DEDUPE_HOURS            = int(os.getenv("DEDUPE_HOURS", "72"))
+DAILY_LIMIT_FALLBACK    = int(os.getenv("DAILY_LIMIT", "750"))
 
-# Send immediately after queueing? (default True)
-RUNNER_SEND_AFTER_QUEUE = (os.getenv("RUNNER_SEND_AFTER_QUEUE", "true").strip().lower() == "true")
+# pacing
+MESSAGES_PER_MIN        = max(1, int(os.getenv("MESSAGES_PER_MIN", "20")))
+SECONDS_PER_MSG         = max(1, int(math.ceil(60.0 / MESSAGES_PER_MIN)))
+JITTER_SECONDS          = max(0, int(os.getenv("JITTER_SECONDS", "2")))
 
-# Common phone field variants (covers linked-owner variants too)
+# quiet hours (America/Chicago)
+QUIET_TZ                = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago"))
+QUIET_START_HOUR        = int(os.getenv("QUIET_START_HOUR", "21"))  # 9pm
+QUIET_END_HOUR          = int(os.getenv("QUIET_END_HOUR", "9"))     # 9am
+
 PHONE_FIELDS = [
-    "phone", "Phone", "Mobile", "Cell",
-    "Owner Phone", "Owner Phone 1", "Owner Phone 2",
-    "Phone 1", "Phone 2", "Phone 3", "Phone Number", "Primary Phone",
-    "Phone 1 (from Linked Owner)", "Phone 2 (from Linked Owner)", "Phone 3 (from Linked Owner)",
+    "phone","Phone","Mobile","Cell","Phone Number","Primary Phone",
+    "Phone 1","Phone 2","Phone 3",
+    "Owner Phone","Owner Phone 1","Owner Phone 2",
+    "Phone 1 (from Linked Owner)","Phone 2 (from Linked Owner)","Phone 3 (from Linked Owner)",
 ]
 
-# ======================
-# Helpers
-# ======================
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+STATUS_ICON = {
+    "QUEUED": "⏳", "READY": "⏳", "SENDING": "🔄",
+    "SENT": "✅", "DELIVERED": "✅", "FAILED": "❌", "CANCELLED": "❌",
+}
 
-def _norm(s: Any) -> Any:
-    return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+# ============== helpers ==============
+def utcnow() -> datetime: return datetime.now(timezone.utc)
+def iso_now() -> str: return utcnow().isoformat()
+def _norm(s: Any) -> Any: return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+def _digits_only(s: Any) -> Optional[str]:
+    if not isinstance(s, str): return None
+    ds = "".join(re.findall(r"\d+", s))
+    return ds if len(ds) >= 10 else None
+def last10(s: Any) -> Optional[str]:
+    d = _digits_only(s); return d[-10:] if d else None
 
-def _auto_field_map(table, sample_record_id: Optional[str] = None) -> Dict[str, str]:
-    """normalized_field_name -> actual Airtable field name for this table."""
+def get_phone(f: Dict[str, Any]) -> Optional[str]:
+    p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
+    p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
+    if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
+        d = _digits_only(p1)
+        if d:
+            return d
+    if f.get("Phone 2 Verified") or f.get("Phone 2 Ownership Verified"):
+        d = _digits_only(p2)
+        if d:
+            return d
+    for k in PHONE_FIELDS:
+        d = _digits_only(f.get(k)); 
+        if d: return d
+    return None
+
+# --- quiet hours / schedule in local CT (store naive local ISO) ---
+def _in_quiet_hours(dt_utc: datetime) -> bool:
+    local = dt_utc.astimezone(QUIET_TZ)
+    return (local.hour >= QUIET_START_HOUR) or (local.hour < QUIET_END_HOUR)
+
+def _shift_to_window(dt_utc: datetime) -> datetime:
+    local = dt_utc.astimezone(QUIET_TZ)
+    if local.hour >= QUIET_START_HOUR:
+        local = (local + timedelta(days=1)).replace(hour=QUIET_END_HOUR, minute=0, second=0, microsecond=0)
+    elif local.hour < QUIET_END_HOUR:
+        local = local.replace(hour=QUIET_END_HOUR, minute=0, second=0, microsecond=0)
+    return local.astimezone(timezone.utc)
+
+def _local_naive_iso(dt_utc: datetime) -> str:
+    """Return 'YYYY-MM-DDTHH:MM:SS' in America/Chicago (no Z/no offset)."""
+    local = dt_utc.astimezone(QUIET_TZ).replace(tzinfo=None)
+    return local.isoformat(timespec="seconds")
+
+def schedule_time(base_utc: datetime, idx: int) -> str:
+    t = base_utc + timedelta(seconds=idx * SECONDS_PER_MSG + (random.randint(0, JITTER_SECONDS) if JITTER_SECONDS else 0))
+    if _in_quiet_hours(t):
+        t = _shift_to_window(t)
+    # store as local naive to avoid the +5/-6 hr display offset in Airtable
+    return _local_naive_iso(t)
+
+# ============== Airtable clients ==============
+@lru_cache(maxsize=None)
+def _api_main():    return Api(AIRTABLE_KEY) if AIRTABLE_KEY and LEADS_CONVOS_BASE else None
+@lru_cache(maxsize=None)
+def _api_nums():    return Api(AIRTABLE_KEY) if AIRTABLE_KEY and CAMPAIGN_CONTROL_BASE else None
+@lru_cache(maxsize=None)
+def _api_perf():    return Api(AIRTABLE_KEY) if AIRTABLE_KEY and PERFORMANCE_BASE else None
+
+@lru_cache(maxsize=None)
+def get_campaigns(): return _api_main().table(LEADS_CONVOS_BASE, CAMPAIGNS_TABLE) if _api_main() else None
+@lru_cache(maxsize=None)
+def get_templates(): return _api_main().table(LEADS_CONVOS_BASE, TEMPLATES_TABLE) if _api_main() else None
+@lru_cache(maxsize=None)
+def get_prospects(): return _api_main().table(LEADS_CONVOS_BASE, PROSPECTS_TABLE) if _api_main() else None
+@lru_cache(maxsize=None)
+def get_drip():      return _api_main().table(LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE) if _api_main() else None
+@lru_cache(maxsize=None)
+def get_numbers():   return _api_nums().table(CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE) if _api_nums() else None
+@lru_cache(maxsize=None)
+def get_runs():      return _api_perf().table(PERFORMANCE_BASE, "Runs/Logs") if _api_perf() else None
+@lru_cache(maxsize=None)
+def get_kpis():      return _api_perf().table(PERFORMANCE_BASE, "KPIs") if _api_perf() else None
+
+# ============== field-safe writes ==============
+def _auto_field_map(tbl, sample_id: Optional[str]=None) -> Dict[str,str]:
     try:
-        if sample_record_id:
-            rec = table.get(sample_record_id)
-        else:
-            rows = table.all(max_records=1)
-            rec = rows[0] if rows else {"fields": {}}
-        keys = list(rec.get("fields", {}).keys())
+        probe = tbl.get(sample_id) if sample_id else (tbl.all(max_records=1)[0] if tbl.all(max_records=1) else {"fields":{}})
+        keys = list(probe.get("fields",{}).keys())
     except Exception:
         keys = []
     return {_norm(k): k for k in keys}
 
-def _remap_existing_only(table, payload: Dict, sample_record_id: Optional[str] = None) -> Dict:
-    """Include only keys that already exist on the table (prevents 422 UNKNOWN_FIELD_NAME)."""
-    amap = _auto_field_map(table, sample_record_id)
-    out: Dict[str, Any] = {}
+def _safe_filter(tbl, payload: Dict, sample_id: Optional[str]=None) -> Dict:
+    amap = _auto_field_map(tbl, sample_id)
+    if not amap: return dict(payload)
+    out = {}
     for k, v in payload.items():
-        ak = amap.get(_norm(k))
-        if ak:
-            out[ak] = v
+        mk = amap.get(_norm(k))
+        if mk: out[mk] = v
     return out
 
-def _safe_create(table, payload: Dict, sample_record_id: Optional[str] = None) -> Optional[Dict]:
-    """
-    Create with graceful 422 handling:
-    - Try mapped payload if schema known
-    - On unknown field(s), drop and retry
-    - If table is empty/unknown, optimistic create → conservative → minimal
-    """
+def _safe_create(tbl, payload: Dict, sample_id: Optional[str]=None):
     try:
-        amap = _auto_field_map(table, sample_record_id)
-        to_send = {amap.get(_norm(k)): v for k, v in payload.items() if amap.get(_norm(k))} if amap else dict(payload)
-        if not to_send:
-            to_send = dict(payload)
-
-        for _ in range(6):
-            try:
-                return table.create(to_send)
-            except Exception as e:
-                msg = str(e)
-                bad = re.findall(r'Unknown field name: "([^"]+)"', msg) or re.findall(r"Unknown field name: '([^']+)'", msg)
-                if bad:
-                    for b in bad:
-                        to_send.pop(b, None)
-                    continue
-                if not amap:
-                    conservative_keys = {
-                        "prospect","leads","lead","contact",
-                        "campaign","template",
-                        "phone","to",
-                        "messagepreview","message",
-                        "status",
-                        "fromnumber",
-                        "nextsenddate",
-                        "propertyid",
-                        "market","address","ownername"
-                    }
-                    conservative = {k: v for k, v in to_send.items() if _norm(k) in conservative_keys}
-                    minimal      = {k: v for k, v in to_send.items() if _norm(k) in {"phone","status"}}
-                    for candidate in (conservative, minimal):
-                        if candidate:
-                            try:
-                                return table.create(candidate)
-                            except Exception:
-                                pass
-                raise
+        data = _safe_filter(tbl, payload, sample_id)
+        return tbl.create(data) if data else None
     except Exception:
-        traceback.print_exc()
-    return None
+        traceback.print_exc(); return None
 
-def _get(f: Dict, *names) -> Any:
-    """Read a field trying multiple variants; supports normalized match."""
+def _safe_update(tbl, rid: str, payload: Dict, sample_id: Optional[str]=None):
+    try:
+        data = _safe_filter(tbl, payload, sample_id)
+        return tbl.update(rid, data) if (rid and data) else None
+    except Exception:
+        traceback.print_exc(); return None
+
+# ============== templates ==============
+def _get(fields: Dict, *names):
     for n in names:
-        if n in f:
-            return f[n]
-    nf = {_norm(k): k for k in f.keys()}
+        if n in fields: return fields[n]
+    nf = {_norm(k): k for k in fields.keys()}
     for n in names:
-        key = nf.get(_norm(n))
-        if key:
-            return f[key]
+        k = nf.get(_norm(n))
+        if k: return fields[k]
     return None
 
-def _digits_only(s: Any) -> Optional[str]:
-    if not isinstance(s, str):
-        return None
-    ds = "".join(re.findall(r"\d+", s))
-    return ds if len(ds) >= 10 else None
-
-def get_phone(f: Dict[str, Any]) -> Optional[str]:
-    for k in PHONE_FIELDS:
-        v = f.get(k)
-        d = _digits_only(v)
-        if d:
-            return d
-    return None
-
-def _compose_owner_name(pf: Dict[str, Any]) -> Optional[str]:
-    full = pf.get("Owner Name")
-    if full:
-        return full
-    fn = pf.get("Owner First Name") or ""
-    ln = pf.get("Owner Last Name") or ""
-    full = (fn + " " + ln).strip()
-    return full or None
-
-def _compose_address(pf: Dict[str, Any]) -> Optional[str]:
-    return pf.get("Property Address") or pf.get("Address")
-
-def pick_template(template_ids: Any, templates_table) -> Tuple[Optional[str], Optional[str]]:
-    """Pick a random template from linked templates in campaign (list or single id)."""
-    if not template_ids:
-        return None, None
-    tid = random.choice(template_ids) if isinstance(template_ids, list) and template_ids else str(template_ids)
+def pick_template(template_ids: Any, templates_table):
+    if not (template_ids and templates_table): return (None, None)
+    tid = random.choice(template_ids) if isinstance(template_ids, list) else str(template_ids)
     try:
-        tmpl = templates_table.get(tid)
+        row = templates_table.get(tid)
+        msg = _get(row.get("fields", {}), "Message", "message") if row else None
+        return (msg, tid) if msg else (None, None)
     except Exception:
-        return None, None
-    if not tmpl:
-        return None, None
-    msg = _get(tmpl.get("fields", {}), "Message", "message")
-    return (msg, tid) if msg else (None, None)
+        traceback.print_exc(); return (None, None)
 
-# ---- Numbers helpers (From Number assignment) ----
-def _field(f: Dict, *opts):
-    for k in opts:
-        if k in f:
-            return f[k]
-    nf = {_norm(k): k for k in f.keys()}
-    for k in opts:
-        ak = nf.get(_norm(k))
-        if ak:
-            return f[ak]
+# ============== numbers picker (uses Numbers.'Number') ==============
+def _parse_dt(s: Any) -> Optional[datetime]:
+    if not s: return None
+    try: return datetime.fromisoformat(str(s).replace("Z","+00:00"))
+    except Exception: return None
+
+def _supports_market(f: Dict[str, Any], market: Optional[str]) -> bool:
+    if not market: return True
+    if f.get("Market") == market: return True
+    ms = f.get("Markets")
+    return isinstance(ms, list) and market in ms
+
+def _to_e164(f: Dict[str, Any]) -> Optional[str]:
+    # Your base keeps the real DID in "Number"
+    for key in ("Number", "A Number", "Phone", "E164", "Friendly Name"):
+        v = f.get(key)
+        if isinstance(v, str) and _digits_only(v):
+            return v
     return None
 
-def _as_bool(v):
-    if isinstance(v, bool): return v
-    if isinstance(v, str): return _norm(v) in {"1","true","yes","active","enabled"}
-    if isinstance(v, (int, float)): return v != 0
-    return False
-
-def _e164(num: str | None) -> str | None:
-    if not isinstance(num, str): return None
-    digits = "".join(re.findall(r"\d+", num))
-    if not digits: return None
-    if len(digits) == 10: return "+1" + digits
-    if digits.startswith("1") and len(digits) == 11: return "+" + digits
-    if num.startswith("+"): return num
-    return "+" + digits
-
-def _pick_from_number(market: str | None) -> str | None:
-    """Choose an active number for the market with quota headroom; fallback to any active."""
-    tbl = get_numbers()
-    if not tbl:
-        return None
+def pick_from_number(market: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    nums = get_numbers()
+    if not nums: return (None, None)
     try:
-        rows = tbl.all()
+        rows = nums.all()
     except Exception:
-        traceback.print_exc()
-        return None
+        traceback.print_exc(); return (None, None)
 
-    def row_ok(r, want_market):
+    elig: List[Tuple[Tuple[int, datetime], Dict]] = []
+    for r in rows:
         f = r.get("fields", {})
-        mk = _field(f, "Market", "market")
-        active = _as_bool(_field(f, "Active", "Enabled", "Status"))
-        if want_market and mk != want_market:
-            return False
-        return active
+        if f.get("Active") is False: continue
+        if str(f.get("Status") or "").strip().lower() == "paused": continue
+        if not _supports_market(f, market): continue
 
-    # Prefer matching market; else any active
-    pool = [r for r in rows if row_ok(r, market)] or [r for r in rows if row_ok(r, None)]
-    if not pool:
-        return None
+        rem = f.get("Remaining")
+        try: rem = int(rem) if rem is not None else None
+        except Exception: rem = None
+        if rem is None:
+            sent_today = int(f.get("Sent Today") or 0)
+            daily_cap  = int(f.get("Daily Reset") or DAILY_LIMIT_FALLBACK)
+            rem = max(0, daily_cap - sent_today)
+        if rem <= 0: continue
 
-    # Pick lowest utilization (Sent Today / Daily Cap)
-    def util(r):
-        f = r["fields"]
-        cap  = _field(f, "Daily Cap", "Daily Limit", "Daily Quota") or 999999
-        used = _field(f, "Sent Today", "Used Today", "Today Sent") or 0
-        try: cap = int(cap) or 999999
-        except: cap = 999999
-        try: used = int(used) or 0
-        except: used = 0
-        return used / cap
+        last_used = _parse_dt(f.get("Last Used")) or datetime(1970,1,1,tzinfo=timezone.utc)
+        elig.append(((-rem, last_used), r))
 
-    pool.sort(key=util)
-    f = pool[0]["fields"]
-    did = _field(f, "From Number", "Number", "Phone", "DID", "Twilio Number")
-    return _e164(did)
+    if not elig: return (None, None)
 
-# ======================
-# Airtable clients (cached)
-# ======================
-@lru_cache(maxsize=None)
-def _api_main():
-    return Api(MAIN_KEY) if (MAIN_KEY and LEADS_CONVOS_BASE) else None
+    elig.sort(key=lambda x: x[0])
+    chosen = elig[0][1]
+    cf = chosen.get("fields", {})
+    did = _to_e164(cf)
+    if not did: return (None, None)
 
-@lru_cache(maxsize=None)
-def _api_reporting():
-    return Api(REPORTING_KEY) if (REPORTING_KEY and PERFORMANCE_BASE) else None
+    _safe_update(get_numbers(), chosen["id"], {
+        "Sent Today": int(cf.get("Sent Today") or 0) + 1,
+        "Last Used": iso_now(),
+    })
+    return did, chosen["id"]
 
-@lru_cache(maxsize=None)
-def get_campaigns():
-    api = _api_main()
-    return api.table(LEADS_CONVOS_BASE, CAMPAIGNS_TABLE) if api else None
+# ============== UI helpers ==============
+def _refresh_ui_icons_for_campaign(drip_tbl, campaign_id: str):
+    try:
+        for r in drip_tbl.all():
+            f = r.get("fields", {})
+            cids = f.get("Campaign") or []
+            if campaign_id in (cids if isinstance(cids, list) else [cids]):
+                status = str(f.get("status") or f.get("Status") or "")
+                icon = STATUS_ICON.get(status, "")
+                if icon and f.get("UI") != icon:
+                    _safe_update(drip_tbl, r["id"], {"UI": icon})
+    except Exception:
+        traceback.print_exc()
 
-@lru_cache(maxsize=None)
-def get_templates():
-    api = _api_main()
-    return api.table(LEADS_CONVOS_BASE, TEMPLATES_TABLE) if api else None
+# ============== dedupe guard ==============
+def _last_n_hours_iso(hours: int) -> str:
+    return (utcnow() - timedelta(hours=hours)).isoformat()
 
-@lru_cache(maxsize=None)
-def get_prospects():
-    api = _api_main()
-    return api.table(LEADS_CONVOS_BASE, PROSPECTS_TABLE) if api else None
+def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
+    try:
+        cutoff = _last_n_hours_iso(DEDUPE_HOURS)
+        l10 = last10(phone)
+        for r in drip_tbl.all():
+            f = r.get("fields", {})
+            ph = f.get("phone") or f.get("Phone")
+            if last10(ph) == l10:
+                cids = f.get("Campaign") or []
+                cids = cids if isinstance(cids, list) else [cids]
+                if campaign_id in cids:
+                    status = str(f.get("status") or f.get("Status") or "")
+                    when = f.get("next_send_date") or f.get("Next Send Date") or f.get("created_at") or ""
+                    if status in ("QUEUED","SENDING","READY") and (not cutoff or str(when) >= cutoff):
+                        return True
+        return False
+    except Exception:
+        traceback.print_exc(); return False
 
-@lru_cache(maxsize=None)
-def get_drip():
-    api = _api_main()
-    return api.table(LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE) if api else None
+# ============== main runner ==============
+def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None) -> Dict[str, Any]:
+    if isinstance(limit, str) and limit.upper() == "ALL": limit = 999_999
+    limit = int(limit)
 
-@lru_cache(maxsize=None)
-def get_runs():
-    api = _api_reporting()
-    return api.table(PERFORMANCE_BASE, "Runs/Logs") if api else None
+    if send_after_queue is None: send_after_queue = RUNNER_SEND_AFTER_QUEUE
+    if _in_quiet_hours(utcnow()):  # never send immediately during quiet hours
+        send_after_queue = False
 
-@lru_cache(maxsize=None)
-def get_kpis():
-    api = _api_reporting()
-    return api.table(PERFORMANCE_BASE, "KPIs") if api else None
+    campaigns = get_campaigns(); templates = get_templates()
+    prospects = get_prospects(); drip = get_drip()
+    if not all([campaigns, templates, prospects, drip]):
+        return {"ok": False, "processed": 0, "results": [], "errors": ["Missing Airtable tables or env"]}
 
-@lru_cache(maxsize=None)
-def get_numbers():
-    api = Api(MAIN_KEY) if (MAIN_KEY and NUMBERS_BASE) else None
-    return api.table(NUMBERS_BASE, NUMBERS_TABLE) if api else None
+    now = utcnow(); now_iso = iso_now()
 
-# ======================
-# Main runner
-# ======================
-def run_campaigns(
-    limit: str | int = 1,
-    retry_limit: int = 3,
-    send_after_queue: Optional[bool] = None,
-) -> Dict[str, Any]:
-    """
-    Execute eligible campaigns using the Prospects table:
-      • Filters by Campaigns.Go Live + status (Scheduled/Running) and time window
-      • Rotates templates per prospect
-      • Throttles queueing (~20 msg/min via next_send_date staggering)
-      • Assigns from_number from Numbers table (by Market, quota-aware)
-      • Optionally sends + retries after queueing (default True)
-      • Updates Campaigns status/metrics, Writes Runs/KPIs, and refreshes global metrics
-    """
-    if send_after_queue is None:
-        send_after_queue = RUNNER_SEND_AFTER_QUEUE
-
-    campaigns = get_campaigns()
-    templates = get_templates()
-    prospects_tbl = get_prospects()
-    drip      = get_drip()
-    runs      = get_runs()
-    kpis      = get_kpis()
-
-    if not (campaigns and templates and prospects_tbl and drip):
-        print("⚠️ CampaignRunner: Missing Airtable tables or API env. Check .env / load_dotenv().")
-        return {"ok": False, "processed": 0, "results": [], "errors": ["Missing Airtable tables"]}
-
-    now = utcnow()
-    now_iso = now.isoformat()
-
-    if isinstance(limit, str) and limit.upper() == "ALL":
-        limit = 999_999
-
-    # Fetch all Campaigns and filter to eligible
     try:
         all_campaigns = campaigns.all()
     except Exception:
         traceback.print_exc()
-        return {"ok": False, "processed": 0, "results": [], "errors": ["Failed to fetch campaigns"]}
+        return {"ok": False, "processed": 0, "results": [], "errors": ["Failed to fetch Campaigns"]}
 
-    eligible_campaigns = []
+    eligible: List[Dict] = []
     for c in all_campaigns:
         f = c.get("fields", {})
+        if not f.get("Go Live", False): continue
         status_val = str(_get(f, "status", "Status") or "")
-        go_live = _get(f, "Go Live", "go_live")
-        if status_val in ("Scheduled", "Running") and bool(go_live):
-            eligible_campaigns.append(c)
+        if status_val not in ("Scheduled", "Running"): continue
+
+        start = _get(f, "Start Time", "start_time")
+        end   = _get(f, "End Time", "end_time")
+        start_dt = datetime.fromisoformat(str(start).replace("Z","+00:00")) if start else None
+        end_dt   = datetime.fromisoformat(str(end).replace("Z","+00:00")) if end else None
+        if start_dt and now < start_dt: continue
+        if end_dt and now > end_dt:
+            _safe_update(campaigns, c["id"], {"status": "Completed", "last_run_at": now_iso})
+            continue
+        eligible.append(c)
 
     processed = 0
     results: List[Dict[str, Any]] = []
 
-    for camp in eligible_campaigns:
-        if processed >= int(limit):
-            break
+    for camp in eligible:
+        if processed >= limit: break
 
-        f: Dict[str, Any] = camp.get("fields", {})
-        cid   = camp["id"]
-        name  = _get(f, "Name", "name") or "Unnamed"
-        market_pref = _get(f, "Market", "market")
+        cf = camp.get("fields", {})
+        cid = camp["id"]
+        name = _get(cf, "Name", "name") or "Unnamed"
+        view = (cf.get("View/Segment") or "").strip() or None
 
-        # Time window
-        start_str = _get(f, "start_time", "Start Time")
-        end_str   = _get(f, "end_time", "End Time")
-        start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")) if start_str else None
-        end_dt   = datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else None
-
-        if start_dt and now < start_dt:
-            # keep Scheduled; skip for now
-            continue
-        if end_dt and now > end_dt:
-            update_payload = {"status": "Completed", "last_run_at": now_iso}
-            mapped = _remap_existing_only(campaigns, update_payload, sample_record_id=cid)
-            if mapped:
-                try: campaigns.update(cid, mapped)
-                except Exception: traceback.print_exc()
-            continue
-
-        # View/Segment (filter Prospects by a view if provided)
-        view_name = (_get(f, "View/Segment", "view", "View", "Segment") or "").strip() or None
-
-        # Templates (linked records)
-        template_ids = _get(f, "templates", "Templates") or []
-        if not template_ids:
-            print(f"⚠️ Campaign '{name}' missing templates; skipping")
-            continue
-
-        # Fetch Prospects
         try:
-            prospect_records = prospects_tbl.all(view=view_name) if view_name else prospects_tbl.all()
-        except Exception as e:
-            print(f"⚠️ Prospect fetch failed for view={view_name!r}. Retrying without view. Error: {e}")
-            try:
-                prospect_records = prospects_tbl.all()
-                view_name = None
-            except Exception:
-                traceback.print_exc()
-                continue
-
-        total_prospects = len(prospect_records)
-        if total_prospects == 0:
-            # nothing to do; mark as Completed
-            update_payload = {"status": "Completed", "last_run_at": now_iso}
-            mapped = _remap_existing_only(campaigns, update_payload, sample_record_id=cid)
-            if mapped:
-                try: campaigns.update(cid, mapped)
-                except Exception: traceback.print_exc()
-            results.append({"campaign": name, "queued": 0, "sent": 0, "completed": True, "retries": 0, "view": view_name})
-            processed += 1
-            continue
-
-        # Update to Running (best-effort)
-        try:
-            mapped = _remap_existing_only(campaigns, {"status": "Running", "last_run_at": now_iso}, sample_record_id=cid)
-            if mapped:
-                campaigns.update(cid, mapped)
+            prospect_rows = prospects.all(view=view) if view else prospects.all()
         except Exception:
-            traceback.print_exc()
+            traceback.print_exc(); continue
+
+        template_ids = _get(cf, "Templates", "templates") or []
+        if not template_ids: continue
+
+        market = _get(cf, "Market", "market")
+        from_number, number_rec_id = pick_from_number(market)
+        # if no DID available, skip queueing (prevents blank from_number rows)
+        if not from_number:
+            _safe_update(campaigns, cid, {"last_error": f"No active numbers for market '{market}'", "status": "Scheduled"})
+            continue
+
+        _safe_update(campaigns, cid, {"status": "Running", "last_run_at": now_iso})
 
         queued = 0
+        base = _shift_to_window(now) if _in_quiet_hours(now) else now
 
-        # Queue prospects (throttled)
-        for idx, prospect in enumerate(prospect_records):
-            pf = prospect.get("fields", {})
-
+        for idx, pr in enumerate(prospect_rows):
+            pf = pr.get("fields", {})
             phone = get_phone(pf)
-            if not phone:
-                continue
+            if not phone: continue
+            if already_queued(drip, phone, cid): continue
 
-            template_text, chosen_tid = pick_template(template_ids, templates)
-            if not template_text:
-                continue
+            raw, tid = pick_template(template_ids, templates)
+            if not raw: continue
 
-            personalized_text = format_template(template_text, pf)
-            next_send = now + timedelta(seconds=idx * 3)  # ~20 msg/min
+            body = format_template(raw, pf)
+            scheduled_local = schedule_time(base, idx)  # string in CT without timezone
 
-            prop_id = _get(pf, "Property ID", "property_id")
-            owner   = _compose_owner_name(pf)
-            address = _compose_address(pf)
+            payload = {
+                "Prospect": [pr["id"]],
+                "Campaign": [cid],
+                "Template": [tid] if tid else None,
+                "Market": market or pf.get("Market"),
+                "phone": phone,
+                "message_preview": body,
+                # write both variants to be safe with schema
+                "from_number": from_number,
+                "From Number": from_number,
+                "status": "QUEUED",
+                "next_send_date": scheduled_local,       # CT naive string
+                "Property ID": pf.get("Property ID"),
+                "Number Record Id": number_rec_id,
+                "UI": "⏳",
+            }
+            created = _safe_create(drip, {k: v for k, v in payload.items() if v is not None})
+            if created: queued += 1
 
-            # Market preference: Campaign > Prospect
-            market  = market_pref or _get(pf, "Market", "market")
-            from_num = _pick_from_number(market)
-
-            try:
-                payload = {
-                    # linked record fields
-                    "Prospect": [prospect["id"]],
-                    "Campaign": [cid],
-                    "Template": [chosen_tid],
-
-                    # essentials
-                    "phone": phone,
-                    "Phone": phone,
-
-                    "message_preview": personalized_text,
-                    "Message Preview": personalized_text,
-
-                    "status": "QUEUED",
-                    "Status": "QUEUED",
-
-                    # from number
-                    "from_number": from_num,
-                    "From Number": from_num,
-
-                    # schedule
-                    "next_send_date": next_send.isoformat(),
-                    "Next Send Date": next_send.isoformat(),
-
-                    # helpful context
-                    "Property ID": prop_id,
-                    "property_id": prop_id,
-                    "Market": market,
-                    "market": market,
-                    "Address": address,
-                    "Property Address": address,
-                    "Owner Name": owner,
-                }
-
-                _safe_create(drip, payload, sample_record_id=None)
-                queued += 1
-
-            except Exception:
-                print(f"❌ Failed to queue {phone}")
-                traceback.print_exc()
-
-        # --- Optionally send a batch (scope to this campaign id) ---
-        batch_result: Dict[str, Any] = {"total_sent": 0}
-        retry_result: Dict[str, Any] = {}
+        batch_result, retry_result = {"total_sent": 0}, {}
         if send_after_queue and queued > 0:
             try:
-                batch_result = send_batch(campaign_id=cid, limit=500)
+                batch_result = send_batch(campaign_id=cid, limit=MESSAGES_PER_MIN)
             except Exception:
                 traceback.print_exc()
-                batch_result = {"total_sent": 0}
-
-            # Retry loop for failed sends
-            if batch_result.get("total_sent", 0) < queued:
-                for _ in range(int(retry_limit)):
+            if (batch_result.get("total_sent", 0) or 0) < queued:
+                for _ in range(3):
                     try:
-                        retry_result = run_retry(limit=100, view="Failed Sends")
+                        retry_result = run_retry(limit=MESSAGES_PER_MIN, view="Failed Sends")
                     except Exception:
                         retry_result = {}
                     if (retry_result or {}).get("retried", 0) == 0:
                         break
 
-        # Compute progress
-        current_sent = _get(f, "messages_sent", "Messages Sent", "total_sent", "Total Sent") or 0
-        sent_now = (batch_result.get("total_sent", 0) or 0) + (retry_result.get("retried", 0) or 0)
-        sent_so_far = (current_sent or 0) + sent_now
-        completed = (total_prospects > 0) and (sent_so_far >= total_prospects)
+        _refresh_ui_icons_for_campaign(drip, cid)
 
-        # Update campaign record
-        update_payload = {
-            "status": "Completed" if completed else "Running",
-            "total_sent": sent_so_far,
-            "Last Run Result": json.dumps(
-                {
-                    "Queued": queued,
-                    "Sent": batch_result.get("total_sent", 0),
-                    "Retries": retry_result.get("retried", 0) if retry_result else 0,
-                    "Completed": completed,
-                    "View": view_name,
-                }
-            ),
-            "last_run_at": now_iso,
+        sent_delta = (batch_result.get("total_sent", 0) or 0) + (retry_result.get("retried", 0) or 0)
+        last_result = {
+            "Queued": queued,
+            "Sent": batch_result.get("total_sent", 0) or 0,
+            "Retries": retry_result.get("retried", 0) or 0,
+            "Table": PROSPECTS_TABLE,
+            "View": view,
+            "Market": market,
+            "QuietHoursNow": _in_quiet_hours(now),
+            "MPM": MESSAGES_PER_MIN,
         }
-        mapped = _remap_existing_only(campaigns, update_payload, sample_record_id=cid)
-        if mapped:
-            try:
-                campaigns.update(cid, mapped)
-            except Exception:
-                traceback.print_exc()
+        _safe_update(campaigns, cid, {
+            "status": "Running" if queued and (not send_after_queue or sent_delta < queued) else ("Completed" if queued else _get(cf,"status","Status")),
+            "messages_sent": int(cf.get("messages_sent") or 0) + sent_delta,
+            "total_sent": int(cf.get("total_sent") or 0) + sent_delta,
+            "Last Run Result": json.dumps(last_result),
+            "last_run_at": iso_now(),
+        })
 
-        # Logs/KPIs
-        if runs:
-            try:
-                _safe_create(
-                    runs,
-                    {
-                        "Type": "CAMPAIGN_RUN",
-                        "Campaign": name,
-                        "Processed": float(sent_so_far),
-                        "Breakdown": json.dumps({"initial": batch_result, "retries": retry_result}),
-                        "Timestamp": now_iso,
-                    },
-                )
-            except Exception:
-                traceback.print_exc()
+        if get_runs():
+            _safe_create(get_runs(), {
+                "Type": "CAMPAIGN_RUN",
+                "Campaign": name,
+                "Processed": float(sent_delta),
+                "Breakdown": json.dumps({"initial": batch_result, "retries": retry_result}),
+                "Timestamp": iso_now(),
+            })
+        if get_kpis():
+            _safe_create(get_kpis(), {
+                "Campaign": name,
+                "Metric": "OUTBOUND_SENT" if send_after_queue else "MESSAGES_QUEUED",
+                "Value": float(sent_delta if send_after_queue else queued),
+                "Date": utcnow().date().isoformat(),
+            })
 
-        if kpis:
-            try:
-                _safe_create(
-                    kpis,
-                    {
-                        "Campaign": name,
-                        "Metric": "OUTBOUND_SENT" if send_after_queue else "MESSAGES_QUEUED",
-                        "Value": float(sent_so_far if send_after_queue else queued),
-                        "Date": now.date().isoformat(),
-                    },
-                )
-            except Exception:
-                traceback.print_exc()
-
-        results.append(
-            {
-                "campaign": name,
-                "queued": queued,
-                "sent": sent_so_far if send_after_queue else 0,
-                "completed": completed if send_after_queue else False,
-                "retries": (retry_result or {}).get("retried", 0),
-                "view": view_name,
-            }
-        )
+        results.append({
+            "campaign": name, "queued": queued,
+            "sent": sent_delta if send_after_queue else 0,
+            "view": view, "market": market,
+            "quiet_now": _in_quiet_hours(now), "mpm": MESSAGES_PER_MIN,
+        })
         processed += 1
 
-    # Cross-campaign metrics (best-effort)
-    try:
-        update_metrics()
-    except Exception:
-        traceback.print_exc()
+    try: update_metrics()
+    except Exception: traceback.print_exc()
 
     return {"ok": True, "processed": processed, "results": results, "errors": []}

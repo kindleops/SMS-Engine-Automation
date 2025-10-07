@@ -1,14 +1,92 @@
 # sms/outbound_batcher.py
-import os, re, traceback
+from __future__ import annotations
+
+import os, re, time, traceback, hashlib
 from datetime import datetime, timezone
+from typing import Dict, Any, Optional, Tuple, List
+
 from pyairtable import Table
 
-LEADS_BASE_ENV = "LEADS_CONVOS_BASE"
-PERF_BASE_ENV  = "PERFORMANCE_BASE"
-NUMBERS_TABLE  = os.getenv("NUMBERS_TABLE", "Numbers")
-_last_reset_date = None
+# =========================
+# ENV / CONFIG
+# =========================
+LEADS_BASE_ENV          = "LEADS_CONVOS_BASE"          # Drip Queue base
+PERF_BASE_ENV           = "PERFORMANCE_BASE"           # KPIs / Runs
+CONTROL_BASE_ENV        = "CAMPAIGN_CONTROL_BASE"      # Numbers base
 
-def utcnow(): return datetime.now(timezone.utc)
+DRIP_TABLE_NAME         = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
+NUMBERS_TABLE_NAME      = os.getenv("NUMBERS_TABLE", "Numbers")
+CAMPAIGNS_TABLE_NAME    = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+
+# Rate limits (enforced with Redis across all workers)
+RATE_PER_NUMBER_PER_MIN = int(os.getenv("RATE_PER_NUMBER_PER_MIN", "20"))   # per DID / minute
+GLOBAL_RATE_PER_MIN     = int(os.getenv("GLOBAL_RATE_PER_MIN", "5000"))     # optional global cap
+SLEEP_BETWEEN_SENDS_SEC = float(os.getenv("SLEEP_BETWEEN_SENDS_SEC", "0.03"))
+
+# Quiet hours (America/Chicago): block actual sending 9pm–9am CT
+QUIET_HOURS_ENFORCED    = os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in ("1","true","yes")
+QUIET_START_HOUR_LOCAL  = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))  # 21:00
+QUIET_END_HOUR_LOCAL    = int(os.getenv("QUIET_END_HOUR_LOCAL", "9"))     # 09:00
+
+# Backfill missing from_number with a market DID from Numbers table
+AUTO_BACKFILL_FROM_NUMBER = os.getenv("AUTO_BACKFILL_FROM_NUMBER", "true").lower() in ("1","true","yes")
+
+# Redis (for cross-process limiter)
+REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
+REDIS_TLS = os.getenv("REDIS_TLS", "true").lower() in ("1","true","yes")
+
+try:
+    import redis
+except Exception:
+    redis = None
+
+# Optional sender (your low-level dispatcher)
+try:
+    from sms.message_processor import MessageProcessor
+except Exception:
+    MessageProcessor = None
+
+# =========================
+# Time helpers
+# =========================
+def utcnow() -> datetime: return datetime.now(timezone.utc)
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
+def central_now() -> datetime:
+    if ZoneInfo:
+        return datetime.now(ZoneInfo("America/Chicago"))
+    return datetime.now(timezone.utc)  # fallback
+
+def is_quiet_hours_local() -> bool:
+    if not QUIET_HOURS_ENFORCED:
+        return False
+    h = central_now().hour
+    return (h >= QUIET_START_HOUR_LOCAL) or (h < QUIET_END_HOUR_LOCAL)
+
+# =========================
+# Airtable helpers
+# =========================
+def _api_key_for(base_env: str) -> Optional[str]:
+    if base_env == PERF_BASE_ENV:
+        return os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
+    return os.getenv("AIRTABLE_API_KEY")
+
+def get_table(base_env: str, table_name: str) -> Table | None:
+    key  = _api_key_for(base_env)
+    base = os.getenv(base_env)
+    if not (key and base):
+        print(f"⚠️ Missing Airtable config for {base_env}/{table_name}")
+        return None
+    try:
+        return Table(key, base, table_name)
+    except Exception:
+        traceback.print_exc()
+        return None
+
 def _norm(s): return re.sub(r"[^a-z0-9]+","",s.strip().lower()) if isinstance(s,str) else s
 
 def _auto_field_map(table: Table):
@@ -32,231 +110,355 @@ def _parse_iso(s):
     try: return datetime.fromisoformat(str(s).replace("Z","+00:00"))
     except Exception: return None
 
-def _api_key_for(base_env):
-    return (os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")) if base_env==PERF_BASE_ENV else os.getenv("AIRTABLE_API_KEY")
+# =========================
+# Numbers picking (CONTROL base)
+# =========================
+def _remaining_calc(f: dict) -> int:
+    if isinstance(f.get("Remaining"), (int,float)):
+        return int(f["Remaining"])
+    sent = int(f.get("Sent Today") or 0)
+    daily_cap = int(f.get("Daily Reset") or os.getenv("DAILY_LIMIT", "750"))
+    return max(0, daily_cap - sent)
 
-def get_table(base_env: str, table_name: str) -> Table | None:
-    key  = _api_key_for(base_env)
-    base = os.getenv(base_env)
-    if not key or not base:
-        print(f"⚠️ Missing Airtable config for {base_env}")
-        return None
+def _market_match(f: dict, market: Optional[str]) -> bool:
+    if not market: return True
+    if f.get("Market") == market: return True
+    ms = f.get("Markets") or []
+    return isinstance(ms, list) and (market in ms)
+
+def _bump_number_counters(numbers_tbl: Table, rec_id: str, f: dict):
     try:
-        return Table(key, base, table_name)
+        patch = {"Last Used": utcnow().isoformat()}
+        patch["Sent Today"] = int(f.get("Sent Today") or 0) + 1
+        if f.get("Remaining") is not None:
+            patch["Remaining"] = max(0, int(f.get("Remaining") or 0) - 1)
+        numbers_tbl.update(rec_id, _remap_existing_only(numbers_tbl, patch))
     except Exception:
         traceback.print_exc()
-        return None
 
-def get_perf_tables():
-    return get_table(PERF_BASE_ENV,"Runs/Logs"), get_table(PERF_BASE_ENV,"KPIs")
+def pick_number_for_market(market: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Returns (from_number_string, numbers_record_id).
+    Uses CONTROL BASE / Numbers table; DID stored in field 'Number' (preferred) or 'Friendly Name'.
+    """
+    numbers_tbl = get_table(CONTROL_BASE_ENV, NUMBERS_TABLE_NAME)
+    if not numbers_tbl: return None, None
+    try:
+        rows = numbers_tbl.all()
+    except Exception:
+        traceback.print_exc()
+        return None, None
 
-def ensure_today_rows():
-    global _last_reset_date
-    today = utcnow().date().isoformat()
-    if _last_reset_date != today:
+    elig: List[Tuple[int, datetime, dict, str]] = []
+    for r in rows:
+        f = r.get("fields", {})
+        if not f.get("Active", True): continue
+        if not _market_match(f, market): continue
+        remaining = _remaining_calc(f)
+        if remaining <= 0: continue
+        last_used = _parse_iso(f.get("Last Used")) or datetime(1970,1,1,tzinfo=timezone.utc)
+        # sort key: highest remaining, least-recently used
+        elig.append((-remaining, last_used, f, r["id"]))
+
+    if not elig:
+        return None, None
+
+    elig.sort(key=lambda x: (x[0], x[1]))
+    _, _, f, rid = elig[0]
+    did = f.get("Number") or f.get("Friendly Name")
+    if not did:
+        return None, None
+
+    # optimistic bump (soft) to reduce contention between parallel workers
+    _bump_number_counters(numbers_tbl, rid, f)
+    return did, rid
+
+# =========================
+# Phone / UI helpers
+# =========================
+def _digits_only(s: Any) -> Optional[str]:
+    if not isinstance(s, str): return None
+    ds = "".join(re.findall(r"\d+", s))
+    return ds if len(ds) >= 10 else None
+
+STATUS_ICON = {"QUEUED":"⏳","READY":"⏳","SENDING":"⏳","SENT":"✅","DELIVERED":"✅","FAILED":"❌","CANCELLED":"❌"}
+def _set_ui(drip_tbl: Table, rec_id: str, status: str):
+    try:
+        drip_tbl.update(rec_id, _remap_existing_only(drip_tbl, {"UI": STATUS_ICON.get(status,"")}))
+    except Exception:
+        traceback.print_exc()
+
+# =========================
+# Redis-backed minute limiter (cross-process)
+# =========================
+class RedisLimiter:
+    """
+    Atomically checks + increments both per-DID and global minute counters.
+    Uses one Lua script so it's safe with multiple workers.
+    """
+    LUA = """
+    local did_key   = KEYS[1]
+    local glob_key  = KEYS[2]
+    local per_limit = tonumber(ARGV[1])
+    local gl_limit  = tonumber(ARGV[2])
+    local ttl_ms    = tonumber(ARGV[3])
+
+    local did_ct = tonumber(redis.call('GET', did_key) or '0')
+    local gl_ct  = tonumber(redis.call('GET', glob_key) or '0')
+
+    if did_ct >= per_limit or gl_ct >= gl_limit then
+        return 0
+    end
+
+    did_ct = redis.call('INCR', did_key)
+    if did_ct == 1 then redis.call('PEXPIRE', did_key, ttl_ms) end
+
+    gl_ct = redis.call('INCR', glob_key)
+    if gl_ct == 1 then redis.call('PEXPIRE', glob_key, ttl_ms) end
+
+    return 1
+    """
+
+    def __init__(self, url: Optional[str], per_limit:int, global_limit:int):
+        self.per = per_limit
+        self.glob = global_limit
+        self.enabled = bool(url and redis)
+        if not self.enabled:
+            self.r = None
+            return
+        self.r = redis.from_url(url, ssl=REDIS_TLS, decode_responses=True)
+        self.script = self.r.register_script(self.LUA)
+
+    @staticmethod
+    def _min_bucket() -> str:
+        # UTC minute bucket
+        return datetime.utcnow().strftime("%Y%m%d%H%M")
+
+    @staticmethod
+    def _did_key(did: str) -> str:
+        # stable key for a DID in current minute
+        did_hash = hashlib.md5(did.encode()).hexdigest()
+        return f"rl:did:{RedisLimiter._min_bucket()}:{did_hash}"
+
+    @staticmethod
+    def _glob_key() -> str:
+        return f"rl:glob:{RedisLimiter._min_bucket()}"
+
+    def try_consume(self, did: str) -> bool:
+        if not self.enabled:
+            return True  # no redis -> allow (single worker mode)
         try:
-            print(f"⚡ Auto-resetting quotas for {today}")
-            from sms.quota_reset import reset_daily_quotas
-            reset_daily_quotas()
+            keys = [self._did_key(did), self._glob_key()]
+            # TTL a bit > 60s to cover clock skew
+            return bool(self.script(keys=keys, args=[self.per, self.glob, 65000]))
         except Exception:
             traceback.print_exc()
-        _last_reset_date = today
+            # On Redis hiccup, fail closed or open?
+            # We'll fail open to avoid wedging sends; carriers will still throttle downstream.
+            return True
 
-# ---------- template personalization (exported) ----------
-def _first_from_name(name: str | None) -> str:
-    return (name or "there").split()[0]
+# fallback in-process limiter if redis is not available
+class LocalLimiter:
+    def __init__(self, per_limit:int, global_limit:int):
+        self.per = per_limit
+        self.glob = global_limit
+        self.per_counts: Dict[str, Tuple[int,int]] = {}
+        self.glob_count: Tuple[int,int] = (0,0)
+    def _bucket(self) -> int: return int(utcnow().timestamp() // 60)
+    def try_consume(self, did:str) -> bool:
+        minute = self._bucket()
+        g_min, g_ct = self.glob_count
+        if g_min != minute: g_ct = 0
+        if g_ct >= self.glob: return False
+        d_min, d_ct = self.per_counts.get(did, (minute, 0))
+        if d_min != minute: d_ct = 0
+        if d_ct >= self.per: return False
+        # consume
+        self.glob_count = (minute, g_ct + 1)
+        self.per_counts[did] = (minute, d_ct + 1)
+        return True
 
-def format_template(template: str, lead_fields: dict) -> str:
-    full_name = (
-        lead_fields.get("First") or lead_fields.get("First Name") or
-        lead_fields.get("Owner Name") or lead_fields.get("Phone 1 Name (Primary) (from Linked Owner)") or
-        lead_fields.get("Owner First Name") or lead_fields.get("Name") or ""
-    )
-    first = _first_from_name(full_name)
-    address = (
-        lead_fields.get("Property Address") or lead_fields.get("Address") or
-        lead_fields.get("Mailing Address") or "your property"
-    )
-    try:
-        return template.format(First=first, Address=address)
-    except Exception:
-        return template
+def build_limiter() -> object:
+    if REDIS_URL and redis:
+        return RedisLimiter(REDIS_URL, RATE_PER_NUMBER_PER_MIN, GLOBAL_RATE_PER_MIN)
+    return LocalLimiter(RATE_PER_NUMBER_PER_MIN, GLOBAL_RATE_PER_MIN)
 
-# ---------- sending number ----------
-def _remaining(f: dict) -> float:
-    for k in ("Remaining","remaining","Remaining Today","remaining_today"):
-        if isinstance(f.get(k), (int,float)): return float(f[k])
-    return -1.0
-
-def pick_number():
-    numbers = get_table(LEADS_BASE_ENV, NUMBERS_TABLE)
-    if not numbers: return None, None
-    try:
-        rows = numbers.all(max_records=200)   # no formula here
-        rows = [r for r in rows if _remaining(r.get("fields",{})) > 0]
-    except Exception:
-        traceback.print_exc(); return None, None
-    if not rows: return None, None
-    row = rows[0]
-    return row["id"], (row["fields"].get("Number") or row["fields"].get("number"))
-
-# ---------- phones on leads ----------
-PHONE_FIELDS = [
-    "phone","Phone","Mobile","Cell",
-    "Owner Phone","Owner Phone 1","Owner Phone 2",
-    "Phone 1 (from Linked Owner)","Phone 2 (from Linked Owner)","Phone 3 (from Linked Owner)",
-]
-def get_phone(f: dict):
-    for k in PHONE_FIELDS:
-        v = f.get(k)
-        if v: return v
-    return None
-
-# ---------- main ----------
+# =========================
+# Main: SEND from Drip Queue
+# =========================
 def send_batch(campaign_id: str | None = None, limit: int = 500):
-    ensure_today_rows()
+    """
+    Drains Drip Queue rows that are due (status in QUEUED/READY and next_send_date <= now),
+    fills missing `from_number` using Numbers (CONTROL base, field 'Number'),
+    enforces quiet hours and a cross-process Redis minute limiter,
+    updates UI (⏳ while sending; ✅/❌ on completion).
+    """
+    drip = get_table(LEADS_BASE_ENV, DRIP_TABLE_NAME)
+    if not drip:
+        return {"ok": False, "error": "Missing Drip Queue table", "total_sent": 0}
 
-    campaigns = get_table(LEADS_BASE_ENV,"Campaigns")
-    templates = get_table(LEADS_BASE_ENV,"Templates")
-    drip      = get_table(LEADS_BASE_ENV,"Drip Queue")
-    if not (campaigns and templates and drip):
-        return {"ok": False, "type":"Prospect", "error":"Missing Airtable tables", "queued":0, "sent":0, "completed":False, "retries":0, "errors":["Missing Airtable tables"]}
+    # Block sends during quiet hours (queueing happens in campaign runner)
+    if is_quiet_hours_local():
+        return {"ok": False, "quiet_hours": True, "note": "Quiet hours (Central) — sending paused.", "total_sent": 0}
 
-    # 1) pick eligible campaign WITHOUT Airtable formulas
-    if campaign_id:
-        try:
-            campaign = campaigns.get(campaign_id)
-        except Exception:
-            traceback.print_exc()
-            return {"ok": False, "type":"Prospect", "error":"Campaign not found", "queued":0, "sent":0, "completed":False, "retries":0, "errors":["Campaign not found"]}
-    else:
-        try:
-            rows = campaigns.all()
-        except Exception:
-            traceback.print_exc()
-            return {"ok": False, "type":"Prospect", "error":"Failed to read campaigns", "queued":0, "sent":0, "completed":False, "retries":0, "errors":["Failed to read campaigns"]}
-
-        now_dt = utcnow()
-        eligible = []
-        for r in rows:
-            f = r.get("fields", {})
-            status = str(f.get("status") or f.get("Status") or "")
-            if status != "Scheduled": continue
-            st = _parse_iso(f.get("start_time") or f.get("Start Time") or f.get("Start"))
-            if (st is None) or (st <= now_dt): eligible.append(r)
-
-        if not eligible:
-            return {"ok": False, "type":"Prospect", "error":"No eligible campaigns", "queued":0, "sent":0, "completed":False, "retries":0, "errors":["No eligible campaigns"]}
-        campaign = eligible[0]
-
-    cf = campaign.get("fields", {})
-    campaign_name = cf.get("Name") or cf.get("name") or "Unnamed"
-
-    # Prospect source: read table & view (defaults)
-    table_name = cf.get("Prospect Table") or "(P1)"
-    view_name  = cf.get("View/Segment") or None
-
-    leads_tbl = get_table(LEADS_BASE_ENV, table_name)
-    if not leads_tbl:
-        return {"ok": False, "type":"Prospect", "error":f"Missing prospect table {table_name}", "queued":0, "sent":0, "completed":False, "retries":0, "errors":[f"Missing prospect table {table_name}"]}
-
-    # Template(s)
-    template_ids = []
-    if isinstance(cf.get("templates"), list):
-        template_ids = [t for t in cf["templates"] if isinstance(t, str)]
-    elif isinstance(cf.get("Templates"), list):
-        template_ids = [t for t in cf["Templates"] if isinstance(t, str)]
-    elif isinstance(cf.get("Template"), list):
-        template_ids = [t for t in cf["Template"] if isinstance(t, str)]
-    elif isinstance(cf.get("Template"), str):
-        template_ids = [cf["Template"]]
-
-    if not template_ids:
-        return {"ok": False, "type":"Prospect", "error":"No template linked", "queued":0, "sent":0, "completed":False, "retries":0, "errors":["No template linked"]}
-
+    # Load candidates and filter in Python (no fragile formulas)
     try:
-        tmpl_row = templates.get(template_ids[0])
-        template_text = (tmpl_row or {}).get("fields", {}).get("Message")
-    except Exception:
-        traceback.print_exc(); template_text = None
-    if not template_text:
-        return {"ok": False, "type":"Prospect", "error":"Template message missing", "queued":0, "sent":0, "completed":False, "retries":0, "errors":["Template message missing"]}
-
-    print(f"🚀 Launching Campaign: {campaign_name} | Table: {table_name} | View: {view_name or 'ALL'}")
-
-    # 2) leads (no formula)
-    try:
-        leads = leads_tbl.all(view=view_name, max_records=limit) if view_name else leads_tbl.all(max_records=limit)
+        rows = drip.all()
     except Exception:
         traceback.print_exc()
-        return {"ok": False, "type":"Prospect", "error":"Failed to read leads", "queued":0, "sent":0, "completed":False, "retries":0, "errors":["Failed to read leads"]}
+        return {"ok": False, "error": "Failed to read Drip Queue", "total_sent": 0}
 
-    now_iso = utcnow().isoformat()
-    queued = 0
+    now = utcnow()
+    due: List[dict] = []
+    for r in rows:
+        f = r.get("fields", {})
+        if campaign_id:
+            cids = f.get("Campaign") or []
+            if not isinstance(cids, list): cids = [cids]
+            if campaign_id not in cids:
+                continue
+        status = str(f.get("status") or f.get("Status") or "")
+        if status not in ("QUEUED","READY"):
+            continue
+        when = _parse_iso(f.get("next_send_date") or f.get("Next Send Date") or now.isoformat())
+        if not when or when > now:
+            continue
+        due.append(r)
 
-    for lead in leads:
-        lf = lead.get("fields", {})
-        phone = get_phone(lf)
-        if not phone: continue
+    if not due:
+        return {"ok": True, "total_sent": 0, "note": "No due messages"}
 
-        _, from_number = pick_number()
-        if not from_number:
-            print("⚠️ No numbers available with quota")
-            break
+    # Oldest first, then truncate by limit
+    due.sort(key=lambda r: _parse_iso(r.get("fields", {}).get("next_send_date") or r.get("fields", {}).get("Next Send Date") or now.isoformat()))
+    due = due[:limit]
 
-        msg = format_template(template_text, lf)
+    limiter = build_limiter()
+    total_sent = 0
+    total_failed = 0
+    errors: List[str] = []
 
-        dq_tbl = get_table(LEADS_BASE_ENV,"Drip Queue")
-        dq_payload = _remap_existing_only(dq_tbl, {
-            "Prospect": [lead["id"]],
-            "Leads": [lead["id"]],
-            "Campaign": [campaign["id"]],
-            "Template": [template_ids[0]],
-            "phone": phone,
-            "from_number": from_number,
-            "message_preview": msg,
-            "status": "QUEUED",
-            "next_send_date": now_iso,
-            "Property ID": lf.get("Property ID") or lf.get("property_id"),
-        })
+    for r in due:
+        rid = r["id"]
+        f = r.get("fields", {})
+        phone = f.get("phone") or f.get("Phone")
+        if not phone:
+            continue
+
+        did = f.get("from_number") or f.get("From Number")
+        market = f.get("Market")
+
+        # Backfill from_number if missing
+        if not did and AUTO_BACKFILL_FROM_NUMBER:
+            did, _num_id = pick_number_for_market(market)
+            if did:
+                try:
+                    drip.update(rid, _remap_existing_only(drip, {"from_number": did}))
+                except Exception:
+                    traceback.print_exc()
+
+        if not did:
+            errors.append(f"No available number for {phone} (market={market})")
+            continue
+
+        # Rate limit (cross-process safe)
+        if not limiter.try_consume(did):
+            # leave queued; next worker/minute will grab it
+            continue
+
+        # Mark SENDING + ⏳
         try:
-            dq_tbl.create(dq_payload)
-            queued += 1
-            print(f"📥 Queued → {phone} | {campaign_name}")
+            drip.update(rid, _remap_existing_only(drip, {"status":"SENDING"}))
+            _set_ui(drip, rid, "SENDING")
         except Exception:
             traceback.print_exc()
 
-    # 3) logs (best effort)
-    runs,kpis = get_perf_tables()
+        # Compose send payload
+        body = f.get("message_preview") or f.get("Message Preview") or f.get("message") or ""
+        property_id = f.get("Property ID")
+
+        # Send
+        ok = False
+        err_msg = None
+        try:
+            if MessageProcessor:
+                result = MessageProcessor.send(
+                    phone=phone,
+                    body=body,
+                    from_number=did,
+                    property_id=property_id,
+                    direction="OUT",
+                )
+                ok = (result or {}).get("status") == "sent"
+                if not ok:
+                    err_msg = (result or {}).get("error", "send_failed")
+            else:
+                ok = True  # plumbing test
+        except Exception as e:
+            ok = False
+            err_msg = str(e)
+
+        # Update status + UI
+        if ok:
+            total_sent += 1
+            try:
+                drip.update(rid, _remap_existing_only(drip, {
+                    "status":"SENT",
+                    "sent_at": utcnow().isoformat(),
+                }))
+                _set_ui(drip, rid, "SENT")
+            except Exception:
+                traceback.print_exc()
+        else:
+            total_failed += 1
+            if err_msg: errors.append(err_msg)
+            try:
+                drip.update(rid, _remap_existing_only(drip, {
+                    "status":"FAILED",
+                    "last_error": (err_msg or "send_failed")[:500],
+                }))
+                _set_ui(drip, rid, "FAILED")
+            except Exception:
+                traceback.print_exc()
+
+        if SLEEP_BETWEEN_SENDS_SEC > 0:
+            time.sleep(SLEEP_BETWEEN_SENDS_SEC)
+
+    # KPI logging (best effort)
+    runs = get_table(PERF_BASE_ENV, "Runs/Logs")
+    kpis = get_table(PERF_BASE_ENV, "KPIs")
+    now_iso = utcnow().isoformat()
     if runs:
         try:
-            runs.create(_remap_existing_only(runs,{
-                "Type":"OUTBOUND_CAMPAIGN","Campaign":campaign_name,"Queued":queued,
-                "Timestamp":now_iso,"Template Used":template_ids[0],
-                "View Used": view_name or "ALL", "Processed By":"OutboundBatcher"
+            runs.create(_remap_existing_only(runs, {
+                "Type": "OUTBOUND_SEND",
+                "Processed": float(total_sent),
+                "Breakdown": f"sent={total_sent}, failed={total_failed}",
+                "Timestamp": now_iso,
             }))
         except Exception: traceback.print_exc()
-    if kpis:
+    if kpis and (total_sent or total_failed):
         try:
-            kpis.create(_remap_existing_only(kpis,{
-                "Campaign":campaign_name,"Metric":"MESSAGES_QUEUED","Value":float(queued),
-                "Date": utcnow().date().isoformat()
-            }))
+            if total_sent:
+                kpis.create(_remap_existing_only(kpis, {
+                    "Campaign": "ALL",
+                    "Metric": "OUTBOUND_SENT",
+                    "Value": float(total_sent),
+                    "Date": utcnow().date().isoformat(),
+                }))
+            if total_failed:
+                kpis.create(_remap_existing_only(kpis, {
+                    "Campaign": "ALL",
+                    "Metric": "OUTBOUND_FAILED",
+                    "Value": float(total_failed),
+                    "Date": utcnow().date().isoformat(),
+                }))
         except Exception: traceback.print_exc()
 
-    # 4) update campaign
-    try:
-        campaigns.update(
-            campaign["id"],
-            _remap_existing_only(campaigns, {
-                "Last Run Result": f"Queued {queued}",
-                "Messages Queued": queued,
-                "Status": "Running" if queued else (cf.get("status") or cf.get("Status") or "Scheduled"),
-                "Last Run": now_iso,
-                "last_run_at": now_iso,
-            })
-        )
-    except Exception: traceback.print_exc()
-
-    return {"ok": True, "campaign": campaign_name, "type":"Prospect",
-            "queued": queued, "sent": queued, "completed": False, "retries": 0, "errors": []}
+    return {
+        "ok": True,
+        "total_sent": total_sent,
+        "total_failed": total_failed,
+        "skipped_rate_limit": max(0, len(due) - (total_sent + total_failed)),
+        "quiet_hours": False,
+        "errors": errors,
+    }
