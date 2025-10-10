@@ -1,3 +1,4 @@
+# sms/campaign_runner.py
 from __future__ import annotations
 
 import os, re, json, random, math, traceback
@@ -11,7 +12,7 @@ from pyairtable import Api
 
 load_dotenv()
 
-# Optional project pieces
+# ----- Optional project pieces -----
 try:
     from sms.outbound_batcher import send_batch, format_template
 except Exception:
@@ -42,15 +43,15 @@ RUNNER_SEND_AFTER_QUEUE = (os.getenv("RUNNER_SEND_AFTER_QUEUE", "false").lower()
 DEDUPE_HOURS            = int(os.getenv("DEDUPE_HOURS", "72"))
 DAILY_LIMIT_FALLBACK    = int(os.getenv("DAILY_LIMIT", "750"))
 
-# pacing
+# pacing (20/min default)
 MESSAGES_PER_MIN        = max(1, int(os.getenv("MESSAGES_PER_MIN", "20")))
 SECONDS_PER_MSG         = max(1, int(math.ceil(60.0 / MESSAGES_PER_MIN)))
 JITTER_SECONDS          = max(0, int(os.getenv("JITTER_SECONDS", "2")))
 
 # quiet hours (America/Chicago)
 QUIET_TZ                = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago"))
-QUIET_START_HOUR        = int(os.getenv("QUIET_START_HOUR", "21"))  # 9pm
-QUIET_END_HOUR          = int(os.getenv("QUIET_END_HOUR", "9"))     # 9am
+QUIET_START_HOUR        = int(os.getenv("QUIET_START_HOUR", "21"))  # 9 pm
+QUIET_END_HOUR          = int(os.getenv("QUIET_END_HOUR", "9"))     # 9 am
 
 PHONE_FIELDS = [
     "phone","Phone","Mobile","Cell","Phone Number","Primary Phone",
@@ -68,14 +69,17 @@ STATUS_ICON = {
 def utcnow() -> datetime: return datetime.now(timezone.utc)
 def iso_now() -> str: return utcnow().isoformat()
 def _norm(s: Any) -> Any: return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 def _digits_only(s: Any) -> Optional[str]:
     if not isinstance(s, str): return None
     ds = "".join(re.findall(r"\d+", s))
     return ds if len(ds) >= 10 else None
+
 def last10(s: Any) -> Optional[str]:
     d = _digits_only(s); return d[-10:] if d else None
 
 def get_phone(f: Dict[str, Any]) -> Optional[str]:
+    # prefer verified phone 1/2 if present
     p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
     p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
     if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
@@ -87,7 +91,7 @@ def get_phone(f: Dict[str, Any]) -> Optional[str]:
         if d:
             return d
     for k in PHONE_FIELDS:
-        d = _digits_only(f.get(k)); 
+        d = _digits_only(f.get(k))
         if d: return d
     return None
 
@@ -110,11 +114,11 @@ def _local_naive_iso(dt_utc: datetime) -> str:
     return local.isoformat(timespec="seconds")
 
 def schedule_time(base_utc: datetime, idx: int) -> str:
-    t = base_utc + timedelta(seconds=idx * SECONDS_PER_MSG + (random.randint(0, JITTER_SECONDS) if JITTER_SECONDS else 0))
+    jitter = random.randint(0, JITTER_SECONDS) if JITTER_SECONDS else 0
+    t = base_utc + timedelta(seconds=idx * SECONDS_PER_MSG + jitter)
     if _in_quiet_hours(t):
         t = _shift_to_window(t)
-    # store as local naive to avoid the +5/-6 hr display offset in Airtable
-    return _local_naive_iso(t)
+    return _local_naive_iso(t)  # store CT naive so Airtable UI doesn't shift it
 
 # ============== Airtable clients ==============
 @lru_cache(maxsize=None)
@@ -191,7 +195,7 @@ def pick_template(template_ids: Any, templates_table):
     except Exception:
         traceback.print_exc(); return (None, None)
 
-# ============== numbers picker (uses Numbers.'Number') ==============
+# ============== numbers picker (Numbers.'Number') ==============
 def _parse_dt(s: Any) -> Optional[datetime]:
     if not s: return None
     try: return datetime.fromisoformat(str(s).replace("Z","+00:00"))
@@ -264,6 +268,7 @@ def _refresh_ui_icons_for_campaign(drip_tbl, campaign_id: str):
                 if icon and f.get("UI") != icon:
                     _safe_update(drip_tbl, r["id"], {"UI": icon})
     except Exception:
+    # swallow but continue
         traceback.print_exc()
 
 # ============== dedupe guard ==============
@@ -291,6 +296,13 @@ def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
 
 # ============== main runner ==============
 def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None) -> Dict[str, Any]:
+    """
+    Queues messages for eligible campaigns:
+      • Go Live = TRUE, Status ∈ {Scheduled, Running}
+      • Now within [Start, End] window
+      • Each row gets a market-matched DID from Numbers.Number → Drip Queue.from_number
+      • next_send_date is CT-naive string at exact start time (respecting quiet hours)
+    """
     if isinstance(limit, str) and limit.upper() == "ALL": limit = 999_999
     limit = int(limit)
 
@@ -322,7 +334,10 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
         end   = _get(f, "End Time", "end_time")
         start_dt = datetime.fromisoformat(str(start).replace("Z","+00:00")) if start else None
         end_dt   = datetime.fromisoformat(str(end).replace("Z","+00:00")) if end else None
-        if start_dt and now < start_dt: continue
+
+        # only run if we are at or past Start Time
+        if start_dt and now < start_dt:
+            continue
         if end_dt and now > end_dt:
             _safe_update(campaigns, c["id"], {"status": "Completed", "last_run_at": now_iso})
             continue
@@ -348,16 +363,18 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
         if not template_ids: continue
 
         market = _get(cf, "Market", "market")
-        from_number, number_rec_id = pick_from_number(market)
-        # if no DID available, skip queueing (prevents blank from_number rows)
-        if not from_number:
-            _safe_update(campaigns, cid, {"last_error": f"No active numbers for market '{market}'", "status": "Scheduled"})
-            continue
 
+        # Begin run: flip status to Running
         _safe_update(campaigns, cid, {"status": "Running", "last_run_at": now_iso})
 
+        # base time = exact start or now, then shifted out of quiet hours if needed
+        start = _get(cf, "Start Time", "start_time")
+        start_dt = datetime.fromisoformat(str(start).replace("Z","+00:00")) if start else None
+        base_utc = max(now, start_dt) if start_dt else now
+        if _in_quiet_hours(base_utc):
+            base_utc = _shift_to_window(base_utc)
+
         queued = 0
-        base = _shift_to_window(now) if _in_quiet_hours(now) else now
 
         for idx, pr in enumerate(prospect_rows):
             pf = pr.get("fields", {})
@@ -365,11 +382,17 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             if not phone: continue
             if already_queued(drip, phone, cid): continue
 
+            # choose a DID *per row* to distribute load and ensure from_number is set
+            from_number, number_rec_id = pick_from_number(market)
+            if not from_number:
+                # no available DIDs right now → leave campaign Running, try again next tick
+                continue
+
             raw, tid = pick_template(template_ids, templates)
             if not raw: continue
 
             body = format_template(raw, pf)
-            scheduled_local = schedule_time(base, idx)  # string in CT without timezone
+            scheduled_local = schedule_time(base_utc, idx)  # CT-naive
 
             payload = {
                 "Prospect": [pr["id"]],
@@ -382,7 +405,7 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
                 "from_number": from_number,
                 "From Number": from_number,
                 "status": "QUEUED",
-                "next_send_date": scheduled_local,       # CT naive string
+                "next_send_date": scheduled_local,   # CT-naive
                 "Property ID": pf.get("Property ID"),
                 "Number Record Id": number_rec_id,
                 "UI": "⏳",
@@ -390,6 +413,7 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             created = _safe_create(drip, {k: v for k, v in payload.items() if v is not None})
             if created: queued += 1
 
+        # optional immediate send (outside quiet hours), small batch to “kick” the pipeline
         batch_result, retry_result = {"total_sent": 0}, {}
         if send_after_queue and queued > 0:
             try:

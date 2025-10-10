@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os, re, time, traceback, hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, Tuple, List
 
 from pyairtable import Table
@@ -23,6 +23,9 @@ RATE_PER_NUMBER_PER_MIN = int(os.getenv("RATE_PER_NUMBER_PER_MIN", "20"))   # pe
 GLOBAL_RATE_PER_MIN     = int(os.getenv("GLOBAL_RATE_PER_MIN", "5000"))     # optional global cap
 SLEEP_BETWEEN_SENDS_SEC = float(os.getenv("SLEEP_BETWEEN_SENDS_SEC", "0.03"))
 
+# When a row is rate-limited, nudge its next_send_date forward slightly so we don’t spin on it
+RATE_LIMIT_REQUEUE_SECONDS = float(os.getenv("RATE_LIMIT_REQUEUE_SECONDS", "5"))
+
 # Quiet hours (America/Chicago): block actual sending 9pm–9am CT
 QUIET_HOURS_ENFORCED    = os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in ("1","true","yes")
 QUIET_START_HOUR_LOCAL  = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))  # 21:00
@@ -32,13 +35,22 @@ QUIET_END_HOUR_LOCAL    = int(os.getenv("QUIET_END_HOUR_LOCAL", "9"))     # 09:0
 AUTO_BACKFILL_FROM_NUMBER = os.getenv("AUTO_BACKFILL_FROM_NUMBER", "true").lower() in ("1","true","yes")
 
 # Redis (for cross-process limiter)
-REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
-REDIS_TLS = os.getenv("REDIS_TLS", "true").lower() in ("1","true","yes")
+REDIS_URL  = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")  # e.g. rediss://default:token@host:6379
+REDIS_TLS  = os.getenv("REDIS_TLS", "true").lower() in ("1","true","yes")
+
+# Upstash REST fallback (works without TCP, not fully atomic but good enough if single worker)
+UPSTASH_REDIS_REST_URL   = os.getenv("UPSTASH_REDIS_REST_URL")  # e.g. https://xxxx.upstash.io
+UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 try:
-    import redis
+    import redis  # TCP client (best)
 except Exception:
     redis = None
+
+try:
+    import requests  # for Upstash REST fallback
+except Exception:
+    requests = None
 
 # Optional sender (your low-level dispatcher)
 try:
@@ -46,10 +58,12 @@ try:
 except Exception:
     MessageProcessor = None
 
+
 # =========================
 # Time helpers
 # =========================
-def utcnow() -> datetime: return datetime.now(timezone.utc)
+def utcnow() -> datetime: 
+    return datetime.now(timezone.utc)
 
 try:
     from zoneinfo import ZoneInfo
@@ -66,6 +80,7 @@ def is_quiet_hours_local() -> bool:
         return False
     h = central_now().hour
     return (h >= QUIET_START_HOUR_LOCAL) or (h < QUIET_END_HOUR_LOCAL)
+
 
 # =========================
 # Airtable helpers
@@ -99,6 +114,9 @@ def _auto_field_map(table: Table):
 
 def _remap_existing_only(table: Table, payload: dict) -> dict:
     amap = _auto_field_map(table)
+    if not amap:
+        # optimistic send if we couldn't probe fields
+        return dict(payload)
     out = {}
     for k,v in payload.items():
         ak = amap.get(_norm(k))
@@ -109,6 +127,7 @@ def _parse_iso(s):
     if not s: return None
     try: return datetime.fromisoformat(str(s).replace("Z","+00:00"))
     except Exception: return None
+
 
 # =========================
 # Numbers picking (CONTROL base)
@@ -173,6 +192,7 @@ def pick_number_for_market(market: Optional[str]) -> Tuple[Optional[str], Option
     _bump_number_counters(numbers_tbl, rid, f)
     return did, rid
 
+
 # =========================
 # Phone / UI helpers
 # =========================
@@ -187,6 +207,7 @@ def _set_ui(drip_tbl: Table, rec_id: str, status: str):
         drip_tbl.update(rec_id, _remap_existing_only(drip_tbl, {"UI": STATUS_ICON.get(status,"")}))
     except Exception:
         traceback.print_exc()
+
 
 # =========================
 # Redis-backed minute limiter (cross-process)
@@ -231,12 +252,10 @@ class RedisLimiter:
 
     @staticmethod
     def _min_bucket() -> str:
-        # UTC minute bucket
         return datetime.utcnow().strftime("%Y%m%d%H%M")
 
     @staticmethod
     def _did_key(did: str) -> str:
-        # stable key for a DID in current minute
         did_hash = hashlib.md5(did.encode()).hexdigest()
         return f"rl:did:{RedisLimiter._min_bucket()}:{did_hash}"
 
@@ -246,16 +265,80 @@ class RedisLimiter:
 
     def try_consume(self, did: str) -> bool:
         if not self.enabled:
-            return True  # no redis -> allow (single worker mode)
+            return True
         try:
             keys = [self._did_key(did), self._glob_key()]
-            # TTL a bit > 60s to cover clock skew
             return bool(self.script(keys=keys, args=[self.per, self.glob, 65000]))
         except Exception:
             traceback.print_exc()
-            # On Redis hiccup, fail closed or open?
-            # We'll fail open to avoid wedging sends; carriers will still throttle downstream.
             return True
+
+
+class UpstashRestLimiter:
+    """
+    Best-effort limiter using Upstash REST (no Lua). Not fully atomic across both keys,
+    but good enough if you typically run one worker. Requires requests.
+    """
+    def __init__(self, base_url: Optional[str], token: Optional[str], per_limit:int, global_limit:int):
+        self.base = (base_url or "").rstrip("/")
+        self.tok  = token
+        self.per  = per_limit
+        self.glob = global_limit
+        self.enabled = bool(self.base and self.tok and requests)
+
+    @staticmethod
+    def _min_bucket() -> str:
+        return datetime.utcnow().strftime("%Y%m%d%H%M")
+
+    @staticmethod
+    def _did_key(did: str) -> str:
+        did_hash = hashlib.md5(did.encode()).hexdigest()
+        return f"rl:did:{UpstashRestLimiter._min_bucket()}:{did_hash}"
+
+    @staticmethod
+    def _glob_key() -> str:
+        return f"rl:glob:{UpstashRestLimiter._min_bucket()}"
+
+    def _pipeline(self, commands: List[List[str]]) -> Optional[List[Any]]:
+        try:
+            resp = requests.post(
+                f"{self.base}/pipeline",
+                json=commands,
+                headers={"Authorization": f"Bearer {self.tok}"},
+                timeout=3,
+            )
+            if resp.ok:
+                return resp.json()
+        except Exception:
+            traceback.print_exc()
+        return None
+
+    def try_consume(self, did: str) -> bool:
+        if not self.enabled:
+            return True
+        did_key  = self._did_key(did)
+        glob_key = self._glob_key()
+        # INCR + EXPIRE each; order reduces overage risk a bit
+        cmds = [
+            ["GET", did_key],
+            ["GET", glob_key],
+        ]
+        res = self._pipeline(cmds) or []
+        try:
+            did_ct  = int(res[0][1]) if (len(res) > 0 and res[0][1] is not None) else 0
+            glob_ct = int(res[1][1]) if (len(res) > 1 and res[1][1] is not None) else 0
+        except Exception:
+            did_ct, glob_ct = 0, 0
+
+        if did_ct >= self.per or glob_ct >= self.glob:
+            return False
+
+        self._pipeline([
+            ["INCR", did_key], ["EXPIRE", did_key, "60"],
+            ["INCR", glob_key], ["EXPIRE", glob_key, "60"],
+        ])
+        return True
+
 
 # fallback in-process limiter if redis is not available
 class LocalLimiter:
@@ -279,9 +362,13 @@ class LocalLimiter:
         return True
 
 def build_limiter() -> object:
+    # Best → Redis TCP (Lua) ; else Upstash REST ; else Local
     if REDIS_URL and redis:
         return RedisLimiter(REDIS_URL, RATE_PER_NUMBER_PER_MIN, GLOBAL_RATE_PER_MIN)
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and requests:
+        return UpstashRestLimiter(UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, RATE_PER_NUMBER_PER_MIN, GLOBAL_RATE_PER_MIN)
     return LocalLimiter(RATE_PER_NUMBER_PER_MIN, GLOBAL_RATE_PER_MIN)
+
 
 # =========================
 # Main: SEND from Drip Queue
@@ -362,7 +449,12 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
 
         # Rate limit (cross-process safe)
         if not limiter.try_consume(did):
-            # leave queued; next worker/minute will grab it
+            # push a little so we don't spin on this same row every loop
+            try:
+                new_time = (utcnow() + timedelta(seconds=RATE_LIMIT_REQUEUE_SECONDS)).isoformat()
+                drip.update(rid, _remap_existing_only(drip, {"next_send_date": new_time}))
+            except Exception:
+                traceback.print_exc()
             continue
 
         # Mark SENDING + ⏳
