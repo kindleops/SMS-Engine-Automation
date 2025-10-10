@@ -1,34 +1,89 @@
 services:
-  # 🚀 SMS Engine Service
+  # 🚀 SMS Engine API
   - type: web
     name: rei-sms-engine
     env: docker
     plan: free
     dockerfilePath: ./Dockerfile.sms
+    healthCheckPath: /health
+    autoDeploy: true
     envVars:
+      # --- Airtable (main & synonyms used by modules) ---
       - key: AIRTABLE_API_KEY
+        sync: false
+      - key: LEADS_CONVOS_BASE
         sync: false
       - key: AIRTABLE_LEADS_CONVOS_BASE_ID
         sync: false
+      - key: CAMPAIGN_CONTROL_BASE
+        sync: false
       - key: AIRTABLE_CAMPAIGN_CONTROL_BASE_ID
+        sync: false
+      - key: PERFORMANCE_BASE
         sync: false
       - key: AIRTABLE_PERFORMANCE_BASE_ID
         sync: false
+      - key: AIRTABLE_REPORTING_KEY
+        sync: false
+
+      # --- Text/SMS provider ---
       - key: TEXTGRID_ACCOUNT_SID
         sync: false
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
+
+      # --- Webhook auth / cron auth ---
+      - key: WEBHOOK_TOKEN
+        sync: false
       - key: CRON_TOKEN
         sync: false
-    healthCheckPath: /health
-    autoDeploy: true
 
-  # ⚙️ DevOps Service
+      # --- Redis / Upstash (rate limiting + idempotency) ---
+      - key: REDIS_URL
+        sync: false
+      - key: REDIS_TLS
+        value: "true"
+      - key: UPSTASH_REDIS_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+
+      # --- Engine/runtime knobs (safe defaults; override in dashboard if needed) ---
+      - key: QUIET_HOURS_CST
+        value: "21-09"
+      - key: QUIET_START_HOUR_LOCAL
+        value: "21"
+      - key: QUIET_END_HOUR_LOCAL
+        value: "9"
+      - key: RATE_PER_NUMBER_PER_MIN
+        value: "20"
+      - key: GLOBAL_RATE_PER_MIN
+        value: "5000"
+      - key: DAILY_LIMIT
+        value: "750"
+      - key: DEDUPE_HOURS
+        value: "72"
+      - key: MESSAGES_PER_MIN
+        value: "20"
+      - key: JITTER_SECONDS
+        value: "2"
+
+      # --- Alerts (optional) ---
+      - key: ALERT_PHONE
+        sync: false
+      - key: ALERT_EMAIL_WEBHOOK
+        sync: false
+
+  # ⚙️ DevOps API
   - type: web
     name: rei-devops
     env: docker
     plan: free
     dockerfilePath: ./Dockerfile.ops
+    healthCheckPath: /healthz
+    autoDeploy: true
     envVars:
       - key: AIRTABLE_API_KEY
         sync: false
@@ -36,75 +91,84 @@ services:
         sync: false
       - key: CRON_TOKEN
         sync: false
-    healthCheckPath: /healthz
-    autoDeploy: true
 
-# 🔄 Cronjobs
-cronjobs:
+# 🔄 Cronjobs (HTTP-triggered; secured via x-cron-token)
+cronJobs:
   # --- SMS Engine Core ---
   - name: run-autoresponder
     schedule: "*/10 * * * *"
     command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/autoresponder" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-sms-engine.onrender.com/autoresponder" \
+        -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: run-campaigns
     schedule: "*/10 * * * *"
     command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL" \
+        -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: sms-retry-runner
     schedule: "*/30 * * * *"
     command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/retry" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-sms-engine.onrender.com/retry" \
+        -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: reset-daily-quotas
     schedule: "0 0 * * *"
     command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/reset-quotas" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-sms-engine.onrender.com/reset-quotas" \
+        -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: aggregate-kpis-daily
     schedule: "0 1 * * *"
     command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
+        -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: aggregate-kpis-weekly
     schedule: "0 2 * * 1"
     command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
+        -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: aggregate-kpis-monthly
     schedule: "0 3 1 * *"
     command: |
-      curl -sS -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
+        -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: health-ping
     schedule: "*/5 * * * *"
     command: |
-      curl -sS "https://rei-sms-engine.onrender.com/health"
+      curl --fail --silent --show-error --max-time 10 \
+        "https://rei-sms-engine.onrender.com/health"
 
   # --- DevOps Cronjobs ---
   - name: sync-error-logs
     schedule: "*/15 * * * *"
     command: |
-      curl -sS -X POST "https://rei-devops.onrender.com/sync-logs" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-devops.onrender.com/sync-logs" \
+        -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: sync-server-metrics
     schedule: "*/30 * * * *"
     command: |
-      curl -sS -X POST "https://rei-devops.onrender.com/sync-metrics" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-devops.onrender.com/sync-metrics" \
+        -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: error-alerts
     schedule: "*/10 * * * *"
     command: |
-      curl -sS -X POST "https://rei-devops.onrender.com/alerts" \
-        -H "x-cron-token: $CRON_TOKEN"
+      curl --fail --silent --show-error --max-time 25 \
+        -X POST "https://rei-devops.onrender.com/alerts" \
+        -H "x-cron-token: ${CRON_TOKEN}"
   

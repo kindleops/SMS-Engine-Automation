@@ -5,6 +5,7 @@ import re
 import random
 import traceback
 from typing import Any, Dict, Optional, Tuple
+from sms.followup_flow import schedule_from_response
 from datetime import datetime, timezone
 
 # --- Core project config (one source of truth) ---
@@ -393,14 +394,25 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
             if intent in ("price_response", "condition_response"):
                 try:
                     ai_result = run_ai_closer(from_num, body, f)
-                    _safe_update(convos, msg_id, remap_existing_only(convos, {
-                        CONV_FIELDS["STATUS"]: "AI_HANDOFF",
-                        CONV_FIELDS["PROCESSED_BY"]: "AI Closer",
+
+                    # >>> ADD: auto-schedule the negotiation follow-up
+                    schedule_from_response(
+                        phone=from_num,
+                        intent=intent,             # "price_response" or "condition_response"
+                        lead_id=None,              # or a known lead_id if you have it earlier
+                        market=market,
+                        property_id=None,          # fill if you have it here
+                        current_stage=None,
+                    )
+
+                    _safe_update(convos, msg_id, {
+                        "status": "AI_HANDOFF",
+                        "processed_by": "AI Closer",
                         "processed_at": iso_timestamp(),
-                        CONV_FIELDS["INTENT"]: intent,
+                        "intent_detected": intent,
                         "stage": STAGE_MAP.get(intent, "Stage 3 - AI Closing"),
                         "ai_result": str(ai_result),
-                    }))
+                    })
                     processed += 1
                     breakdown[intent] = breakdown.get(intent, 0) + 1
                 except Exception as e:
@@ -457,18 +469,30 @@ def run_autoresponder(limit: int = 50, view: str = "Unprocessed Inbounds"):
                         pass
                 except Exception as e:
                     errors.append({"phone": from_num, "error": f"Immediate send failed: {e}"})
+                except Exception as e:
+                    errors.append({"phone": from_num, "error": f"Immediate send failed: {e}"})
 
             # Mark conversation processed + update lead trail
-            _safe_update(convos, msg_id, remap_existing_only(convos, {
-                CONV_FIELDS["STATUS"]: "RESPONDED",
-                CONV_FIELDS["PROCESSED_BY"]: processed_by,
+            _safe_update(convos, msg_id, {
+                "status": "RESPONDED",
+                "processed_by": processed_by,
                 "processed_at": iso_timestamp(),
-                CONV_FIELDS["INTENT"]: intent,
+                "intent_detected": intent,
                 "stage": STAGE_MAP.get(intent, "Stage 1 - Owner Check"),
                 "template_id": template_id,
-            }))
+            })
             if lead_id:
                 update_lead_activity(lead_id, body, "IN", intent=intent)
+
+            # >>> ADD: auto-schedule the next follow-up based on the detected intent
+            schedule_from_response(
+                phone=from_num,
+                intent=intent,
+                lead_id=lead_id,            # promote_to_lead() just returned this
+                market=market,
+                property_id=property_id,    # from promote_to_lead()
+                current_stage=None,         # pass a stored stage if you track it on Leads
+            )
 
             processed += 1
             breakdown[intent] = breakdown.get(intent, 0) + 1

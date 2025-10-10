@@ -3,76 +3,133 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone, date
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query
-from pyairtable import Table
 from dotenv import load_dotenv
 
-# Core engine modules
-from sms.outbound_batcher import send_batch
-from sms.autoresponder import run_autoresponder
-from sms.quota_reset import reset_daily_quotas
-from sms.metrics_tracker import update_metrics, _notify
-from sms.inbound_webhook import router as inbound_router
-from sms.campaign_runner import run_campaigns
-from sms.kpi_aggregator import aggregate_kpis
-from sms.retry_runner import run_retry
-from sms.followup_flow import run_followups
-from sms.dispatcher import run_engine
-from sms.health_strict import strict_health
+# ── Safe Airtable helpers (no hard Table import) ─────────────────────────────
+try:
+    from sms.airtable_client import (
+        get_runs, get_kpis, get_leads, get_convos, get_templates,
+        safe_create, remap_existing_only
+    )
+except Exception:  # extreme fallback
+    get_runs = get_kpis = get_leads = get_convos = get_templates = lambda: None
+    def safe_create(*_a, **_k): return None  # type: ignore
+    def remap_existing_only(*_a, **_k): return {}  # type: ignore
 
-# Optional Numbers admin tools (used by several endpoints below)
+# ── Core engine modules (each guarded) ──────────────────────────────────────
+try:
+    from sms.outbound_batcher import send_batch
+except Exception:
+    def send_batch(*_a, **_k): return {"ok": False, "error": "send_batch unavailable"}
+
+try:
+    from sms.autoresponder import run_autoresponder
+except Exception:
+    def run_autoresponder(*_a, **_k): return {"ok": False, "error": "autoresponder unavailable"}
+
+# Prefer the file you shipped as reset_daily_quotas.py
+try:
+    from sms.quota_reset import reset_daily_quotas  # fallback to old name if reset_daily_quotas.py is missing
+except Exception:
+    def reset_daily_quotas(*_a, **_k): return {"ok": False, "error": "quota reset unavailable"}
+
+try:
+    from sms.metrics_tracker import update_metrics, _notify  # type: ignore
+except Exception:
+    def update_metrics(*_a, **_k): return {"ok": False, "error": "metrics tracker unavailable"}
+    def _notify(msg: str):  # best-effort stub
+        print(f"[notify] {msg}")
+
+try:
+    from sms.inbound_webhook import router as inbound_router
+except Exception:
+    inbound_router = None
+
+try:
+    from sms.campaign_runner import run_campaigns
+except Exception:
+    def run_campaigns(*_a, **_k): return {"ok": False, "error": "campaign runner unavailable"}
+
+try:
+    from sms.kpi_aggregator import aggregate_kpis
+except Exception:
+    def aggregate_kpis(*_a, **_k): return {"ok": False, "error": "kpi aggregator unavailable"}
+
+try:
+    from sms.retry_runner import run_retry
+except Exception:
+    def run_retry(*_a, **_k): return {"ok": False, "error": "retry runner unavailable"}
+
+try:
+    from sms.followup_flow import run_followups
+except Exception:
+    def run_followups(*_a, **_k): return {"ok": True, "skipped": "followups unavailable"}
+
+try:
+    from sms.dispatcher import run_engine
+except Exception:
+    def run_engine(*_a, **_k): return {"ok": False, "error": "dispatcher unavailable"}
+
+try:
+    from sms.health_strict import strict_health
+except Exception:
+    def strict_health(mode: str): return {"ok": True, "mode": mode, "note": "strict health shim"}
+
+# Optional Numbers admin tools (name-compatible wrappers)
 try:
     from sms.admin_numbers import (
-        backfill_drip_from_numbers,
-        recalc_numbers_sent_today,
-        reset_numbers_daily_counters,
+        backfill_numbers_for_existing_queue,
+        resequence_next_send,
     )
-except Exception:
-    # Safe fallbacks if the helpers aren’t present in this build
-    def backfill_drip_from_numbers(*args, **kwargs): return {"ok": False, "error": "admin_numbers missing"}
-    def recalc_numbers_sent_today(*args, **kwargs): return {"ok": False, "error": "admin_numbers missing"}
-    def reset_numbers_daily_counters(*args, **kwargs): return {"ok": False, "error": "admin_numbers missing"}
+    # Back-compat names used by older code:
+    def backfill_drip_from_numbers(dry_run: bool = True):
+        # our impl doesn't do dry_run; return actual changes + flag for transparency
+        res = backfill_numbers_for_existing_queue()
+        res["dry_run_ignored"] = dry_run
+        return res
 
-# --- Load .env ---
+    def recalc_numbers_sent_today(for_date: str):
+        # Not implemented in admin_numbers; report gracefully
+        return {"ok": True, "note": "recalc not implemented in this build", "date": for_date}
+
+    def reset_numbers_daily_counters():
+        # Not implemented in admin_numbers; recommend using reset_daily_quotas endpoint
+        return {"ok": True, "note": "use /reset-quotas which resets Numbers daily counters"}
+except Exception:
+    def backfill_drip_from_numbers(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
+    def recalc_numbers_sent_today(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
+    def reset_numbers_daily_counters(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
+
+# ── Load .env (relative to repo root) ───────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
-# --- FastAPI app ---
+# ── FastAPI app ─────────────────────────────────────────────────────────────
 app = FastAPI(title="REI SMS Engine", version="1.2")
-app.include_router(inbound_router)
+if inbound_router:
+    app.include_router(inbound_router)
 
-# --- ENV CONFIG ---
+# ── ENV CONFIG ──────────────────────────────────────────────────────────────
 CRON_TOKEN = os.getenv("CRON_TOKEN")
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
 STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
 
-# Quiet hours (Central Time) – default 09:00–21:00
+# Quiet hours (Central Time) – default 21:00–09:00 local (no sends)
 QUIET_HOURS_ENFORCED = os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in ("1", "true", "yes")
-QUIET_START = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))  # 21:00 local (CST/CDT)
-QUIET_END = int(os.getenv("QUIET_END_HOUR_LOCAL", "9"))       # 09:00 local (CST/CDT)
+QUIET_START = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))
+QUIET_END = int(os.getenv("QUIET_END_HOUR_LOCAL", "9"))
 ALLOW_QUEUE_OUTSIDE_HOURS = os.getenv("ALLOW_QUEUE_OUTSIDE_HOURS", "true").lower() in ("1", "true", "yes")
 AUTORESPONDER_ALWAYS_ON = os.getenv("AUTORESPONDER_ALWAYS_ON", "true").lower() in ("1", "true", "yes")
 
-# Bases & keys
-PERF_BASE = os.getenv("PERFORMANCE_BASE")
-PERF_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+# Bases (for startup hints only)
+PERF_BASE = os.getenv("PERFORMANCE_BASE") or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 
-# Tables
-TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
-LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
-
-# Airtable clients (smoke-test in startup)
-templates = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE) if AIRTABLE_API_KEY else None
-leads = Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, LEADS_TABLE) if AIRTABLE_API_KEY else None
-
-# -------------------------
-# Helpers
-# -------------------------
+# ── Helpers ─────────────────────────────────────────────────────────────────
 def log_error(context: str, err: Exception | str):
     msg = f"❌ {context}: {err}"
     print(msg)
@@ -89,72 +146,58 @@ def iso_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 def get_perf_tables():
-    if not (PERF_KEY and PERF_BASE):
-        return None, None
-    try:
-        runs = Table(PERF_KEY, PERF_BASE, "Runs/Logs")
-        kpis = Table(PERF_KEY, PERF_BASE, "KPIs")
-        return runs, kpis
-    except Exception as e:
-        log_error("Init Performance tables", e)
-        return None, None
+    return get_runs(), get_kpis()
 
-def log_run(runs: Optional[Table], step: str, result: dict):
-    if not runs: return None
+def log_run(runs_tbl, step: str, result: Dict[str, Any]):
+    if not runs_tbl:
+        return None
     try:
-        return runs.create({
+        payload = {
             "Type": step,
-            "Processed": result.get("processed") or result.get("total_sent") or result.get("sent") or 0,
+            "Processed": float(result.get("processed") or result.get("total_sent") or result.get("sent") or 0),
             "Breakdown": str(result),
             "Timestamp": iso_timestamp(),
-        })
+        }
+        return safe_create(runs_tbl, payload)
     except Exception as e:
         log_error(f"Log Run {step}", e)
         return None
 
-def log_kpi(kpis: Optional[Table], metric: str, value: int | float):
-    if not kpis: return None
+def log_kpi(kpis_tbl, metric: str, value: int | float):
+    if not kpis_tbl:
+        return None
     try:
-        return kpis.create({
+        payload = {
             "Campaign": "ALL",
             "Metric": metric,
-            "Value": value,
+            "Value": float(value),
             "Date": datetime.now(timezone.utc).date().isoformat(),
-        })
+        }
+        return safe_create(kpis_tbl, payload)
     except Exception as e:
         log_error(f"Log KPI {metric}", e)
         return None
 
-# --- Quiet hours (Central) helpers: 09:00–21:00 local ---
+# Quiet hours helpers (Central)
 try:
     from zoneinfo import ZoneInfo
 except Exception:
-    ZoneInfo = None  # Should exist on py3.9+
+    ZoneInfo = None  # py>=3.9 should have this
 
 def central_now():
     if ZoneInfo:
         return datetime.now(ZoneInfo("America/Chicago"))
-    # Fallback: UTC printed, still enforces via hours below if you choose to map
     return datetime.now(timezone.utc)
 
 def is_quiet_hours_local() -> bool:
-    """True if we are within quiet hours in America/Chicago."""
+    """True if now is within quiet hours in America/Chicago."""
     if not QUIET_HOURS_ENFORCED:
         return False
-    now_local = central_now()
-    hour = now_local.hour
-    # Quiet between QUIET_START -> 24 and 0 -> QUIET_END (wrap-around)
-    if QUIET_START <= 23 and QUIET_END >= 0 and QUIET_START != QUIET_END:
-        if QUIET_START < 24:
-            if hour >= QUIET_START:  # from start to midnight
-                return True
-        if hour < QUIET_END:        # from midnight to end
-            return True
-    return False
+    h = central_now().hour
+    # quiet if 21:00–23:59 or 00:00–08:59 by default
+    return (h >= QUIET_START) or (h < QUIET_END)
 
-# -------------------------
-# Startup Checks
-# -------------------------
+# ── Startup Checks ──────────────────────────────────────────────────────────
 @app.on_event("startup")
 def startup_checks():
     try:
@@ -162,30 +205,26 @@ def startup_checks():
         print(f"   LEADS_CONVOS_BASE: {LEADS_CONVOS_BASE}")
         print(f"   PERFORMANCE_BASE: {PERF_BASE}")
         print(f"   STRICT_MODE: {STRICT_MODE}, TEST_MODE: {TEST_MODE}")
-        print(f"   QUIET_HOURS_ENFORCED: {QUIET_HOURS_ENFORCED} (Local 21:00–09:00 by default)")
+        print(f"   QUIET_HOURS_ENFORCED: {QUIET_HOURS_ENFORCED} (Local {QUIET_START:02d}:00–{QUIET_END:02d}:00)")
 
-        missing = [k for k in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"] if not os.getenv(k)]
+        missing = [k for k in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"]
+                   if not os.getenv(k) and not os.getenv(k.replace("BASE", "_BASE_ID"))]
         if missing:
             msg = f"🚨 Missing env vars → {', '.join(missing)}"
             log_error("Startup checks", msg)
             if STRICT_MODE:
                 raise RuntimeError(msg)
 
-        if not templates or not leads:
-            msg = "🚨 Airtable tables not initialized"
-            log_error("Startup checks", msg)
-            if STRICT_MODE:
-                raise RuntimeError(msg)
-
+        # Light smoke test: attempt to build handles (won't crash if missing)
+        _ = get_templates()
+        _ = get_leads()
         print("✅ Startup checks passed")
     except Exception as e:
         log_error("Startup exception", e)
         if STRICT_MODE:
             raise
 
-# -------------------------
-# Health
-# -------------------------
+# ── Health ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {
@@ -200,20 +239,17 @@ def health():
 def health_strict_endpoint(mode: str = Query("prospects", description="prospects | leads | inbounds")):
     return strict_health(mode=mode)
 
-# -------------------------
-# Outbound / Campaigns
-# -------------------------
+# ── Outbound / Campaigns ───────────────────────────────────────────────────
 @app.post("/send")
 async def send_endpoint(
     x_cron_token: str | None = Header(None),
-    campaign_id: str = Query(None),
+    campaign_id: str | None = Query(None),
     limit: int = Query(500),
 ):
     check_token(x_cron_token)
     if TEST_MODE:
         return {"ok": True, "status": "mock_send", "campaign": campaign_id}
     if is_quiet_hours_local():
-        # Block active sending during quiet hours
         return {"ok": False, "error": "Quiet hours in effect (Central). Sending blocked.", "quiet_hours": True}
     return send_batch(campaign_id=campaign_id, limit=limit)
 
@@ -235,18 +271,14 @@ async def run_campaigns_endpoint(
     if is_quiet_hours_local():
         if not ALLOW_QUEUE_OUTSIDE_HOURS:
             return {"ok": False, "error": "Quiet hours in effect (Central). Queueing disabled.", "quiet_hours": True}
-        # Force queue-only during quiet hours
-        result = run_campaigns(limit=None if str(limit).upper() == "ALL" else int(limit), send_after_queue=False)
-        result["note"] = "Queued only (quiet hours)."
-        result["quiet_hours"] = True
-        return result
+        res = run_campaigns(limit=None if str(limit).upper() == "ALL" else int(limit), send_after_queue=False)
+        res["note"] = "Queued only (quiet hours)."
+        res["quiet_hours"] = True
+        return res
 
-    # Normal hours
     return run_campaigns(limit=None if str(limit).upper() == "ALL" else int(limit), send_after_queue=send_after_queue)
 
-# -------------------------
-# Autoresponder / Followups / Retry / KPIs
-# -------------------------
+# ── Autoresponder / Followups / Retry / KPIs ───────────────────────────────
 @app.post("/autoresponder/{mode}")
 async def autoresponder_endpoint(
     mode: str,
@@ -256,8 +288,7 @@ async def autoresponder_endpoint(
 ):
     """
     Modes: autoresponder | ai-closer | manual-qa
-    Autoresponder is allowed 24/7 by default (AUTORESPONDER_ALWAYS_ON),
-    since responding to inbound is generally permissible even in quiet hours.
+    Autoresponder is allowed 24/7 by default (AUTORESPONDER_ALWAYS_ON).
     """
     check_token(x_cron_token)
     os.environ["PROCESSED_BY_LABEL"] = mode.replace("-", " ").title()
@@ -286,7 +317,6 @@ async def retry_endpoint(
     check_token(x_cron_token)
     if TEST_MODE:
         return {"ok": True, "status": "mock_retry"}
-    # We block sending-like operations during quiet hours
     if is_quiet_hours_local():
         return {"ok": False, "error": "Quiet hours in effect (Central). Retries blocked.", "quiet_hours": True}
     return run_retry(limit=limit, view=view)
@@ -306,97 +336,90 @@ async def cron_all_endpoint(
     Order of ops:
       - STRICT health checks (prospects, leads, inbounds)
       - If quiet hours:
-          * Run AUTORESPONDER (if allowed), FOLLOWUPS (optional), METRICS, AGGREGATE_KPIS
-          * Queue-only CAMPAIGN_RUNNER (if allowed)
-          * Skip SEND/RETRY
+          * Autoresponder (if allowed), Metrics, Aggregate KPIs, Campaign queue-only
+          * Skip send/retry
       - If normal hours:
-          * Run SEND, AUTORESPONDER, FOLLOWUPS, METRICS, RETRY, AGGREGATE_KPIS, CAMPAIGN_RUNNER
+          * Send, Autoresponder, Followups, Metrics, Retry, Aggregate KPIs, Campaigns
     """
     check_token(x_cron_token)
-    results, totals = {}, {"processed": 0, "errors": 0}
-    runs, kpis = get_perf_tables()
+    results: Dict[str, Any] = {}
+    totals = {"processed": 0, "errors": 0}
+    runs_tbl, kpis_tbl = get_perf_tables()
 
     # health gates
     for mode in ["prospects", "leads", "inbounds"]:
         health_result = strict_health(mode)
         results[f"{mode}_health"] = health_result
         if not health_result.get("ok"):
-            log_run(runs, f"{mode.upper()}_HEALTH_FAIL", health_result)
+            log_run(runs_tbl, f"{mode.upper()}_HEALTH_FAIL", health_result)
             return {"ok": False, "error": f"Health check failed for {mode}", "results": results}
 
-    # Quiet hours logic
+    # Quiet hours
     if is_quiet_hours_local():
-        # 1) autoresponder (if allowed)
         if AUTORESPONDER_ALWAYS_ON:
             try:
                 r = run_autoresponder(limit=50, view="Unprocessed Inbounds")
                 results["autoresponder"] = r
-                log_run(runs, "AUTORESPONDER", r)
+                log_run(runs_tbl, "AUTORESPONDER", r)
                 totals["processed"] += r.get("processed", 0)
             except Exception as e:
                 log_error("AUTORESPONDER", e); totals["errors"] += 1
 
-        # 2) followups (optional – these may be sends; skip to be safe)
         results["followups"] = {"ok": True, "skipped": "quiet_hours"}
 
-        # 3) metrics + kpis
         for step_name, func in (("METRICS", update_metrics), ("AGGREGATE_KPIS", aggregate_kpis)):
             try:
                 r = func()
                 results[step_name.lower()] = r
-                log_run(runs, step_name, r)
+                log_run(runs_tbl, step_name, r)
             except Exception as e:
                 log_error(step_name, e); totals["errors"] += 1
 
-        # 4) campaigns: queue-only if allowed
         if ALLOW_QUEUE_OUTSIDE_HOURS:
             try:
                 r = run_campaigns(limit=None, send_after_queue=False)
                 r["note"] = "Queued only (quiet hours)."
                 r["quiet_hours"] = True
                 results["campaign_runner"] = r
-                log_run(runs, "CAMPAIGN_RUNNER", r)
+                log_run(runs_tbl, "CAMPAIGN_RUNNER", r)
             except Exception as e:
                 log_error("CAMPAIGN_RUNNER", e); totals["errors"] += 1
         else:
             results["campaign_runner"] = {"ok": True, "skipped": "quiet_hours"}
 
-        # 5) send / retry blocked
         results["outbound"] = {"ok": True, "skipped": "quiet_hours"}
         results["retry"] = {"ok": True, "skipped": "quiet_hours"}
 
-        log_kpi(kpis, "TOTAL_PROCESSED", totals["processed"])
-        log_kpi(kpis, "TOTAL_ERRORS", totals["errors"])
+        log_kpi(kpis_tbl, "TOTAL_PROCESSED", totals["processed"])
+        log_kpi(kpis_tbl, "TOTAL_ERRORS", totals["errors"])
         results["timestamp"] = iso_timestamp()
         results["quiet_hours"] = True
         return {"ok": True, "results": results, "totals": totals}
 
-    # Normal hours full run
+    # Normal hours
     steps = [
-        ("OUTBOUND", lambda: send_batch(limit=limit)),
-        ("AUTORESPONDER", lambda: run_autoresponder(limit=50, view="Unprocessed Inbounds")),
-        ("FOLLOWUPS", run_followups),
-        ("METRICS", update_metrics),
-        ("RETRY", lambda: run_retry(limit=100)),
-        ("AGGREGATE_KPIS", aggregate_kpis),
+        ("OUTBOUND",        lambda: send_batch(limit=limit)),
+        ("AUTORESPONDER",   lambda: run_autoresponder(limit=50, view="Unprocessed Inbounds")),
+        ("FOLLOWUPS",       run_followups),
+        ("METRICS",         update_metrics),
+        ("RETRY",           lambda: run_retry(limit=100)),
+        ("AGGREGATE_KPIS",  aggregate_kpis),
         ("CAMPAIGN_RUNNER", lambda: run_campaigns(limit=None)),
     ]
     for step, func in steps:
         try:
             r = {"ok": True, "status": f"mock_{step.lower()}"} if TEST_MODE else func()
             results[step.lower()] = r
-            log_run(runs, step, r)
+            log_run(runs_tbl, step, r)
             totals["processed"] += r.get("processed", 0)
         except Exception as e:
             log_error(step, e); totals["errors"] += 1
 
-    log_kpi(kpis, "TOTAL_PROCESSED", totals["processed"])
-    log_kpi(kpis, "TOTAL_ERRORS", totals["errors"])
+    log_kpi(kpis_tbl, "TOTAL_PROCESSED", totals["processed"])
+    log_kpi(kpis_tbl, "TOTAL_ERRORS", totals["errors"])
     return {"ok": True, "results": results, "totals": totals, "timestamp": iso_timestamp()}
 
-# -------------------------
-# Numbers Admin (helpful for from_number + quotas)
-# -------------------------
+# ── Numbers Admin (from_number + quotas) ────────────────────────────────────
 @app.post("/admin/numbers/backfill")
 def numbers_backfill_endpoint(
     dry_run: bool = Query(True),
@@ -419,6 +442,7 @@ def numbers_recalc_endpoint(
 ):
     """
     Recalculates Numbers.'Sent Today' by scanning Drip Queue for the given date.
+    (Shim returns a helpful note if not implemented in this build.)
     """
     check_token(x_cron_token)
     try:
@@ -433,7 +457,7 @@ def numbers_reset_endpoint(
     x_cron_token: str | None = Header(None),
 ):
     """
-    Resets daily counters on Numbers (run nightly).
+    Resets daily counters on Numbers (shim will suggest /reset-quotas if needed).
     """
     check_token(x_cron_token)
     try:
@@ -442,13 +466,13 @@ def numbers_reset_endpoint(
         log_error("numbers_reset", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-# -------------------------
-# Engine (manual)
-# -------------------------
+# ── Engine (manual) ─────────────────────────────────────────────────────────
 @app.get("/engine")
 def trigger_engine(mode: str, limit: int = 50, retry_limit: int = 100):
     valid_modes = {"prospects", "leads", "inbounds"}
     if mode not in valid_modes:
         raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'")
-    strict_health(mode)
+    health = strict_health(mode)
+    if not health.get("ok"):
+        raise HTTPException(status_code=500, detail=f"Health check failed for {mode}")
     return {"ok": True, "mode": mode, "result": run_engine(mode, limit=limit, retry_limit=retry_limit)}

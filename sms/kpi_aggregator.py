@@ -1,106 +1,247 @@
 # sms/kpi_aggregator.py
+from __future__ import annotations
+
 import os
+import re
 import traceback
 from datetime import datetime, timedelta, timezone
-from pyairtable import Table
+from typing import Dict, Optional
 
+# --- Ensure Table is always defined (prevents NameError) ---
+try:
+    from pyairtable import Table as _RealTable
+except Exception:  # pyairtable missing or import error
+    _RealTable = None
+
+class Table:  # thin wrapper so symbol 'Table' always exists
+    def __init__(self, api_key: str, base_id: str, table_name: str):
+        if _RealTable is None:
+            raise ImportError(
+                "pyairtable is not installed or failed to import. "
+                "Install with: pip install pyairtable"
+            )
+        self._t = _RealTable(api_key, base_id, table_name)
+
+    def all(self, **kwargs):
+        return self._t.all(**kwargs)
+
+    def create(self, fields: dict):
+        return self._t.create(fields)
+
+    def update(self, record_id: str, fields: dict):
+        return self._t.update(record_id, fields)
+
+
+# -----------------------
+# ENV / CONFIG
+# -----------------------
 AIRTABLE_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-PERF_BASE = os.getenv("PERFORMANCE_BASE")
+PERF_BASE    = os.getenv("PERFORMANCE_BASE")
+KPI_TABLE    = os.getenv("KPI_TABLE_NAME", "KPIs")
+
+# Business-timezone for daily rollups
+KPI_TZ       = os.getenv("KPI_TZ", "America/Chicago")
+MAX_SCAN     = int(os.getenv("KPI_MAX_SCAN", "10000"))  # safety cap
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 
-def _get_tables():
-    if not (AIRTABLE_KEY and PERF_BASE):
+# -----------------------
+# Helpers
+# -----------------------
+def _tz_now():
+    if ZoneInfo:
+        return datetime.now(ZoneInfo(KPI_TZ))
+    return datetime.now(timezone.utc)
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _to_date_local(s: str) -> Optional[datetime.date]:
+    """
+    Accepts YYYY-MM-DD or ISO timestamp (with Z or offset).
+    Converts to KPI_TZ date to keep late-night events on the correct business day.
+    """
+    if not s:
         return None
     try:
-        return Table(AIRTABLE_KEY, PERF_BASE, "KPIs")
+        if "T" in s:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if ZoneInfo:
+                dt = dt.astimezone(ZoneInfo(KPI_TZ))
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.date()
+        return datetime.fromisoformat(s).date()
+    except Exception:
+        return None
+
+def _norm(s):  # normalize field names
+    return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
+
+# -----------------------
+# Airtable helpers
+# -----------------------
+def _kpi_table() -> Optional[Table]:
+    if not (AIRTABLE_KEY and PERF_BASE):
+        print("⚠️ KPI Aggregator: missing AIRTABLE key or PERFORMANCE_BASE")
+        return None
+    try:
+        return Table(AIRTABLE_KEY, PERF_BASE, KPI_TABLE)
     except Exception:
         traceback.print_exc()
         return None
 
-
-def _parse_date(date_str: str):
-    """Handle both YYYY-MM-DD and ISO timestamps from Airtable."""
-    if not date_str:
-        return None
+def _auto_field_map(tbl: Table) -> Dict[str, str]:
     try:
-        if "T" in date_str:  # ISO timestamp
-            return datetime.fromisoformat(date_str.replace("Z", "+00:00")).date()
-        return datetime.fromisoformat(date_str).date()
+        rows = tbl.all(max_records=1)
+        keys = list(rows[0].get("fields", {}).keys()) if rows else []
     except Exception:
-        return None
+        keys = []
+    return {_norm(k): k for k in keys}
+
+def _remap_existing_only(tbl: Table, payload: Dict) -> Dict:
+    amap = _auto_field_map(tbl)
+    if not amap:
+        return dict(payload)
+    out = {}
+    for k, v in payload.items():
+        mk = amap.get(_norm(k))
+        if mk:
+            out[mk] = v
+    return out
 
 
+# -----------------------
+# Core
+# -----------------------
 def aggregate_kpis():
     """
-    Aggregate KPIs into daily, weekly, and monthly totals.
-    - Query all KPI rows
-    - Sum by metric
-    - Insert *_DAILY_TOTAL, *_WEEKLY_TOTAL, *_MONTHLY_TOTAL rows
+    Aggregates raw KPI rows into *_DAILY_TOTAL, *_WEEKLY_TOTAL, *_MONTHLY_TOTAL by Metric.
+    - Idempotent per day (updates today’s total rows if they already exist).
+    - Timezone-aware (KPI_TZ, default America/Chicago).
+    - Safe writes (only updates fields that exist in the table).
     """
-    kpi_tbl = _get_tables()
+    kpi_tbl = _kpi_table()
     if not kpi_tbl:
-        return {"ok": False, "error": "Airtable KPI table not configured"}
+        return {"ok": False, "error": "KPI table not configured"}
 
-    today = datetime.now(timezone.utc).date()
-    start_week = today - timedelta(days=7)
-    start_month = today.replace(day=1)
+    today_local = _tz_now().date()
+    start_week  = today_local - timedelta(days=7)
+    start_month = today_local.replace(day=1)
+    now_iso     = _utcnow_iso()
 
     try:
-        rows = kpi_tbl.all(max_records=5000)  # safety limit
-        daily_totals, weekly_totals, monthly_totals = {}, {}, {}
-
-        for r in rows:
-            f = r.get("fields", {})
-            metric = f.get("Metric")
-            raw_val = f.get("Value")
-            date_obj = _parse_date(f.get("Date"))
-
-            if not (metric and date_obj):
-                continue
-
-            try:
-                value = int(raw_val) if isinstance(raw_val, (int, float, str)) else 0
-            except Exception:
-                value = 0
-
-            # Daily
-            if date_obj == today:
-                daily_totals[metric] = daily_totals.get(metric, 0) + value
-
-            # Weekly
-            if date_obj >= start_week:
-                weekly_totals[metric] = weekly_totals.get(metric, 0) + value
-
-            # Monthly
-            if date_obj >= start_month:
-                monthly_totals[metric] = monthly_totals.get(metric, 0) + value
-
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        def _write_totals(suffix, totals):
-            for metric, total in totals.items():
-                kpi_tbl.create(
-                    {
-                        "Campaign": "ALL",
-                        "Metric": f"{metric}_{suffix}",
-                        "Value": total,
-                        "Date": str(today),
-                        "Timestamp": timestamp,
-                    }
-                )
-
-        # Write aggregates
-        _write_totals("DAILY_TOTAL", daily_totals)
-        _write_totals("WEEKLY_TOTAL", weekly_totals)
-        _write_totals("MONTHLY_TOTAL", monthly_totals)
-
-        return {
-            "ok": True,
-            "daily": daily_totals,
-            "weekly": weekly_totals,
-            "monthly": monthly_totals,
-        }
-
-    except Exception as e:
+        rows = kpi_tbl.all(max_records=MAX_SCAN)
+    except Exception:
         traceback.print_exc()
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "Failed to read KPI rows"}
+
+    # Partition: raw vs existing totals for today (so we upsert, not duplicate)
+    raw = []
+    existing_totals_daily: Dict[str, dict] = {}
+    existing_totals_weekly: Dict[str, dict] = {}
+    existing_totals_monthly: Dict[str, dict] = {}
+
+    for r in rows:
+        f = r.get("fields", {})
+        metric = (f.get("Metric") or "").strip()
+        d = _to_date_local(str(f.get("Date") or ""))
+
+        if not metric or not d:
+            continue
+
+        # capture already-written totals for today
+        if metric.endswith("_DAILY_TOTAL") and d == today_local:
+            existing_totals_daily[metric] = r
+            continue
+        if metric.endswith("_WEEKLY_TOTAL") and d == today_local:
+            existing_totals_weekly[metric] = r
+            continue
+        if metric.endswith("_MONTHLY_TOTAL") and d == today_local:
+            existing_totals_monthly[metric] = r
+            continue
+
+        raw.append(r)
+
+    # Aggregate
+    daily: Dict[str, float] = {}
+    weekly: Dict[str, float] = {}
+    monthly: Dict[str, float] = {}
+
+    for r in raw:
+        f = r.get("fields", {})
+        metric = (f.get("Metric") or "").strip()
+        d = _to_date_local(str(f.get("Date") or ""))
+
+        if not metric or not d:
+            continue
+
+        v = f.get("Value")
+        try:
+            val = float(v) if v is not None else 0.0
+        except Exception:
+            try:
+                val = float(str(v).replace(",", "").strip())
+            except Exception:
+                val = 0.0
+
+        if d == today_local:
+            daily[metric] = daily.get(metric, 0.0) + val
+        if d >= start_week:
+            weekly[metric] = weekly.get(metric, 0.0) + val
+        if d >= start_month:
+            monthly[metric] = monthly.get(metric, 0.0) + val
+
+    written = {"daily": 0, "weekly": 0, "monthly": 0}
+    errors = []
+
+    def _upsert_totals(suffix: str, totals: Dict[str, float], existing_map: Dict[str, dict]):
+        nonlocal written
+        for base_metric, total in totals.items():
+            metric_name = f"{base_metric}_{suffix}"
+            payload = {
+                "Campaign": "ALL",
+                "Metric": metric_name,
+                "Value": total,
+                "Date": str(today_local),
+                "Timestamp": now_iso,
+                # Optional range fields if they exist in your table:
+                "Date Start": str(
+                    start_month if suffix == "MONTHLY_TOTAL"
+                    else (start_week if suffix == "WEEKLY_TOTAL" else today_local)
+                ),
+                "Date End": str(today_local),
+            }
+            try:
+                if metric_name in existing_map:
+                    kpi_tbl.update(existing_map[metric_name]["id"], _remap_existing_only(kpi_tbl, payload))
+                else:
+                    kpi_tbl.create(_remap_existing_only(kpi_tbl, payload))
+
+                if suffix == "DAILY_TOTAL":
+                    written["daily"] += 1
+                elif suffix == "WEEKLY_TOTAL":
+                    written["weekly"] += 1
+                else:
+                    written["monthly"] += 1
+            except Exception as e:
+                traceback.print_exc()
+                errors.append(f"{metric_name}: {e}")
+
+    _upsert_totals("DAILY_TOTAL", daily,   existing_totals_daily)
+    _upsert_totals("WEEKLY_TOTAL", weekly, existing_totals_weekly)
+    _upsert_totals("MONTHLY_TOTAL", monthly, existing_totals_monthly)
+
+    return {
+        "ok": True,
+        "daily": daily,
+        "weekly": weekly,
+        "monthly": monthly,
+        "written": written,
+        "errors": errors,
+    }
