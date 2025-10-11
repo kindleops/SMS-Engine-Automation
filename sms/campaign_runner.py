@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import os, re, json, random, math, traceback
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from pyairtable import Api
 
@@ -29,9 +29,9 @@ except Exception:
 
 # ============== ENV / CONFIG ==============
 AIRTABLE_KEY            = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE       = os.getenv("LEADS_CONVOS_BASE")
-CAMPAIGN_CONTROL_BASE   = os.getenv("CAMPAIGN_CONTROL_BASE")
-PERFORMANCE_BASE        = os.getenv("PERFORMANCE_BASE")
+LEADS_CONVOS_BASE       = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CAMPAIGN_CONTROL_BASE   = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
+PERFORMANCE_BASE        = os.getenv("PERFORMANCE_BASE") or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
 
 PROSPECTS_TABLE         = os.getenv("PROSPECTS_TABLE", "Prospects")
 CAMPAIGNS_TABLE         = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
@@ -39,7 +39,7 @@ TEMPLATES_TABLE         = os.getenv("TEMPLATES_TABLE", "Templates")
 DRIP_QUEUE_TABLE        = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 NUMBERS_TABLE           = os.getenv("NUMBERS_TABLE", "Numbers")
 
-RUNNER_SEND_AFTER_QUEUE = (os.getenv("RUNNER_SEND_AFTER_QUEUE", "false").lower() == "true")
+RUNNER_SEND_AFTER_QUEUE = os.getenv("RUNNER_SEND_AFTER_QUEUE", "false").lower() in ("1", "true", "yes")
 DEDUPE_HOURS            = int(os.getenv("DEDUPE_HOURS", "72"))
 DAILY_LIMIT_FALLBACK    = int(os.getenv("DAILY_LIMIT", "750"))
 
@@ -84,12 +84,10 @@ def get_phone(f: Dict[str, Any]) -> Optional[str]:
     p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
     if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
         d = _digits_only(p1)
-        if d:
-            return d
+        if d: return d
     if f.get("Phone 2 Verified") or f.get("Phone 2 Ownership Verified"):
         d = _digits_only(p2)
-        if d:
-            return d
+        if d: return d
     for k in PHONE_FIELDS:
         d = _digits_only(f.get(k))
         if d: return d
@@ -120,34 +118,98 @@ def schedule_time(base_utc: datetime, idx: int) -> str:
         t = _shift_to_window(t)
     return _local_naive_iso(t)  # store CT naive so Airtable UI doesn't shift it
 
+# ============== robust time parsing ==============
+def _parse_time_maybe_ct(value: Any) -> Optional[datetime]:
+    """
+    Accepts:
+      - ISO with tz → return UTC
+      - naive datetime → treat as America/Chicago, return UTC
+      - date-only 'YYYY-MM-DD' → set to QUIET_END_HOUR (e.g., 09:00) in CT, return UTC
+    """
+    if not value:
+        return None
+    txt = str(value).strip()
+    try:
+        if "T" in txt:
+            dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=QUIET_TZ)
+            return dt.astimezone(timezone.utc)
+        d = date.fromisoformat(txt)
+        local = datetime(d.year, d.month, d.day, max(9, QUIET_END_HOUR), 0, 0, tzinfo=QUIET_TZ)
+        return local.astimezone(timezone.utc)
+    except Exception:
+        return None
+
 # ============== Airtable clients ==============
 @lru_cache(maxsize=None)
-def _api_main():    return Api(AIRTABLE_KEY) if AIRTABLE_KEY and LEADS_CONVOS_BASE else None
-@lru_cache(maxsize=None)
-def _api_nums():    return Api(AIRTABLE_KEY) if AIRTABLE_KEY and CAMPAIGN_CONTROL_BASE else None
-@lru_cache(maxsize=None)
-def _api_perf():    return Api(AIRTABLE_KEY) if AIRTABLE_KEY and PERFORMANCE_BASE else None
+def _api_main():    return Api(AIRTABLE_KEY) if AIRTABLE_KEY else None
 
 @lru_cache(maxsize=None)
-def get_campaigns(): return _api_main().table(LEADS_CONVOS_BASE, CAMPAIGNS_TABLE) if _api_main() else None
+def get_campaigns():
+    """
+    Campaigns may live in Campaign Control base or Leads/Convos.
+    Prefer CAMPAIGN_CONTROL_BASE; fallback to LEADS_CONVOS_BASE.
+    """
+    if not _api_main():
+        return None
+    if CAMPAIGN_CONTROL_BASE:
+        try:
+            return _api_main().table(CAMPAIGN_CONTROL_BASE, CAMPAIGNS_TABLE)
+        except Exception:
+            traceback.print_exc()
+    if LEADS_CONVOS_BASE:
+        try:
+            return _api_main().table(LEADS_CONVOS_BASE, CAMPAIGNS_TABLE)
+        except Exception:
+            traceback.print_exc()
+    return None
+
 @lru_cache(maxsize=None)
-def get_templates(): return _api_main().table(LEADS_CONVOS_BASE, TEMPLATES_TABLE) if _api_main() else None
+def get_templates():
+    if not (_api_main() and LEADS_CONVOS_BASE):
+        return None
+    return _api_main().table(LEADS_CONVOS_BASE, TEMPLATES_TABLE)
+
 @lru_cache(maxsize=None)
-def get_prospects(): return _api_main().table(LEADS_CONVOS_BASE, PROSPECTS_TABLE) if _api_main() else None
+def get_prospects():
+    if not (_api_main() and LEADS_CONVOS_BASE):
+        return None
+    return _api_main().table(LEADS_CONVOS_BASE, PROSPECTS_TABLE)
+
 @lru_cache(maxsize=None)
-def get_drip():      return _api_main().table(LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE) if _api_main() else None
+def get_drip():
+    if not (_api_main() and LEADS_CONVOS_BASE):
+        return None
+    return _api_main().table(LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
+
 @lru_cache(maxsize=None)
-def get_numbers():   return _api_nums().table(CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE) if _api_nums() else None
+def get_numbers():
+    if not (_api_main() and CAMPAIGN_CONTROL_BASE):
+        return None
+    return _api_main().table(CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
+
 @lru_cache(maxsize=None)
-def get_runs():      return _api_perf().table(PERFORMANCE_BASE, "Runs/Logs") if _api_perf() else None
+def get_runs():
+    if not (_api_main() and PERFORMANCE_BASE):
+        return None
+    return _api_main().table(PERFORMANCE_BASE, "Runs/Logs")
+
 @lru_cache(maxsize=None)
-def get_kpis():      return _api_perf().table(PERFORMANCE_BASE, "KPIs") if _api_perf() else None
+def get_kpis():
+    if not (_api_main() and PERFORMANCE_BASE):
+        return None
+    return _api_main().table(PERFORMANCE_BASE, "KPIs")
 
 # ============== field-safe writes ==============
 def _auto_field_map(tbl, sample_id: Optional[str]=None) -> Dict[str,str]:
     try:
-        probe = tbl.get(sample_id) if sample_id else (tbl.all(max_records=1)[0] if tbl.all(max_records=1) else {"fields":{}})
-        keys = list(probe.get("fields",{}).keys())
+        if sample_id:
+            probe = tbl.get(sample_id)
+        else:
+            rows = tbl.all(max_records=1)
+            probe = rows[0] if rows else {"fields": {}}
+        keys = list(probe.get("fields", {}).keys())
     except Exception:
         keys = []
     return {_norm(k): k for k in keys}
@@ -190,7 +252,7 @@ def pick_template(template_ids: Any, templates_table):
     tid = random.choice(template_ids) if isinstance(template_ids, list) else str(template_ids)
     try:
         row = templates_table.get(tid)
-        msg = _get(row.get("fields", {}), "Message", "message") if row else None
+        msg = _get(row.get("fields", {}), "Message", "message", "Body", "SMS Body", "Copy") if row else None
         return (msg, tid) if msg else (None, None)
     except Exception:
         traceback.print_exc(); return (None, None)
@@ -208,11 +270,10 @@ def _supports_market(f: Dict[str, Any], market: Optional[str]) -> bool:
     return isinstance(ms, list) and market in ms
 
 def _to_e164(f: Dict[str, Any]) -> Optional[str]:
-    # Your base keeps the real DID in "Number"
     for key in ("Number", "A Number", "Phone", "E164", "Friendly Name"):
         v = f.get(key)
         if isinstance(v, str) and _digits_only(v):
-            return v
+            return v if v.strip().startswith("+") else "+" + _digits_only(v)
     return None
 
 def pick_from_number(market: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -268,16 +329,32 @@ def _refresh_ui_icons_for_campaign(drip_tbl, campaign_id: str):
                 if icon and f.get("UI") != icon:
                     _safe_update(drip_tbl, r["id"], {"UI": icon})
     except Exception:
-    # swallow but continue
         traceback.print_exc()
 
 # ============== dedupe guard ==============
-def _last_n_hours_iso(hours: int) -> str:
-    return (utcnow() - timedelta(hours=hours)).isoformat()
+def _last_n_hours_dt(hours: int) -> datetime:
+    return utcnow() - timedelta(hours=hours)
+
+def _parse_when_any(f: Dict[str, Any]) -> Optional[datetime]:
+    for k in ("next_send_date", "Next Send Date", "scheduled_at", "created_at", "Created At"):
+        v = f.get(k)
+        # accept CT-naive strings too
+        if v:
+            # If it looks like a datetime without offset, treat as CT and return UTC
+            try:
+                txt = str(v)
+                if "T" in txt:
+                    dt = datetime.fromisoformat(txt.replace("Z","+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=QUIET_TZ).astimezone(timezone.utc)
+                    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+    return None
 
 def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
     try:
-        cutoff = _last_n_hours_iso(DEDUPE_HOURS)
+        cutoff_dt = _last_n_hours_dt(DEDUPE_HOURS)
         l10 = last10(phone)
         for r in drip_tbl.all():
             f = r.get("fields", {})
@@ -287,8 +364,8 @@ def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
                 cids = cids if isinstance(cids, list) else [cids]
                 if campaign_id in cids:
                     status = str(f.get("status") or f.get("Status") or "")
-                    when = f.get("next_send_date") or f.get("Next Send Date") or f.get("created_at") or ""
-                    if status in ("QUEUED","SENDING","READY") and (not cutoff or str(when) >= cutoff):
+                    when_dt = _parse_when_any(f) or datetime(1970,1,1,tzinfo=timezone.utc)
+                    if status in ("QUEUED","SENDING","READY") and when_dt >= cutoff_dt:
                         return True
         return False
     except Exception:
@@ -297,16 +374,19 @@ def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
 # ============== main runner ==============
 def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None) -> Dict[str, Any]:
     """
-    Queues messages for eligible campaigns:
-      • Go Live = TRUE, Status ∈ {Scheduled, Running}
-      • Now within [Start, End] window
+    Queue messages for eligible campaigns:
+      • Go Live = TRUE and Status ∈ {Scheduled, Running}   (case-insensitive)
+      • Now within [Start, End] window (Central-aware; date-only allowed)
       • Each row gets a market-matched DID from Numbers.Number → Drip Queue.from_number
       • next_send_date is CT-naive string at exact start time (respecting quiet hours)
+      • Optional immediate send after queue (outside quiet hours)
     """
-    if isinstance(limit, str) and limit.upper() == "ALL": limit = 999_999
+    if isinstance(limit, str) and limit.upper() == "ALL":
+        limit = 999_999
     limit = int(limit)
 
-    if send_after_queue is None: send_after_queue = RUNNER_SEND_AFTER_QUEUE
+    if send_after_queue is None:
+        send_after_queue = RUNNER_SEND_AFTER_QUEUE
     if _in_quiet_hours(utcnow()):  # never send immediately during quiet hours
         send_after_queue = False
 
@@ -315,7 +395,8 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
     if not all([campaigns, templates, prospects, drip]):
         return {"ok": False, "processed": 0, "results": [], "errors": ["Missing Airtable tables or env"]}
 
-    now = utcnow(); now_iso = iso_now()
+    now_utc = utcnow()
+    now_iso = iso_now()
 
     try:
         all_campaigns = campaigns.all()
@@ -325,22 +406,25 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
 
     eligible: List[Dict] = []
     for c in all_campaigns:
-        f = c.get("fields", {})
-        if not f.get("Go Live", False): continue
-        status_val = str(_get(f, "status", "Status") or "")
-        if status_val not in ("Scheduled", "Running"): continue
-
-        start = _get(f, "Start Time", "start_time")
-        end   = _get(f, "End Time", "end_time")
-        start_dt = datetime.fromisoformat(str(start).replace("Z","+00:00")) if start else None
-        end_dt   = datetime.fromisoformat(str(end).replace("Z","+00:00")) if end else None
-
-        # only run if we are at or past Start Time
-        if start_dt and now < start_dt:
+        f = c.get("fields", {}) or {}
+        # Go Live toggle (default false if present)
+        if f.get("Go Live") is False:
             continue
-        if end_dt and now > end_dt:
+
+        status_val = str(_get(f, "status", "Status") or "").strip().lower()
+        if status_val and status_val not in ("scheduled", "running"):
+            continue
+
+        # robust start/end parsing
+        start_dt = _parse_time_maybe_ct(_get(f, "Start Time", "start_time", "Start At", "Start"))
+        end_dt   = _parse_time_maybe_ct(_get(f, "End Time", "end_time", "End At", "End"))
+
+        if start_dt and now_utc < start_dt:
+            continue
+        if end_dt and now_utc >= end_dt:
             _safe_update(campaigns, c["id"], {"status": "Completed", "last_run_at": now_iso})
             continue
+
         eligible.append(c)
 
     processed = 0
@@ -349,10 +433,16 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
     for camp in eligible:
         if processed >= limit: break
 
-        cf = camp.get("fields", {})
+        cf = camp.get("fields", {}) or {}
         cid = camp["id"]
         name = _get(cf, "Name", "name") or "Unnamed"
-        view = (cf.get("View/Segment") or "").strip() or None
+
+        # audience: allow multiple field names
+        view = (
+            (cf.get("View/Segment") or "") or
+            (cf.get("Audience View") or "") or
+            (cf.get("View") or "")
+        ).strip() or None
 
         try:
             prospect_rows = prospects.all(view=view) if view else prospects.all()
@@ -360,27 +450,31 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             traceback.print_exc(); continue
 
         template_ids = _get(cf, "Templates", "templates") or []
-        if not template_ids: continue
+        if not template_ids:
+            # no templates → nothing to queue
+            _safe_update(campaigns, cid, {"last_run_at": now_iso})
+            continue
 
         market = _get(cf, "Market", "market")
 
-        # Begin run: flip status to Running
+        # Begin run: flip status to Running (non-destructive if was already Running)
         _safe_update(campaigns, cid, {"status": "Running", "last_run_at": now_iso})
 
-        # base time = exact start or now, then shifted out of quiet hours if needed
-        start = _get(cf, "Start Time", "start_time")
-        start_dt = datetime.fromisoformat(str(start).replace("Z","+00:00")) if start else None
-        base_utc = max(now, start_dt) if start_dt else now
+        # base time = exact start (if any) or now, then shifted out of quiet hours if needed
+        start_dt = _parse_time_maybe_ct(_get(cf, "Start Time", "start_time", "Start At", "Start"))
+        base_utc = max(now_utc, start_dt) if start_dt else now_utc
         if _in_quiet_hours(base_utc):
             base_utc = _shift_to_window(base_utc)
 
         queued = 0
 
         for idx, pr in enumerate(prospect_rows):
-            pf = pr.get("fields", {})
+            pf = pr.get("fields", {}) or {}
             phone = get_phone(pf)
-            if not phone: continue
-            if already_queued(drip, phone, cid): continue
+            if not phone: 
+                continue
+            if already_queued(drip, phone, cid): 
+                continue
 
             # choose a DID *per row* to distribute load and ensure from_number is set
             from_number, number_rec_id = pick_from_number(market)
@@ -389,7 +483,8 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
                 continue
 
             raw, tid = pick_template(template_ids, templates)
-            if not raw: continue
+            if not raw:
+                continue
 
             body = format_template(raw, pf)
             scheduled_local = schedule_time(base_utc, idx)  # CT-naive
@@ -401,29 +496,30 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
                 "Market": market or pf.get("Market"),
                 "phone": phone,
                 "message_preview": body,
-                # write both variants to be safe with schema
                 "from_number": from_number,
                 "From Number": from_number,
                 "status": "QUEUED",
-                "next_send_date": scheduled_local,   # CT-naive
+                "next_send_date": scheduled_local,   # CT-naive string
                 "Property ID": pf.get("Property ID"),
                 "Number Record Id": number_rec_id,
                 "UI": "⏳",
             }
             created = _safe_create(drip, {k: v for k, v in payload.items() if v is not None})
-            if created: queued += 1
+            if created:
+                queued += 1
 
         # optional immediate send (outside quiet hours), small batch to “kick” the pipeline
         batch_result, retry_result = {"total_sent": 0}, {}
-        if send_after_queue and queued > 0:
+        if send_after_queue and queued > 0 and not _in_quiet_hours(utcnow()):
             try:
                 batch_result = send_batch(campaign_id=cid, limit=MESSAGES_PER_MIN)
             except Exception:
                 traceback.print_exc()
             if (batch_result.get("total_sent", 0) or 0) < queued:
+                # opportunistic retry burst
                 for _ in range(3):
                     try:
-                        retry_result = run_retry(limit=MESSAGES_PER_MIN, view="Failed Sends")
+                        retry_result = run_retry(limit=MESSAGES_PER_MIN, view=None)
                     except Exception:
                         retry_result = {}
                     if (retry_result or {}).get("retried", 0) == 0:
@@ -439,11 +535,12 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             "Table": PROSPECTS_TABLE,
             "View": view,
             "Market": market,
-            "QuietHoursNow": _in_quiet_hours(now),
+            "QuietHoursNow": _in_quiet_hours(now_utc),
             "MPM": MESSAGES_PER_MIN,
         }
         _safe_update(campaigns, cid, {
-            "status": "Running" if queued and (not send_after_queue or sent_delta < queued) else ("Completed" if queued else _get(cf,"status","Status")),
+            "status": "Running" if queued and (not send_after_queue or sent_delta < queued)
+                      else ("Completed" if queued else (_get(cf,"status","Status") or "Running")),
             "messages_sent": int(cf.get("messages_sent") or 0) + sent_delta,
             "total_sent": int(cf.get("total_sent") or 0) + sent_delta,
             "Last Run Result": json.dumps(last_result),
@@ -470,11 +567,13 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             "campaign": name, "queued": queued,
             "sent": sent_delta if send_after_queue else 0,
             "view": view, "market": market,
-            "quiet_now": _in_quiet_hours(now), "mpm": MESSAGES_PER_MIN,
+            "quiet_now": _in_quiet_hours(now_utc), "mpm": MESSAGES_PER_MIN,
         })
         processed += 1
 
-    try: update_metrics()
-    except Exception: traceback.print_exc()
+    try:
+        update_metrics()
+    except Exception:
+        traceback.print_exc()
 
     return {"ok": True, "processed": processed, "results": results, "errors": []}

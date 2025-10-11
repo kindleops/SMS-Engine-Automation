@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os, re, time, traceback, hashlib
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from typing import Dict, Any, Optional, Tuple, List
 
 # -------------------------------
@@ -23,6 +23,7 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
     """
     Works with both pyairtable styles. Returns a Table-like object
     exposing .all(...), .get(...), .create(...), .update(...), or None.
+    NEVER throws if not configured.
     """
     if not (api_key and base_id):
         return None
@@ -51,6 +52,7 @@ RATE_PER_NUMBER_PER_MIN = int(os.getenv("RATE_PER_NUMBER_PER_MIN", "20"))
 GLOBAL_RATE_PER_MIN     = int(os.getenv("GLOBAL_RATE_PER_MIN", "5000"))
 SLEEP_BETWEEN_SENDS_SEC = float(os.getenv("SLEEP_BETWEEN_SENDS_SEC", "0.03"))
 RATE_LIMIT_REQUEUE_SECONDS = float(os.getenv("RATE_LIMIT_REQUEUE_SECONDS", "5"))
+NO_NUMBER_REQUEUE_SECONDS  = float(os.getenv("NO_NUMBER_REQUEUE_SECONDS", "60"))
 
 # Quiet hours (America/Chicago): block actual sending 9pm–9am CT
 QUIET_HOURS_ENFORCED    = os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in ("1","true","yes")
@@ -106,51 +108,86 @@ def is_quiet_hours_local() -> bool:
 
 def _parse_iso_maybe_ct(s: Any) -> Optional[datetime]:
     """
-    Accepts ISO with tz, CT-naive 'YYYY-MM-DDTHH:mm:ss', or date-only.
-    CT-naive values are interpreted in America/Chicago and converted to UTC.
+    Accepts:
+      - ISO with tz   → return as UTC
+      - naive datetime string → interpret as Central and convert to UTC
+      - date-only 'YYYY-MM-DD' → interpret as that date at 09:00 Central (start of send window)
     """
-    if not s: return None
-    text = str(s)
+    if not s:
+        return None
+    text = str(s).strip()
     try:
         if "T" in text:
             dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=_ct_tz()).astimezone(timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
             return dt
-        # date only
-        dt = datetime.fromisoformat(text)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=_ct_tz()).astimezone(timezone.utc)
-        return dt
+        # date-only
+        d = date.fromisoformat(text)
+        local_dt = datetime(d.year, d.month, d.day, max(9, QUIET_END_HOUR_LOCAL), 0, 0, tzinfo=_ct_tz())
+        return local_dt.astimezone(timezone.utc)
     except Exception:
         return None
 
 # =========================
 # Airtable helpers
 # =========================
+def _first_env(*names: str) -> Optional[str]:
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v
+    return None
+
 def _api_key_for(base_env: str) -> Optional[str]:
     if base_env == PERF_BASE_ENV:
-        return os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
+        return _first_env("AIRTABLE_REPORTING_KEY", "PERFORMANCE_KEY", "AIRTABLE_API_KEY")
+    # Leads/Convos
+    if base_env == LEADS_BASE_ENV:
+        return _first_env("AIRTABLE_ACQUISITIONS_KEY", "LEADS_CONVOS_KEY", "AIRTABLE_API_KEY")
+    # Campaign Control
+    if base_env == CONTROL_BASE_ENV:
+        return _first_env("AIRTABLE_COMPLIANCE_KEY", "CAMPAIGN_CONTROL_KEY", "AIRTABLE_API_KEY")
+    # default fallback
     return os.getenv("AIRTABLE_API_KEY")
+
+def _base_value_for(base_env: str) -> Optional[str]:
+    if base_env == LEADS_BASE_ENV:
+        return _first_env("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID")
+    if base_env == PERF_BASE_ENV:
+        return _first_env("PERFORMANCE_BASE", "AIRTABLE_PERFORMANCE_BASE_ID")
+    if base_env == CONTROL_BASE_ENV:
+        return _first_env("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
+    return os.getenv(base_env)
 
 def get_table(base_env: str, table_name: str):
     key  = _api_key_for(base_env)
-    base = os.getenv(base_env)
+    base = _base_value_for(base_env)
     tbl = _make_table(key, base, table_name)
     if not tbl:
         print(f"⚠️ Missing or failed Airtable client for {base_env}/{table_name}")
     return tbl
 
-def _norm(s): 
+_fieldmap_cache: Dict[int, Dict[str,str]] = {}
+
+def _norm(s):
     return re.sub(r"[^a-z0-9]+","",s.strip().lower()) if isinstance(s,str) else s
 
 def _auto_field_map(table: Any) -> Dict[str,str]:
+    tid = id(table)
+    cached = _fieldmap_cache.get(tid)
+    if cached is not None:
+        return cached
     try:
         one = table.all(max_records=1)
         keys = list(one[0].get("fields", {}).keys()) if one else []
     except Exception:
         keys = []
-    return {_norm(k): k for k in keys}
+    amap = {_norm(k): k for k in keys}
+    _fieldmap_cache[tid] = amap
+    return amap
 
 def _remap_existing_only(table: Any, payload: dict) -> dict:
     amap = _auto_field_map(table)
@@ -183,12 +220,20 @@ def _market_match(f: dict, market: Optional[str]) -> bool:
     ms = f.get("Markets") or []
     return isinstance(ms, list) and (market in ms)
 
+def _number_is_paused(f: dict) -> bool:
+    status = str(f.get("Status") or "").strip().lower()
+    return status in {"paused", "hold", "disabled"}
+
 def _bump_number_counters(numbers_tbl: Any, rec_id: str, f: dict):
     try:
         patch = {"Last Used": utcnow().isoformat()}
         patch["Sent Today"] = int(f.get("Sent Today") or 0) + 1
         if f.get("Remaining") is not None:
-            patch["Remaining"] = max(0, int(f.get("Remaining") or 0) - 1)
+            try:
+                rem = int(f.get("Remaining") or 0)
+            except Exception:
+                rem = 0
+            patch["Remaining"] = max(0, rem - 1)
         numbers_tbl.update(rec_id, _remap_existing_only(numbers_tbl, patch))
     except Exception:
         traceback.print_exc()
@@ -206,6 +251,7 @@ def pick_number_for_market(market: Optional[str]) -> Tuple[Optional[str], Option
     for r in rows:
         f = r.get("fields", {})
         if not f.get("Active", True): continue
+        if _number_is_paused(f): continue
         if not _market_match(f, market): continue
         remaining = _remaining_calc(f)
         if remaining <= 0: continue
@@ -337,7 +383,10 @@ class UpstashRestLimiter:
             did_ct, glob_ct = 0, 0
         if did_ct >= self.per or glob_ct >= self.glob:
             return False
-        self._pipeline([["INCR", did_key], ["EXPIRE", did_key, "60"], ["INCR", glob_key], ["EXPIRE", glob_key, "60"]])
+        self._pipeline([
+            ["INCR", did_key], ["EXPIRE", did_key, "60"],
+            ["INCR", glob_key], ["EXPIRE", glob_key, "60"],
+        ])
         return True
 
 class LocalLimiter:
@@ -373,7 +422,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     """
     Drains Drip Queue rows that are due (QUEUED/READY/SENDING && next_send_date <= now),
     fills missing `from_number` via Numbers, enforces minute limiter,
-    updates UI, logs KPIs.
+    updates UI, logs KPIs. Safe across pyairtable v1/v2 and missing deps.
     """
     drip = get_table(LEADS_BASE_ENV, DRIP_TABLE_NAME)
     if not drip:
@@ -400,16 +449,20 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         status = str(f.get("status") or f.get("Status") or "")
         if status not in ("QUEUED","READY","SENDING"):
             continue
-        when = _parse_iso_maybe_ct(f.get("next_send_date") or f.get("Next Send Date") or f.get("scheduled_at"))
-        if not when:
-            when = now
+        when = _parse_iso_maybe_ct(
+            f.get("next_send_date") or f.get("Next Send Date") or f.get("scheduled_at")
+        ) or now
         if when <= now:
             due.append(r)
 
     if not due:
         return {"ok": True, "total_sent": 0, "note": "No due messages"}
 
-    due.sort(key=lambda r: _parse_iso_maybe_ct(r.get("fields", {}).get("next_send_date") or r.get("fields", {}).get("Next Send Date") or r.get("fields", {}).get("scheduled_at")) or now)
+    due.sort(key=lambda r: _parse_iso_maybe_ct(
+        r.get("fields", {}).get("next_send_date")
+        or r.get("fields", {}).get("Next Send Date")
+        or r.get("fields", {}).get("scheduled_at")
+    ) or now)
     due = due[:limit]
 
     limiter = build_limiter()
@@ -438,6 +491,12 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
 
         if not did:
             errors.append(f"No available number for {phone} (market={market})")
+            # push out a bit so we don't spin on it every loop
+            try:
+                new_time = (utcnow() + timedelta(seconds=NO_NUMBER_REQUEUE_SECONDS)).isoformat()
+                drip.update(rid, _remap_existing_only(drip, {"next_send_date": new_time}))
+            except Exception:
+                traceback.print_exc()
             continue
 
         # Rate limit
@@ -466,11 +525,13 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             result = None
             if MessageProcessor:
                 try:
+                    # prefer signature that supports from_number
                     result = MessageProcessor.send(
                         phone=phone, body=body, from_number=did,
                         property_id=property_id, direction="OUT",
                     )
                 except TypeError:
+                    # fallback to older signature
                     result = MessageProcessor.send(
                         phone=phone, body=body,
                         property_id=property_id, direction="OUT",
@@ -522,7 +583,8 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
                 "Breakdown": f"sent={total_sent}, failed={total_failed}",
                 "Timestamp": now_iso,
             }))
-        except Exception: traceback.print_exc()
+        except Exception:
+            traceback.print_exc()
     if kpis and (total_sent or total_failed):
         try:
             if total_sent:
@@ -539,7 +601,8 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
                     "Value": float(total_failed),
                     "Date": utcnow().date().isoformat(),
                 }))
-        except Exception: traceback.print_exc()
+        except Exception:
+            traceback.print_exc()
 
     return {
         "ok": True,
