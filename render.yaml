@@ -32,7 +32,7 @@ services:
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
 
-      # --- Webhook auth / cron auth ---
+      # --- Webhook / cron auth ---
       - key: WEBHOOK_TOKEN
         sync: false
       - key: CRON_TOKEN
@@ -50,7 +50,7 @@ services:
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
 
-      # --- Engine/runtime knobs (safe defaults; override in dashboard if needed) ---
+      # --- Engine/runtime knobs ---
       - key: QUIET_HOURS_CST
         value: "21-09"
       - key: QUIET_START_HOUR_LOCAL
@@ -70,38 +70,95 @@ services:
       - key: JITTER_SECONDS
         value: "2"
 
+      # --- Optional: embedded scheduler off (we use a separate Worker) ---
+      - key: ENABLE_EMBEDDED_SCHEDULER
+        value: "false"
+
       # --- Alerts (optional) ---
       - key: ALERT_PHONE
         sync: false
       - key: ALERT_EMAIL_WEBHOOK
         sync: false
 
-  # ⚙️ DevOps API
-  - type: web
-    name: rei-devops
+  # ♾️ Continuous SMS Worker (queues, sends, retries forever)
+  - type: worker
+    name: rei-sms-worker
     env: docker
     plan: free
-    dockerfilePath: ./Dockerfile.ops
-    healthCheckPath: /healthz
-    autoDeploy: true
+    dockerfilePath: ./Dockerfile.sms
     envVars:
+      # Same env set as API so worker can access everything
       - key: AIRTABLE_API_KEY
         sync: false
-      - key: DEVOPS_BASE
+      - key: LEADS_CONVOS_BASE
         sync: false
-      - key: CRON_TOKEN
+      - key: AIRTABLE_LEADS_CONVOS_BASE_ID
         sync: false
+      - key: CAMPAIGN_CONTROL_BASE
+        sync: false
+      - key: AIRTABLE_CAMPAIGN_CONTROL_BASE_ID
+        sync: false
+      - key: PERFORMANCE_BASE
+        sync: false
+      - key: AIRTABLE_PERFORMANCE_BASE_ID
+        sync: false
+      - key: AIRTABLE_REPORTING_KEY
+        sync: false
+
+      - key: TEXTGRID_ACCOUNT_SID
+        sync: false
+      - key: TEXTGRID_AUTH_TOKEN
+        sync: false
+
+      - key: REDIS_URL
+        sync: false
+      - key: REDIS_TLS
+        value: "true"
+      - key: UPSTASH_REDIS_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+
+      # Worker loop knobs
+      - key: WORKER_INTERVAL_SEC
+        value: "30"
+      - key: WORKER_SEND_LIMIT
+        value: "500"
+      - key: WORKER_RETRY_LIMIT
+        value: "100"
+      - key: WORKER_AUTORESP_LIMIT
+        value: "50"
+      - key: WORKER_AUTORESP_VIEW
+        value: "Unprocessed Inbounds"
+
+      # Campaign runner behavior:
+      # - Queue first; let outbound_batcher actually send (avoids double-sends)
+      - key: RUNNER_SEND_AFTER_QUEUE
+        value: "false"
+      # Optional: pre-queue before Start Time so messages fire exactly on start
+      - key: PREQUEUE_BEFORE_START
+        value: "false"
+
+      # Quiet hours guard
+      - key: QUIET_START_HOUR_LOCAL
+        value: "21"
+      - key: QUIET_END_HOUR_LOCAL
+        value: "9"
+    command: python -m sms.worker
 
 # 🔄 Cronjobs (HTTP-triggered; secured via x-cron-token)
 cronJobs:
-  # --- SMS Engine Core ---
+  # --- Autoresponder (FIXED PATH: your API expects /autoresponder/{mode}) ---
   - name: run-autoresponder
     schedule: "*/10 * * * *"
     command: |
       curl --fail --silent --show-error --max-time 25 \
-        -X POST "https://rei-sms-engine.onrender.com/autoresponder" \
+        -X POST "https://rei-sms-engine.onrender.com/autoresponder/autoresponder" \
         -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Keep as a safety net; worker already runs continuously
   - name: run-campaigns
     schedule: "*/10 * * * *"
     command: |
