@@ -28,13 +28,9 @@ SENT_AT = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
 
 # Airtable clients
-convos = (
-    Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
-)
+convos = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
 leads = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE) if AIRTABLE_API_KEY else None
-prospects = (
-    Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KEY else None
-)
+prospects = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KEY else None
 
 # --- Field mapping (Prospects → Leads) ---
 FIELD_MAP = {
@@ -67,15 +63,10 @@ def promote_prospect_to_lead(phone_number: str, source="Inbound"):
 
         # Prospect match?
         fields, property_id = {}, None
-        prospect = (
-            prospects.all(formula=f"{{phone}}='{phone_number}'") if prospects else []
-        )
+        prospect = prospects.all(formula=f"{{phone}}='{phone_number}'") if prospects else []
         if prospect:
             p_fields = prospect[0]["fields"]
-            fields = {
-                leads_col: p_fields.get(prospects_col)
-                for prospects_col, leads_col in FIELD_MAP.items()
-            }
+            fields = {leads_col: p_fields.get(prospects_col) for prospects_col, leads_col in FIELD_MAP.items()}
             property_id = p_fields.get("Property ID")
 
         # Create new Lead
@@ -97,9 +88,7 @@ def promote_prospect_to_lead(phone_number: str, source="Inbound"):
     return None, None
 
 
-def update_lead_activity(
-    lead_id: str, body: str, direction: str, reply_increment: bool = False
-):
+def update_lead_activity(lead_id: str, body: str, direction: str, reply_increment: bool = False):
     """Update activity metrics for Leads."""
     if not leads or not lead_id:
         return
@@ -188,9 +177,7 @@ async def optout_handler(request: Request):
             print(f"🚫 Opt-out from {from_number}")
             increment_opt_out(from_number)
 
-            lead_id, property_id = promote_prospect_to_lead(
-                from_number, source="Opt-Out"
-            )
+            lead_id, property_id = promote_prospect_to_lead(from_number, source="Opt-Out")
             if lead_id:
                 update_lead_activity(lead_id, body, "IN")
 
@@ -238,9 +225,7 @@ async def status_handler(request: Request):
         # Update conversation record
         if convos and msg_id:
             try:
-                convos.update_by_fields(
-                    {TG_ID_FIELD: msg_id}, {STATUS_FIELD: status.upper()}
-                )
+                convos.update_by_fields({TG_ID_FIELD: msg_id}, {STATUS_FIELD: status.upper()})
             except Exception as log_err:
                 print(f"⚠️ Failed to update delivery status in Conversations: {log_err}")
 
@@ -274,8 +259,10 @@ async def status_handler(request: Request):
         print("❌ Status webhook error:")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-    
+
     # --- Test-friendly wrapper for status ---
+
+
 def process_status(data: dict):
     """Sync wrapper for testing delivery receipts."""
     msg_id = data.get("MessageSid")
@@ -297,9 +284,7 @@ def process_status(data: dict):
     # Update conversation record
     if convos and msg_id:
         try:
-            convos.update_by_fields(
-                {TG_ID_FIELD: msg_id}, {STATUS_FIELD: status.upper()}
-            )
+            convos.update_by_fields({TG_ID_FIELD: msg_id}, {STATUS_FIELD: status.upper()})
         except Exception as log_err:
             print(f"⚠️ Failed to update delivery status in Conversations: {log_err}")
 
@@ -328,10 +313,13 @@ def process_status(data: dict):
             print(f"⚠️ Failed to update lead delivery metrics: {e}")
 
     return {"ok": True}
-    
+
     # ------------------------
+
+
 # Test-friendly wrappers
 # ------------------------
+
 
 def handle_inbound(data: dict):
     """Direct call version of inbound_handler for unit testing."""

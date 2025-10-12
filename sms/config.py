@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 # .env loader (safe if missing)
 try:
     from dotenv import load_dotenv  # type: ignore
+
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
     load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -32,6 +33,7 @@ def env_bool(key: str, default: bool = False) -> bool:
         return default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
+
 def env_int(key: str, default: int) -> int:
     v = os.getenv(key)
     try:
@@ -39,12 +41,14 @@ def env_int(key: str, default: int) -> int:
     except Exception:
         return default
 
+
 def env_float(key: str, default: float) -> float:
     v = os.getenv(key)
     try:
         return float(v) if v is not None else default
     except Exception:
         return default
+
 
 def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(key)
@@ -68,10 +72,21 @@ CONV_FIELDS = {
 }
 
 PHONE_FIELDS = [
-    "phone","Phone","Mobile","Cell","Phone Number","Primary Phone",
-    "Phone 1","Phone 2","Phone 3",
-    "Owner Phone","Owner Phone 1","Owner Phone 2",
-    "Phone 1 (from Linked Owner)","Phone 2 (from Linked Owner)","Phone 3 (from Linked Owner)",
+    "phone",
+    "Phone",
+    "Mobile",
+    "Cell",
+    "Phone Number",
+    "Primary Phone",
+    "Phone 1",
+    "Phone 2",
+    "Phone 3",
+    "Owner Phone",
+    "Owner Phone 1",
+    "Owner Phone 2",
+    "Phone 1 (from Linked Owner)",
+    "Phone 2 (from Linked Owner)",
+    "Phone 3 (from Linked Owner)",
 ]
 
 
@@ -134,44 +149,34 @@ class Settings:
 @lru_cache(maxsize=1)
 def settings() -> Settings:
     return Settings(
-        AIRTABLE_API_KEY = env_str("AIRTABLE_API_KEY"),
-        AIRTABLE_REPORTING_KEY = env_str("AIRTABLE_REPORTING_KEY"),
-
-        LEADS_CONVOS_BASE = env_str("LEADS_CONVOS_BASE") or env_str("AIRTABLE_LEADS_CONVOS_BASE_ID"),
-        CAMPAIGN_CONTROL_BASE = env_str("CAMPAIGN_CONTROL_BASE") or env_str("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"),
-        PERFORMANCE_BASE = env_str("PERFORMANCE_BASE") or env_str("AIRTABLE_PERFORMANCE_BASE_ID"),
-
-        PROSPECTS_TABLE = env_str("PROSPECTS_TABLE", "Prospects"),
-        LEADS_TABLE = env_str("LEADS_TABLE", "Leads"),
-        CONVERSATIONS_TABLE = env_str("CONVERSATIONS_TABLE", "Conversations"),
-        TEMPLATES_TABLE = env_str("TEMPLATES_TABLE", "Templates"),
-        DRIP_QUEUE_TABLE = env_str("DRIP_QUEUE_TABLE", "Drip Queue"),
-        CAMPAIGNS_TABLE = env_str("CAMPAIGNS_TABLE", "Campaigns"),
-
-        NUMBERS_TABLE = env_str("NUMBERS_TABLE", "Numbers"),
-
-        DAILY_LIMIT_DEFAULT = env_int("DAILY_LIMIT", 750),
-        RATE_PER_NUMBER_PER_MIN = env_int("RATE_PER_NUMBER_PER_MIN", 20),
-        GLOBAL_RATE_PER_MIN = env_int("GLOBAL_RATE_PER_MIN", 5000),
-        SLEEP_BETWEEN_SENDS_SEC = env_float("SLEEP_BETWEEN_SENDS_SEC", 0.03),
-
-        QUIET_TZ = env_str("QUIET_TZ", "America/Chicago") or "America/Chicago",
-        QUIET_START_HOUR = env_int("QUIET_START_HOUR", 21),
-        QUIET_END_HOUR = env_int("QUIET_END_HOUR", 9),
-        QUIET_HOURS_ENFORCED = env_bool("QUIET_HOURS_ENFORCED", True),
-
-        DEDUPE_HOURS = env_int("DEDUPE_HOURS", 72),
-
-        MESSAGES_PER_MIN = env_int("MESSAGES_PER_MIN", 20),
-        QUEUE_JITTER_SECONDS = env_int("JITTER_SECONDS", 2),
-
-        REDIS_URL = env_str("REDIS_URL") or env_str("UPSTASH_REDIS_URL") or env_str("UPSTASH_REDIS_REST_URL"),
-        REDIS_TLS = env_bool("REDIS_TLS", True),
-
-        RUNNER_SEND_AFTER_QUEUE_DEFAULT = env_bool("RUNNER_SEND_AFTER_QUEUE", False),
-        AUTO_BACKFILL_FROM_NUMBER = env_bool("AUTO_BACKFILL_FROM_NUMBER", True),
-
-        CRON_TOKEN = env_str("CRON_TOKEN"),
+        AIRTABLE_API_KEY=env_str("AIRTABLE_API_KEY"),
+        AIRTABLE_REPORTING_KEY=env_str("AIRTABLE_REPORTING_KEY"),
+        LEADS_CONVOS_BASE=env_str("LEADS_CONVOS_BASE") or env_str("AIRTABLE_LEADS_CONVOS_BASE_ID"),
+        CAMPAIGN_CONTROL_BASE=env_str("CAMPAIGN_CONTROL_BASE") or env_str("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"),
+        PERFORMANCE_BASE=env_str("PERFORMANCE_BASE") or env_str("AIRTABLE_PERFORMANCE_BASE_ID"),
+        PROSPECTS_TABLE=env_str("PROSPECTS_TABLE", "Prospects"),
+        LEADS_TABLE=env_str("LEADS_TABLE", "Leads"),
+        CONVERSATIONS_TABLE=env_str("CONVERSATIONS_TABLE", "Conversations"),
+        TEMPLATES_TABLE=env_str("TEMPLATES_TABLE", "Templates"),
+        DRIP_QUEUE_TABLE=env_str("DRIP_QUEUE_TABLE", "Drip Queue"),
+        CAMPAIGNS_TABLE=env_str("CAMPAIGNS_TABLE", "Campaigns"),
+        NUMBERS_TABLE=env_str("NUMBERS_TABLE", "Numbers"),
+        DAILY_LIMIT_DEFAULT=env_int("DAILY_LIMIT", 750),
+        RATE_PER_NUMBER_PER_MIN=env_int("RATE_PER_NUMBER_PER_MIN", 20),
+        GLOBAL_RATE_PER_MIN=env_int("GLOBAL_RATE_PER_MIN", 5000),
+        SLEEP_BETWEEN_SENDS_SEC=env_float("SLEEP_BETWEEN_SENDS_SEC", 0.03),
+        QUIET_TZ=env_str("QUIET_TZ", "America/Chicago") or "America/Chicago",
+        QUIET_START_HOUR=env_int("QUIET_START_HOUR", 21),
+        QUIET_END_HOUR=env_int("QUIET_END_HOUR", 9),
+        QUIET_HOURS_ENFORCED=env_bool("QUIET_HOURS_ENFORCED", True),
+        DEDUPE_HOURS=env_int("DEDUPE_HOURS", 72),
+        MESSAGES_PER_MIN=env_int("MESSAGES_PER_MIN", 20),
+        QUEUE_JITTER_SECONDS=env_int("JITTER_SECONDS", 2),
+        REDIS_URL=env_str("REDIS_URL") or env_str("UPSTASH_REDIS_URL") or env_str("UPSTASH_REDIS_REST_URL"),
+        REDIS_TLS=env_bool("REDIS_TLS", True),
+        RUNNER_SEND_AFTER_QUEUE_DEFAULT=env_bool("RUNNER_SEND_AFTER_QUEUE", False),
+        AUTO_BACKFILL_FROM_NUMBER=env_bool("AUTO_BACKFILL_FROM_NUMBER", True),
+        CRON_TOKEN=env_str("CRON_TOKEN"),
     )
 
 
@@ -181,9 +186,11 @@ def settings() -> Settings:
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def tz_now() -> datetime:
     tz = ZoneInfo(settings().QUIET_TZ) if ZoneInfo else timezone.utc
     return datetime.now(tz)
+
 
 def in_quiet_hours() -> bool:
     s = settings()
@@ -202,15 +209,18 @@ try:
 except Exception:
     Api = None  # type: ignore
 
+
 @lru_cache(maxsize=1)
 def api_main():
     s = settings()
     return Api(s.AIRTABLE_API_KEY) if (Api and s.AIRTABLE_API_KEY and s.LEADS_CONVOS_BASE) else None
 
+
 @lru_cache(maxsize=1)
 def api_control():
     s = settings()
     return Api(s.AIRTABLE_API_KEY) if (Api and s.AIRTABLE_API_KEY and s.CAMPAIGN_CONTROL_BASE) else None
+
 
 @lru_cache(maxsize=1)
 def api_perf():
@@ -218,40 +228,69 @@ def api_perf():
     key = s.AIRTABLE_REPORTING_KEY or s.AIRTABLE_API_KEY
     return Api(key) if (Api and key and s.PERFORMANCE_BASE) else None
 
+
 def table_main(table_name: str):
     a = api_main()
     b = settings().LEADS_CONVOS_BASE
     return a.table(b, table_name) if a else None  # type: ignore[union-attr]
+
 
 def table_control(table_name: str):
     a = api_control()
     b = settings().CAMPAIGN_CONTROL_BASE
     return a.table(b, table_name) if a else None  # type: ignore[union-attr]
 
+
 def table_perf(table_name: str):
     a = api_perf()
     b = settings().PERFORMANCE_BASE
     return a.table(b, table_name) if a else None  # type: ignore[union-attr]
 
+
 # Shorthand resolvers (cached)
 @lru_cache(maxsize=None)
-def conversations(): return table_main(settings().CONVERSATIONS_TABLE)
+def conversations():
+    return table_main(settings().CONVERSATIONS_TABLE)
+
+
 @lru_cache(maxsize=None)
-def leads():         return table_main(settings().LEADS_TABLE)
+def leads():
+    return table_main(settings().LEADS_TABLE)
+
+
 @lru_cache(maxsize=None)
-def prospects():     return table_main(settings().PROSPECTS_TABLE)
+def prospects():
+    return table_main(settings().PROSPECTS_TABLE)
+
+
 @lru_cache(maxsize=None)
-def templates():     return table_main(settings().TEMPLATES_TABLE)
+def templates():
+    return table_main(settings().TEMPLATES_TABLE)
+
+
 @lru_cache(maxsize=None)
-def drip_queue():    return table_main(settings().DRIP_QUEUE_TABLE)
+def drip_queue():
+    return table_main(settings().DRIP_QUEUE_TABLE)
+
+
 @lru_cache(maxsize=None)
-def campaigns():     return table_main(settings().CAMPAIGNS_TABLE)
+def campaigns():
+    return table_main(settings().CAMPAIGNS_TABLE)
+
+
 @lru_cache(maxsize=None)
-def numbers():       return table_control(settings().NUMBERS_TABLE)
+def numbers():
+    return table_control(settings().NUMBERS_TABLE)
+
+
 @lru_cache(maxsize=None)
-def runs_logs():     return table_perf("Runs/Logs")
+def runs_logs():
+    return table_perf("Runs/Logs")
+
+
 @lru_cache(maxsize=None)
-def kpis():          return table_perf("KPIs")
+def kpis():
+    return table_perf("KPIs")
 
 
 # -----------------------------
@@ -259,7 +298,9 @@ def kpis():          return table_perf("KPIs")
 # -----------------------------
 def norm(s: Any) -> Any:
     import re
+
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 
 def auto_field_map(tbl) -> Dict[str, str]:
     try:
@@ -268,6 +309,7 @@ def auto_field_map(tbl) -> Dict[str, str]:
     except Exception:
         keys = []
     return {norm(k): k for k in keys}
+
 
 def remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     amap = auto_field_map(tbl)
@@ -284,21 +326,41 @@ def remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
 # (Some older modules expect these names on sms.config)
 # -----------------------------
 S = settings()
-AIRTABLE_API_KEY: Optional[str]      = S.AIRTABLE_API_KEY
-AIRTABLE_REPORTING_KEY: Optional[str]= S.AIRTABLE_REPORTING_KEY
-LEADS_CONVOS_BASE: Optional[str]     = S.LEADS_CONVOS_BASE
+AIRTABLE_API_KEY: Optional[str] = S.AIRTABLE_API_KEY
+AIRTABLE_REPORTING_KEY: Optional[str] = S.AIRTABLE_REPORTING_KEY
+LEADS_CONVOS_BASE: Optional[str] = S.LEADS_CONVOS_BASE
 CAMPAIGN_CONTROL_BASE: Optional[str] = S.CAMPAIGN_CONTROL_BASE
-PERFORMANCE_BASE: Optional[str]      = S.PERFORMANCE_BASE
+PERFORMANCE_BASE: Optional[str] = S.PERFORMANCE_BASE
 
 __all__ = [
     "settings",
     # time helpers
-    "utcnow", "tz_now", "in_quiet_hours",
+    "utcnow",
+    "tz_now",
+    "in_quiet_hours",
     # tables
-    "conversations","leads","prospects","templates","drip_queue","campaigns","numbers","runs_logs","kpis",
-    "table_main","table_control","table_perf",
+    "conversations",
+    "leads",
+    "prospects",
+    "templates",
+    "drip_queue",
+    "campaigns",
+    "numbers",
+    "runs_logs",
+    "kpis",
+    "table_main",
+    "table_control",
+    "table_perf",
     # helpers
-    "CONV_FIELDS","PHONE_FIELDS","remap_existing_only","auto_field_map","norm",
+    "CONV_FIELDS",
+    "PHONE_FIELDS",
+    "remap_existing_only",
+    "auto_field_map",
+    "norm",
     # back-compat names
-    "AIRTABLE_API_KEY","AIRTABLE_REPORTING_KEY","LEADS_CONVOS_BASE","CAMPAIGN_CONTROL_BASE","PERFORMANCE_BASE",
+    "AIRTABLE_API_KEY",
+    "AIRTABLE_REPORTING_KEY",
+    "LEADS_CONVOS_BASE",
+    "CAMPAIGN_CONTROL_BASE",
+    "PERFORMANCE_BASE",
 ]

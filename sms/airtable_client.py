@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os, traceback, re
 from functools import lru_cache
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List
 
 # --- Multi-version compat imports (v1.x and v2.x) --------------------
 try:
@@ -27,19 +27,35 @@ except Exception:
 # Public “Table” type for annotations (doesn’t crash if lib missing)
 try:
     from typing import TYPE_CHECKING
+
     if TYPE_CHECKING:
-        from pyairtable.table import Table  # type: ignore
+        pass  # type: ignore
 except Exception:
     pass
 
 
 __all__ = [
-    "get_leads_table", "get_campaigns_table", "get_performance_table",
-    "get_convos", "get_leads", "get_prospects", "get_templates", "get_drip",
-    "get_campaigns", "get_numbers", "get_optouts", "get_kpis", "get_runs",
-    "remap_existing_only", "safe_create", "safe_update", "safe_get", "safe_all",
+    "get_leads_table",
+    "get_campaigns_table",
+    "get_performance_table",
+    "get_convos",
+    "get_leads",
+    "get_prospects",
+    "get_templates",
+    "get_drip",
+    "get_campaigns",
+    "get_numbers",
+    "get_optouts",
+    "get_kpis",
+    "get_runs",
+    "remap_existing_only",
+    "safe_create",
+    "safe_update",
+    "safe_get",
+    "safe_all",
     "config_summary",
 ]
+
 
 # ---------------- env helpers ----------------
 def _first_env(*names: str) -> Optional[str]:
@@ -49,8 +65,10 @@ def _first_env(*names: str) -> Optional[str]:
             return v
     return None
 
+
 def _log(msg: str) -> None:
     print(f"[AirtableClient] {msg}")
+
 
 # ---------------- table factory (works across versions) ----------------
 def _mk_table(api_key: Optional[str], base_id: Optional[str], name: str):
@@ -90,50 +108,84 @@ def _mk_table(api_key: Optional[str], base_id: Optional[str], name: str):
     _log(f"⚠️ pyairtable not available/compatible → '{name}' in MOCK mode")
     return None
 
+
 # ---------------- base-level getters (cached) ----------------
 @lru_cache(maxsize=None)
 def get_leads_table(name: str):
     base = _first_env("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID")
-    key  = _first_env("AIRTABLE_ACQUISITIONS_KEY", "LEADS_CONVOS_KEY", "AIRTABLE_API_KEY")
+    key = _first_env("AIRTABLE_ACQUISITIONS_KEY", "LEADS_CONVOS_KEY", "AIRTABLE_API_KEY")
     return _mk_table(key, base, name)
+
 
 @lru_cache(maxsize=None)
 def get_campaigns_table(name: str):
     base = _first_env("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
-    key  = _first_env("AIRTABLE_COMPLIANCE_KEY", "CAMPAIGN_CONTROL_KEY", "AIRTABLE_API_KEY")
+    key = _first_env("AIRTABLE_COMPLIANCE_KEY", "CAMPAIGN_CONTROL_KEY", "AIRTABLE_API_KEY")
     return _mk_table(key, base, name)
+
 
 @lru_cache(maxsize=None)
 def get_performance_table(name: str):
     base = _first_env("PERFORMANCE_BASE", "AIRTABLE_PERFORMANCE_BASE_ID")
-    key  = _first_env("AIRTABLE_REPORTING_KEY", "PERFORMANCE_KEY", "AIRTABLE_API_KEY")
+    key = _first_env("AIRTABLE_REPORTING_KEY", "PERFORMANCE_KEY", "AIRTABLE_API_KEY")
     return _mk_table(key, base, name)
+
 
 # ---------------- shortcuts (cached) ----------------
 @lru_cache(maxsize=None)
-def get_convos():      return get_leads_table(_first_env("CONVERSATIONS_TABLE") or "Conversations")
+def get_convos():
+    return get_leads_table(_first_env("CONVERSATIONS_TABLE") or "Conversations")
+
+
 @lru_cache(maxsize=None)
-def get_leads():       return get_leads_table(_first_env("LEADS_TABLE") or "Leads")
+def get_leads():
+    return get_leads_table(_first_env("LEADS_TABLE") or "Leads")
+
+
 @lru_cache(maxsize=None)
-def get_prospects():   return get_leads_table(_first_env("PROSPECTS_TABLE") or "Prospects")
+def get_prospects():
+    return get_leads_table(_first_env("PROSPECTS_TABLE") or "Prospects")
+
+
 @lru_cache(maxsize=None)
-def get_templates():   return get_leads_table(_first_env("TEMPLATES_TABLE") or "Templates")
+def get_templates():
+    return get_leads_table(_first_env("TEMPLATES_TABLE") or "Templates")
+
+
 @lru_cache(maxsize=None)
-def get_drip():        return get_leads_table(_first_env("DRIP_QUEUE_TABLE", "DRIP_TABLE") or "Drip Queue")
+def get_drip():
+    return get_leads_table(_first_env("DRIP_QUEUE_TABLE", "DRIP_TABLE") or "Drip Queue")
+
+
 @lru_cache(maxsize=None)
-def get_campaigns():   return get_campaigns_table(_first_env("CAMPAIGNS_TABLE") or "Campaigns")
+def get_campaigns():
+    return get_campaigns_table(_first_env("CAMPAIGNS_TABLE") or "Campaigns")
+
+
 @lru_cache(maxsize=None)
-def get_numbers():     return get_campaigns_table(_first_env("NUMBERS_TABLE") or "Numbers")
+def get_numbers():
+    return get_campaigns_table(_first_env("NUMBERS_TABLE") or "Numbers")
+
+
 @lru_cache(maxsize=None)
-def get_optouts():     return get_campaigns_table(_first_env("OPTOUTS_TABLE") or "Opt-Outs")
+def get_optouts():
+    return get_campaigns_table(_first_env("OPTOUTS_TABLE") or "Opt-Outs")
+
+
 @lru_cache(maxsize=None)
-def get_kpis():        return get_performance_table(_first_env("KPIS_TABLE", "KPIS_TABLE_NAME") or "KPIs")
+def get_kpis():
+    return get_performance_table(_first_env("KPIS_TABLE", "KPIS_TABLE_NAME") or "KPIs")
+
+
 @lru_cache(maxsize=None)
-def get_runs():        return get_performance_table(_first_env("RUNS_TABLE", "RUNS_TABLE_NAME") or "Runs/Logs")
+def get_runs():
+    return get_performance_table(_first_env("RUNS_TABLE", "RUNS_TABLE_NAME") or "Runs/Logs")
+
 
 # ---------------- field-safe helpers ----------------
 def _norm(s: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
@@ -142,6 +194,7 @@ def _auto_field_map(tbl) -> Dict[str, str]:
     except Exception:
         fields = []
     return {_norm(k): k for k in fields}
+
 
 def remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     if not tbl:
@@ -156,6 +209,7 @@ def remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
             out[ak] = v
     return out
 
+
 def safe_create(tbl, payload: Dict[str, Any]):
     if not (tbl and payload):
         return None
@@ -164,6 +218,7 @@ def safe_create(tbl, payload: Dict[str, Any]):
     except Exception:
         traceback.print_exc()
         return None
+
 
 def safe_update(tbl, rec_id: str, payload: Dict[str, Any]):
     if not (tbl and rec_id and payload):
@@ -174,6 +229,7 @@ def safe_update(tbl, rec_id: str, payload: Dict[str, Any]):
         traceback.print_exc()
         return None
 
+
 def safe_get(tbl, rec_id: str):
     if not (tbl and rec_id):
         return None
@@ -182,6 +238,7 @@ def safe_get(tbl, rec_id: str):
     except Exception:
         traceback.print_exc()
         return None
+
 
 def safe_all(tbl, **kwargs) -> List[Dict[str, Any]]:
     if not tbl:
@@ -192,6 +249,7 @@ def safe_all(tbl, **kwargs) -> List[Dict[str, Any]]:
         traceback.print_exc()
         return []
 
+
 # ---------------- diagnostics ----------------
 def config_summary() -> Dict[str, bool]:
     return {
@@ -201,9 +259,15 @@ def config_summary() -> Dict[str, bool]:
         "leads_base": bool(_first_env("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID")),
         "campaign_control_base": bool(_first_env("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")),
         "performance_base": bool(_first_env("PERFORMANCE_BASE", "AIRTABLE_PERFORMANCE_BASE_ID")),
-        "some_api_key": bool(_first_env(
-            "AIRTABLE_API_KEY", "AIRTABLE_ACQUISITIONS_KEY",
-            "AIRTABLE_COMPLIANCE_KEY", "AIRTABLE_REPORTING_KEY",
-            "LEADS_CONVOS_KEY", "CAMPAIGN_CONTROL_KEY", "PERFORMANCE_KEY",
-        )),
+        "some_api_key": bool(
+            _first_env(
+                "AIRTABLE_API_KEY",
+                "AIRTABLE_ACQUISITIONS_KEY",
+                "AIRTABLE_COMPLIANCE_KEY",
+                "AIRTABLE_REPORTING_KEY",
+                "LEADS_CONVOS_KEY",
+                "CAMPAIGN_CONTROL_KEY",
+                "PERFORMANCE_KEY",
+            )
+        ),
     }

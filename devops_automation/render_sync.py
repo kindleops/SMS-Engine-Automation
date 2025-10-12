@@ -4,6 +4,7 @@ from .devops_logger import log_devops
 
 RENDER_KEY = os.getenv("RENDER_API_KEY")
 
+
 def run():
     headers = {"Authorization": f"Bearer {RENDER_KEY}"}
     svc_tbl = get_table("DEVOPS_BASE", "Services")
@@ -15,9 +16,9 @@ def run():
         svcs = requests.get("https://api.render.com/v1/services", headers=headers, timeout=30).json()
         for s in svcs:
             # Normalize fields safely (Render API shapes can vary)
-            name   = s.get("service", {}).get("name") or s.get("name")
+            name = s.get("service", {}).get("name") or s.get("name")
             status = s.get("service", {}).get("serviceDetails", {}).get("status") or s.get("status")
-            url    = s.get("service", {}).get("serviceDetails", {}).get("url") or s.get("dashboardUrl")
+            url = s.get("service", {}).get("serviceDetails", {}).get("url") or s.get("dashboardUrl")
             row = {
                 "Service Name": name,
                 "Category": "Backend",
@@ -35,6 +36,7 @@ def run():
         traceback.print_exc()
         log_devops("Render Sync", "Render", {"error": str(e)}, status="FAIL", severity="Warn")
         return {"ok": False, "err": str(e)}
+
 
 if __name__ == "__main__":
     print(run())

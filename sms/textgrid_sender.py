@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import time
-import json
 import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -34,21 +33,21 @@ except Exception:
 # ENV / CONFIG
 # =========================
 ACCOUNT_SID = os.getenv("TEXTGRID_ACCOUNT_SID")
-AUTH_TOKEN  = os.getenv("TEXTGRID_AUTH_TOKEN")
-BASE_URL    = f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json" if ACCOUNT_SID else None
+AUTH_TOKEN = os.getenv("TEXTGRID_AUTH_TOKEN")
+BASE_URL = f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json" if ACCOUNT_SID else None
 
 # Conversations field mapping (defaults align with your base)
-FROM_FIELD        = os.getenv("CONV_FROM_FIELD", "phone")          # counterparty phone (recipient)
-TO_FIELD          = os.getenv("CONV_TO_FIELD", "to_number")        # our DID used to send
-MSG_FIELD         = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD      = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD         = os.getenv("CONV_DIRECTION_FIELD", "direction")
-TG_ID_FIELD       = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-SENT_AT_FIELD     = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-PROCESSED_BY      = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
+FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")  # counterparty phone (recipient)
+TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")  # our DID used to send
+MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
+STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
+DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
+TG_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
+SENT_AT_FIELD = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
+PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
 
 # Optional extras we’ll write only if fields exist
-LEAD_LINK_FIELD   = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")
+LEAD_LINK_FIELD = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")
 PROPERTY_ID_FIELD = os.getenv("CONV_PROPERTY_ID_FIELD", "Property ID")
 TEMPLATE_LINK_FLD = os.getenv("CONV_TEMPLATE_LINK_FIELD", "Template")
 CAMPAIGN_LINK_FLD = os.getenv("CONV_CAMPAIGN_LINK_FIELD", "Campaign")
@@ -56,17 +55,22 @@ CAMPAIGN_LINK_FLD = os.getenv("CONV_CAMPAIGN_LINK_FIELD", "Campaign")
 DEFAULT_SENDER_LABEL = "TextGrid Sender"
 DRY_RUN = os.getenv("TEXTGRID_DRY_RUN", "0").lower() in ("1", "true", "yes")
 
+
 # =========================
 # Small helpers
 # =========================
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+
 def _digits(s: Any) -> Optional[str]:
-    if not isinstance(s, str): return None
+    if not isinstance(s, str):
+        return None
     import re
+
     d = "".join(re.findall(r"\d+", s))
     return d if len(d) >= 10 else None
+
 
 def _safe_table_create(tbl, payload: Dict) -> Optional[Dict]:
     """Create with 'existing fields only' to avoid 422s."""
@@ -79,7 +83,7 @@ def _safe_table_create(tbl, payload: Dict) -> Optional[Dict]:
             keys = list((probe[0] or {}).get("fields", {}).keys()) if probe else []
         except Exception:
             keys = list(payload.keys())  # optimistic
-        norm = { _norm(k): k for k in keys }
+        norm = {_norm(k): k for k in keys}
         filtered = {}
         for k, v in payload.items():
             mk = norm.get(_norm(k))
@@ -90,6 +94,7 @@ def _safe_table_create(tbl, payload: Dict) -> Optional[Dict]:
         traceback.print_exc()
         return None
 
+
 def _safe_table_update(tbl, rec_id: str, patch: Dict) -> Optional[Dict]:
     if not tbl or not rec_id or not patch:
         return None
@@ -99,7 +104,7 @@ def _safe_table_update(tbl, rec_id: str, patch: Dict) -> Optional[Dict]:
             keys = list((probe or {}).get("fields", {}).keys()) if probe else []
         except Exception:
             keys = list(patch.keys())
-        norm = { _norm(k): k for k in keys }
+        norm = {_norm(k): k for k in keys}
         filtered = {}
         for k, v in patch.items():
             mk = norm.get(_norm(k))
@@ -110,9 +115,12 @@ def _safe_table_update(tbl, rec_id: str, patch: Dict) -> Optional[Dict]:
         traceback.print_exc()
         return None
 
+
 def _norm(s: Any) -> str:
     import re
+
     return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
 
 def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: int = 10) -> Dict[str, Any]:
     """POST with httpx or requests, returning parsed JSON or raising."""
@@ -135,6 +143,7 @@ def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: i
             return {"raw": resp.text}
     raise RuntimeError("No HTTP client available (install httpx or requests).")
 
+
 # =========================
 # Lead helpers
 # =========================
@@ -150,16 +159,19 @@ def _find_or_create_lead(phone_number: str, source: str = "Outbound") -> Tuple[O
             lf = recs[0].get("fields", {})
             return recs[0]["id"], lf.get(PROPERTY_ID_FIELD) or lf.get("Property ID")
 
-        created = _safe_table_create(leads_tbl, {
-            "phone": phone_number,
-            "Lead Status": "New",
-            "Source": source,
-            "Reply Count": 0,
-            "Sent Count": 0,
-            "Delivered Count": 0,
-            "Failed Count": 0,
-            "Last Activity": _now_iso(),
-        })
+        created = _safe_table_create(
+            leads_tbl,
+            {
+                "phone": phone_number,
+                "Lead Status": "New",
+                "Source": source,
+                "Reply Count": 0,
+                "Sent Count": 0,
+                "Delivered Count": 0,
+                "Failed Count": 0,
+                "Last Activity": _now_iso(),
+            },
+        )
         if created:
             print(f"✨ Created Lead for {phone_number}")
             cf = created.get("fields", {}) if isinstance(created, dict) else {}
@@ -167,6 +179,7 @@ def _find_or_create_lead(phone_number: str, source: str = "Outbound") -> Tuple[O
     except Exception:
         traceback.print_exc()
     return None, None
+
 
 def _update_lead_activity(lead_id: Optional[str], body: str, direction: str, property_id: Optional[str] = None) -> None:
     if not lead_id:
@@ -187,6 +200,7 @@ def _update_lead_activity(lead_id: Optional[str], body: str, direction: str, pro
         _safe_table_update(leads_tbl, lead_id, patch)
     except Exception:
         traceback.print_exc()
+
 
 # =========================
 # Core Sender
@@ -250,7 +264,7 @@ def send_message(
             last_err = str(e)
             print(f"❌ Send attempt {attempt}/{retries} failed → {to}: {last_err}")
             if attempt < retries:
-                wait = 2 ** attempt
+                wait = 2**attempt
                 print(f"⏳ retrying in {wait}s...")
                 time.sleep(wait)
 
@@ -259,8 +273,8 @@ def send_message(
     try:
         if convos_tbl:
             rec: Dict[str, Any] = {
-                FROM_FIELD: to,           # counterparty phone
-                TO_FIELD: sender,         # our DID used to send
+                FROM_FIELD: to,  # counterparty phone
+                TO_FIELD: sender,  # our DID used to send
                 MSG_FIELD: body,
                 DIR_FIELD: "OUT",
                 STATUS_FIELD: "SENT" if last_err is None else "FAILED",

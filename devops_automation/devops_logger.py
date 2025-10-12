@@ -1,7 +1,8 @@
-import os, traceback
+import traceback
 from .common import tznow_iso, get_table, remap_existing_only
 
 DEVOPS_BASE = "DEVOPS_BASE"
+
 
 def log_devops(event_type: str, service: str, payload, status="OK", severity="Info"):
     tbl = get_table(DEVOPS_BASE, "System Logs")

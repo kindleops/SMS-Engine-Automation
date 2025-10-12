@@ -6,6 +6,7 @@ import traceback
 import time
 from typing import Any, Dict, Optional
 from datetime import datetime
+
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -18,7 +19,8 @@ from sms.retry_runner import run_retry
 
 # Optional: followups (if present)
 try:
-    from sms.followup_flow import run_followups   # noqa
+    from sms.followup_flow import run_followups  # noqa
+
     _HAS_FOLLOWUPS = True
 except Exception:
     _HAS_FOLLOWUPS = False
@@ -26,18 +28,21 @@ except Exception:
 # -----------------------
 # Quiet hours (Outbound)
 # -----------------------
-QUIET_TZ           = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago")) if ZoneInfo else None
-QUIET_START_HOUR   = int(os.getenv("QUIET_START_HOUR", "21"))  # 9pm local
-QUIET_END_HOUR     = int(os.getenv("QUIET_END_HOUR", "9"))     # 9am local
+QUIET_TZ = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago")) if ZoneInfo else None
+QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", "21"))  # 9pm local
+QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", "9"))  # 9am local
+
 
 def _central_now() -> datetime:
     if QUIET_TZ:
         return datetime.now(QUIET_TZ)
     return datetime.utcnow()
 
+
 def _is_quiet_hours_outbound() -> bool:
     h = _central_now().hour
     return (h >= QUIET_START_HOUR) or (h < QUIET_END_HOUR)
+
 
 # -----------------------
 # Helpers
@@ -48,6 +53,7 @@ def _safe_int(v: Any, default: int) -> int:
     except Exception:
         return default
 
+
 def _summarize_prospect_result(res: Dict[str, Any]) -> Dict[str, int]:
     """
     Normalize metrics from run_campaigns result into easy totals.
@@ -57,13 +63,14 @@ def _summarize_prospect_result(res: Dict[str, Any]) -> Dict[str, int]:
         return totals
     totals["processed_campaigns"] = _safe_int(res.get("processed", 0), 0)
     for item in res.get("results", []) or []:
-        if not isinstance(item, dict): 
+        if not isinstance(item, dict):
             continue
-        totals["queued"]  += _safe_int(item.get("queued", 0), 0)
-        totals["sent"]    += _safe_int(item.get("sent", 0), 0)
+        totals["queued"] += _safe_int(item.get("queued", 0), 0)
+        totals["sent"] += _safe_int(item.get("sent", 0), 0)
         totals["retries"] += _safe_int(item.get("retries", 0), 0)
     totals["errors"] = len(res.get("errors") or [])
     return totals
+
 
 def _std_envelope(ok: bool, typ: str, payload: Dict[str, Any], started_at: float) -> Dict[str, Any]:
     payload = payload or {}
@@ -73,6 +80,7 @@ def _std_envelope(ok: bool, typ: str, payload: Dict[str, Any], started_at: float
         "duration_ms": int((time.time() - started_at) * 1000),
         **payload,
     }
+
 
 # -----------------------
 # Dispatcher
@@ -110,11 +118,16 @@ def run_engine(mode: str, **kwargs) -> dict:
             result = run_campaigns(limit=limit, send_after_queue=send_after_queue)
 
             sums = _summarize_prospect_result(result)
-            return _std_envelope(True, "Prospect", {
-                "result": result,
-                "totals": sums,
-                "quiet_hours": _is_quiet_hours_outbound(),
-            }, started)
+            return _std_envelope(
+                True,
+                "Prospect",
+                {
+                    "result": result,
+                    "totals": sums,
+                    "quiet_hours": _is_quiet_hours_outbound(),
+                },
+                started,
+            )
 
         elif mode == "leads":
             retry_limit = _safe_int(kwargs.get("retry_limit", 100), 100)
@@ -139,7 +152,7 @@ def run_engine(mode: str, **kwargs) -> dict:
 
         elif mode == "inbounds":
             limit = _safe_int(kwargs.get("limit", 50), 50)
-            view  = kwargs.get("view", "Unprocessed Inbounds")
+            view = kwargs.get("view", "Unprocessed Inbounds")
             result = run_autoresponder(limit=limit, view=view)
 
             payload = {
@@ -150,18 +163,28 @@ def run_engine(mode: str, **kwargs) -> dict:
             return _std_envelope(True, "Inbound", payload, started)
 
         else:
-            return _std_envelope(False, "Unknown", {
-                "error": f"Unknown mode: {mode}",
-                "supported_modes": ["prospects", "leads", "inbounds"],
-            }, started)
+            return _std_envelope(
+                False,
+                "Unknown",
+                {
+                    "error": f"Unknown mode: {mode}",
+                    "supported_modes": ["prospects", "leads", "inbounds"],
+                },
+                started,
+            )
 
     except Exception as e:
         print(f"❌ Dispatcher error in mode={mode}: {e}")
         traceback.print_exc()
-        return _std_envelope(False, mode or "unknown", {
-            "error": str(e),
-            "stack": traceback.format_exc(),
-        }, started)
+        return _std_envelope(
+            False,
+            mode or "unknown",
+            {
+                "error": str(e),
+                "stack": traceback.format_exc(),
+            },
+            started,
+        )
 
 
 if __name__ == "__main__":

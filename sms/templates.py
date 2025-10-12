@@ -39,6 +39,7 @@ price_inquiry = [
 # Helpers
 # -------------------------------
 
+
 def _get_first_name(full_name: str | None) -> str:
     """Extract first name from full name string safely."""
     if not full_name:
@@ -49,13 +50,10 @@ def _get_first_name(full_name: str | None) -> str:
 def _format_safe(template: str, fields: dict) -> str:
     """Safely format a template with prospect/lead fields."""
     return template.format(
-        First=_get_first_name(
-            fields.get("Phone 1 Name (Primary)") or fields.get("First")
-        ),
-        Address=fields.get("Property Address")
-        or fields.get("Address")
-        or "your property",
+        First=_get_first_name(fields.get("Phone 1 Name (Primary)") or fields.get("First")),
+        Address=fields.get("Property Address") or fields.get("Address") or "your property",
     )
+
 
 # -------------------------------
 # Template Registry
@@ -67,6 +65,7 @@ TEMPLATES = {
     "followup_wrong": lambda fields: random.choice(followup_wrong),
     "price_inquiry": lambda fields: random.choice(price_inquiry),
 }
+
 
 # -------------------------------
 # Public API

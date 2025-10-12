@@ -10,15 +10,16 @@ from typing import Optional, Dict, Any
 # pyairtable compatibility layer
 # -------------------------------
 _PyTable = None
-_PyApi   = None
+_PyApi = None
 try:
     from pyairtable import Table as _PyTable  # v1 style
 except Exception:
     _PyTable = None
 try:
-    from pyairtable import Api as _PyApi      # v2 style
+    from pyairtable import Api as _PyApi  # v2 style
 except Exception:
     _PyApi = None
+
 
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
     """
@@ -36,26 +37,28 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
         traceback.print_exc()
     return None
 
+
 # -------------------------------
 # ENV / CONFIG
 # -------------------------------
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-CONTROL_BASE     = os.getenv("CAMPAIGN_CONTROL_BASE")
-NUMBERS_TABLE    = os.getenv("NUMBERS_TABLE", "Numbers")
+CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE")
+NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 
 # Default daily cap if the row doesn’t have its own “Daily Reset” value
 DAILY_LIMIT_DEFAULT = int(os.getenv("DAILY_LIMIT", "750"))
 
 # Field names we’ll *attempt* to write if they exist
-F_SENT_TODAY      = "Sent Today"
-F_DELIV_TODAY     = "Delivered Today"
-F_FAIL_TODAY      = "Failed Today"
-F_FAILED_TODAY    = "Failed Today"
-F_OPTOUT_TODAY    = "Opt-Outs Today"
-F_REMAINING       = "Remaining"
-F_LAST_USED       = "Last Used"
+F_SENT_TODAY = "Sent Today"
+F_DELIV_TODAY = "Delivered Today"
+F_FAIL_TODAY = "Failed Today"
+F_FAILED_TODAY = "Failed Today"
+F_OPTOUT_TODAY = "Opt-Outs Today"
+F_REMAINING = "Remaining"
+F_LAST_USED = "Last Used"
 F_DAILY_RESET_CAP = "Daily Reset"
-F_NUMBER          = "Number"
+F_NUMBER = "Number"
+
 
 # -------------------------------
 # Helpers
@@ -63,12 +66,15 @@ F_NUMBER          = "Number"
 def _today_date_str() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     """normalized(lower, nospace) -> actual Airtable field name present on this table."""
     import re
+
     def _norm(s: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", s.strip().lower())
 
@@ -80,9 +86,11 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         pass
     return {_norm(k): k for k in keys}
 
+
 def _existing_only(tbl, patch: Dict[str, Any]) -> Dict[str, Any]:
     """Keep only keys that already exist on the table (prevents 422 UNKNOWN_FIELD_NAME)."""
     import re
+
     amap = _auto_field_map(tbl)
     out: Dict[str, Any] = {}
     for k, v in patch.items():
@@ -91,6 +99,7 @@ def _existing_only(tbl, patch: Dict[str, Any]) -> Dict[str, Any]:
         if ak:
             out[ak] = v
     return out
+
 
 def _cap_for_row(fields: Dict[str, Any]) -> int:
     try:
@@ -101,6 +110,7 @@ def _cap_for_row(fields: Dict[str, Any]) -> int:
     except Exception:
         return DAILY_LIMIT_DEFAULT
 
+
 def _init_numbers_table():
     if not (AIRTABLE_API_KEY and CONTROL_BASE):
         print("⚠️ quota_reset: Missing Airtable env (AIRTABLE_API_KEY / CAMPAIGN_CONTROL_BASE)")
@@ -109,6 +119,7 @@ def _init_numbers_table():
     if not tbl:
         print("❌ quota_reset: Failed to init Numbers table client")
     return tbl
+
 
 # -------------------------------
 # Public: reset daily quotas
@@ -177,6 +188,7 @@ def reset_daily_quotas():
     }
     print(f"✅ Reset complete | Date: {today_date} | Updated: {updated} | Errors: {len(errors)}")
     return summary
+
 
 if __name__ == "__main__":
     reset_daily_quotas()

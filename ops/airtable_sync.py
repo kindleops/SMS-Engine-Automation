@@ -102,7 +102,7 @@ class AirtableSync:
 
     def log_sms_event(self, event_type: str, phone: str, status: str | None = None, meta: Dict[str, Any] | None = None):
         payload = {
-            "Event": event_type,   # e.g. OUTBOUND, INBOUND, OPTOUT, DELIVERY
+            "Event": event_type,  # e.g. OUTBOUND, INBOUND, OPTOUT, DELIVERY
             "Phone": phone,
             "Status": (status or "").upper() if status else None,
             "Meta": (meta and str(meta)) or None,

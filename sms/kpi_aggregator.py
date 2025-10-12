@@ -13,13 +13,11 @@ try:
 except Exception:  # pyairtable missing or import error
     _RealTable = None
 
+
 class Table:  # thin wrapper so symbol 'Table' always exists
     def __init__(self, api_key: str, base_id: str, table_name: str):
         if _RealTable is None:
-            raise ImportError(
-                "pyairtable is not installed or failed to import. "
-                "Install with: pip install pyairtable"
-            )
+            raise ImportError("pyairtable is not installed or failed to import. Install with: pip install pyairtable")
         self._t = _RealTable(api_key, base_id, table_name)
 
     def all(self, **kwargs):
@@ -36,12 +34,12 @@ class Table:  # thin wrapper so symbol 'Table' always exists
 # ENV / CONFIG
 # -----------------------
 AIRTABLE_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-PERF_BASE    = os.getenv("PERFORMANCE_BASE")
-KPI_TABLE    = os.getenv("KPI_TABLE_NAME", "KPIs")
+PERF_BASE = os.getenv("PERFORMANCE_BASE")
+KPI_TABLE = os.getenv("KPI_TABLE_NAME", "KPIs")
 
 # Business-timezone for daily rollups
-KPI_TZ       = os.getenv("KPI_TZ", "America/Chicago")
-MAX_SCAN     = int(os.getenv("KPI_MAX_SCAN", "10000"))  # safety cap
+KPI_TZ = os.getenv("KPI_TZ", "America/Chicago")
+MAX_SCAN = int(os.getenv("KPI_MAX_SCAN", "10000"))  # safety cap
 
 try:
     from zoneinfo import ZoneInfo
@@ -57,8 +55,10 @@ def _tz_now():
         return datetime.now(ZoneInfo(KPI_TZ))
     return datetime.now(timezone.utc)
 
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _to_date_local(s: str) -> Optional[datetime.date]:
     """
@@ -79,6 +79,7 @@ def _to_date_local(s: str) -> Optional[datetime.date]:
     except Exception:
         return None
 
+
 def _norm(s):  # normalize field names
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
 
@@ -96,6 +97,7 @@ def _kpi_table() -> Optional[Table]:
         traceback.print_exc()
         return None
 
+
 def _auto_field_map(tbl: Table) -> Dict[str, str]:
     try:
         rows = tbl.all(max_records=1)
@@ -103,6 +105,7 @@ def _auto_field_map(tbl: Table) -> Dict[str, str]:
     except Exception:
         keys = []
     return {_norm(k): k for k in keys}
+
 
 def _remap_existing_only(tbl: Table, payload: Dict) -> Dict:
     amap = _auto_field_map(tbl)
@@ -131,9 +134,9 @@ def aggregate_kpis():
         return {"ok": False, "error": "KPI table not configured"}
 
     today_local = _tz_now().date()
-    start_week  = today_local - timedelta(days=7)
+    start_week = today_local - timedelta(days=7)
     start_month = today_local.replace(day=1)
-    now_iso     = _utcnow_iso()
+    now_iso = _utcnow_iso()
 
     try:
         rows = kpi_tbl.all(max_records=MAX_SCAN)
@@ -211,10 +214,7 @@ def aggregate_kpis():
                 "Date": str(today_local),
                 "Timestamp": now_iso,
                 # Optional range fields if they exist in your table:
-                "Date Start": str(
-                    start_month if suffix == "MONTHLY_TOTAL"
-                    else (start_week if suffix == "WEEKLY_TOTAL" else today_local)
-                ),
+                "Date Start": str(start_month if suffix == "MONTHLY_TOTAL" else (start_week if suffix == "WEEKLY_TOTAL" else today_local)),
                 "Date End": str(today_local),
             }
             try:
@@ -233,7 +233,7 @@ def aggregate_kpis():
                 traceback.print_exc()
                 errors.append(f"{metric_name}: {e}")
 
-    _upsert_totals("DAILY_TOTAL", daily,   existing_totals_daily)
+    _upsert_totals("DAILY_TOTAL", daily, existing_totals_daily)
     _upsert_totals("WEEKLY_TOTAL", weekly, existing_totals_weekly)
     _upsert_totals("MONTHLY_TOTAL", monthly, existing_totals_monthly)
 

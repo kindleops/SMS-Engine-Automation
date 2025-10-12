@@ -32,9 +32,7 @@ def test_strict_health_success(monkeypatch):
 
     monkeypatch.setattr("sms.health_strict.Table", FakeTable)
 
-    result = health_strict.strict_health(
-        mode="prospects", api_key="fake_key", base_id="fake_base"
-    )
+    result = health_strict.strict_health(mode="prospects", api_key="fake_key", base_id="fake_base")
     assert result["ok"] is True
     assert result["mode"] == "prospects"
     assert "timestamp" in result

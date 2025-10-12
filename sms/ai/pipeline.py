@@ -1,5 +1,6 @@
 from sms.ai import autoresponder, comps_engine, offer_engine, contract_engine, followup_engine
 
+
 class SMSPipeline:
     def __init__(self, lead_id, phone, market, property_address=None):
         self.lead_id = lead_id
@@ -34,10 +35,7 @@ class SMSPipeline:
 
         elif self.state == "CONTRACT":
             contract_link = contract_engine.send_contract(
-                seller_name="Seller",
-                seller_email="seller@email.com",
-                address=self.property_address,
-                offer_price=offer_engine.last_offer
+                seller_name="Seller", seller_email="seller@email.com", address=self.property_address, offer_price=offer_engine.last_offer
             )
             self.state = "CLOSED"
             return f"Here’s your contract link: {contract_link}"

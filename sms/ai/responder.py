@@ -5,7 +5,6 @@ import os
 import re
 import json
 import time
-from datetime import datetime
 from typing import Any, Dict, Optional
 
 # Optional dependency — never crash if missing
@@ -34,6 +33,7 @@ TEST_MODE: bool = os.getenv("AI_TEST_MODE", "false").lower() in ("1", "true", "y
 def _log(msg: str) -> None:
     print(f"[AIResponder] {msg}")
 
+
 def _safe_name(context: Dict[str, Any]) -> Optional[str]:
     for k in ("Owner Name", "Seller Name", "Contact Name", "Name", "name", "owner_name"):
         v = context.get(k)
@@ -43,19 +43,34 @@ def _safe_name(context: Dict[str, Any]) -> Optional[str]:
             return re.sub(r"[^A-Za-z\-'.]", "", first) or None
     return None
 
+
 def _shorten(s: str, limit: int) -> str:
     s = (s or "").strip()
     if len(s) <= limit:
         return s
-    return s[:limit - 1].rstrip() + "…"
+    return s[: limit - 1].rstrip() + "…"
+
 
 def _reduce_context(ctx: Dict[str, Any], max_chars: int = 1200) -> str:
     """
     Keep only useful, small fields; truncate aggressively to avoid huge prompts.
     """
     keep_keys = [
-        "phone", "last_message", "Address", "Property Address", "City", "State", "Zip",
-        "Market", "Owner Name", "Seller Name", "Beds", "Baths", "Sqft", "ARV", "Notes"
+        "phone",
+        "last_message",
+        "Address",
+        "Property Address",
+        "City",
+        "State",
+        "Zip",
+        "Market",
+        "Owner Name",
+        "Seller Name",
+        "Beds",
+        "Baths",
+        "Sqft",
+        "ARV",
+        "Notes",
     ]
     slim: Dict[str, Any] = {}
     for k in keep_keys:
@@ -67,8 +82,9 @@ def _reduce_context(ctx: Dict[str, Any], max_chars: int = 1200) -> str:
                 slim[k] = v
     j = json.dumps(slim, ensure_ascii=False)
     if len(j) > max_chars:
-        j = j[:max_chars - 1] + "…"
+        j = j[: max_chars - 1] + "…"
     return j
+
 
 def _fallback_reply(ctx: Dict[str, Any]) -> str:
     who = _safe_name(ctx)
@@ -77,6 +93,7 @@ def _fallback_reply(ctx: Dict[str, Any]) -> str:
         f"{greet} thanks for confirming! Do you have a ballpark price you’d be happy with if we cover closing costs and buy as-is?",
         240,
     )
+
 
 def _postprocess_sms(text: str) -> str:
     """
@@ -163,10 +180,7 @@ class AIResponder:
                     temperature=OPENAI_TEMPERATURE,
                     max_tokens=OPENAI_MAX_TOKENS,
                 )
-                content = (
-                    (resp.choices[0].message.content if resp and resp.choices else None)
-                    or ""
-                ).strip()
+                content = ((resp.choices[0].message.content if resp and resp.choices else None) or "").strip()
                 if not content:
                     raise RuntimeError("Empty completion content")
                 return _postprocess_sms(content)
@@ -175,7 +189,7 @@ class AIResponder:
                 _log(f"Completion attempt {attempt} failed: {last_err}")
                 if attempt <= OPENAI_MAX_RETRIES:
                     # Exponential backoff with mild jitter
-                    time.sleep(1.2 ** attempt)
+                    time.sleep(1.2**attempt)
                 else:
                     break
 

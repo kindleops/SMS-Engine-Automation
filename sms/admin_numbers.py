@@ -15,6 +15,7 @@ except Exception:
     ZoneInfo = None  # type: ignore
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # ---- Optional Airtable client (pyairtable v2+)
@@ -27,19 +28,19 @@ except Exception:
 # =========================
 # ENV / CONFIG
 # =========================
-AIRTABLE_KEY          = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE     = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+AIRTABLE_KEY = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
 
-PROSPECTS_TABLE       = os.getenv("PROSPECTS_TABLE", "Prospects")
-DRIP_QUEUE_TABLE      = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
-CAMPAIGNS_TABLE       = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
-NUMBERS_TABLE         = os.getenv("NUMBERS_TABLE", "Numbers")
+PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
+DRIP_QUEUE_TABLE = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
+CAMPAIGNS_TABLE = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 
-QUIET_TZ_NAME         = os.getenv("QUIET_TZ", "America/Chicago")
-QUIET_START_HOUR      = int(os.getenv("QUIET_START_HOUR", "21"))  # 21:00
-QUIET_END_HOUR        = int(os.getenv("QUIET_END_HOUR", "9"))     # 09:00
-DAILY_LIMIT_FALLBACK  = int(os.getenv("DAILY_LIMIT", "750"))
+QUIET_TZ_NAME = os.getenv("QUIET_TZ", "America/Chicago")
+QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", "21"))  # 21:00
+QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", "9"))  # 09:00
+DAILY_LIMIT_FALLBACK = int(os.getenv("DAILY_LIMIT", "750"))
 
 
 # =========================
@@ -48,16 +49,19 @@ DAILY_LIMIT_FALLBACK  = int(os.getenv("DAILY_LIMIT", "750"))
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def _tz() -> Any:
     try:
         return ZoneInfo(QUIET_TZ_NAME) if ZoneInfo else None
     except Exception:
         return None
 
+
 def _in_quiet_hours(dt_utc: datetime) -> bool:
     z = _tz()
     local = dt_utc.astimezone(z) if z else dt_utc
     return (local.hour >= QUIET_START_HOUR) or (local.hour < QUIET_END_HOUR)
+
 
 def _shift_to_window(dt_utc: datetime) -> datetime:
     z = _tz()
@@ -68,6 +72,7 @@ def _shift_to_window(dt_utc: datetime) -> datetime:
         local = local.replace(hour=QUIET_END_HOUR, minute=0, second=0, microsecond=0)
     # Return UTC
     return local.astimezone(timezone.utc) if z else local
+
 
 def _local_naive_iso(dt_utc: datetime) -> str:
     """Return local-naive ISO string (Airtable-friendly) in QUIET_TZ or UTC if tz missing."""
@@ -90,6 +95,7 @@ def _api() -> Optional[Any]:
         traceback.print_exc()
         return None
 
+
 def _tbl(base_id: Optional[str], name: str):
     api = _api()
     if not (api and base_id):
@@ -101,15 +107,18 @@ def _tbl(base_id: Optional[str], name: str):
         traceback.print_exc()
         return None
 
+
 def _auto_field_map(tbl) -> Dict[str, str]:
     def _norm(s: Any) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
     try:
         page = tbl.all(max_records=1)
         keys = list((page[0] if page else {"fields": {}}).get("fields", {}).keys())
     except Exception:
         keys = []
     return {_norm(k): k for k in keys}
+
 
 def _remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Keep only fields that exist on the destination table (avoid 422 UNKNOWN_FIELD_NAME)."""
@@ -118,14 +127,17 @@ def _remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     amap = _auto_field_map(tbl)
     if not amap:
         return dict(payload)
+
     def _norm(s: Any) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
     out: Dict[str, Any] = {}
     for k, v in payload.items():
         ak = amap.get(_norm(k))
         if ak:
             out[ak] = v
     return out
+
 
 def _safe_update(tbl, rid: str, payload: Dict[str, Any]) -> None:
     try:
@@ -134,12 +146,14 @@ def _safe_update(tbl, rid: str, payload: Dict[str, Any]) -> None:
     except Exception:
         traceback.print_exc()
 
+
 def _safe_create(tbl, payload: Dict[str, Any]):
     try:
         if tbl and payload:
             return tbl.create(_remap_existing_only(tbl, payload))
     except Exception:
         traceback.print_exc()
+
 
 def _safe_all(tbl, **kwargs) -> List[Dict[str, Any]]:
     if not tbl:
@@ -160,6 +174,7 @@ def _digits_only(s: Any) -> Optional[str]:
     ds = "".join(re.findall(r"\d+", s))
     return ds if len(ds) >= 10 else None
 
+
 def _to_e164(fields: Dict[str, Any]) -> Optional[str]:
     """Try common DID columns and normalize to E.164 (+1...)."""
     for key in ("Number", "A Number", "Phone", "E164", "Friendly Name"):
@@ -169,6 +184,7 @@ def _to_e164(fields: Dict[str, Any]) -> Optional[str]:
             if digits:
                 return v if v.strip().startswith("+") else f"+{digits}"
     return None
+
 
 def _supports_market(f: Dict[str, Any], market: Optional[str]) -> bool:
     if not market:
@@ -193,6 +209,7 @@ def _campaign_market_map() -> Dict[str, Any]:
     except Exception:
         traceback.print_exc()
     return cmap
+
 
 def _prospect_market_map() -> Dict[str, Any]:
     pmap: Dict[str, Any] = {}
@@ -226,6 +243,7 @@ def _remaining_calc(f: Dict[str, Any]) -> int:
     except Exception:
         daily_cap = DAILY_LIMIT_FALLBACK
     return max(0, daily_cap - sent_today)
+
 
 def _pick_number_for_market(market: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """

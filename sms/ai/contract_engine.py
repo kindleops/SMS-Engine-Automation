@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import re
 import time
-import json
 import hashlib
 import traceback
 from typing import Any, Dict, Optional
@@ -18,7 +17,7 @@ except Exception:
 # ───────────────────────────────────────────────────────────
 # Config
 # ───────────────────────────────────────────────────────────
-DOCUSIGN_API  = (os.getenv("DOCUSIGN_API") or "").rstrip("/")
+DOCUSIGN_API = (os.getenv("DOCUSIGN_API") or "").rstrip("/")
 DOCUSIGN_TOKEN = os.getenv("DOCUSIGN_TOKEN")
 PURCHASE_TEMPLATE_ID = os.getenv("PURCHASE_AGREEMENT_TEMPLATE")
 TEST_MODE = os.getenv("CONTRACTS_TEST_MODE", "false").lower() in ("1", "true", "yes")
@@ -34,21 +33,27 @@ BACKOFF_BASE = float(os.getenv("CONTRACTS_BACKOFF_BASE_SEC", "1.2"))  # 1.2, 2.4
 def _log(msg: str) -> None:
     print(f"[ContractEngine] {msg}")
 
+
 def _is_email(s: str) -> bool:
-    if not isinstance(s, str): return False
+    if not isinstance(s, str):
+        return False
     return re.match(r"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$", s, re.I) is not None
+
 
 def _fmt_money(v: Any) -> Optional[str]:
     try:
         f = float(v)
-        if f <= 0: return None
+        if f <= 0:
+            return None
         return f"${f:,.0f}"
     except Exception:
         return None
 
+
 def _idempotency_key(*parts: Any) -> str:
     raw = "|".join(str(p) for p in parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
 
 def _env_ok() -> tuple[bool, Optional[str]]:
     if not requests:
@@ -61,6 +66,7 @@ def _env_ok() -> tuple[bool, Optional[str]]:
         return False, "PURCHASE_AGREEMENT_TEMPLATE not set"
     return True, None
 
+
 def _headers(idem_key: str) -> Dict[str, str]:
     h = {
         "Authorization": f"Bearer {DOCUSIGN_TOKEN}",
@@ -70,6 +76,7 @@ def _headers(idem_key: str) -> Dict[str, str]:
     # Many APIs honor an idempotency header; harmless if ignored
     h["Idempotency-Key"] = idem_key
     return h
+
 
 def _post_with_retries(url: str, payload: Dict[str, Any], headers: Dict[str, str]) -> requests.Response:
     last_exc = None

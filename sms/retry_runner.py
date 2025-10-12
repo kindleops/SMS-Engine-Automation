@@ -26,7 +26,7 @@ try:
 except Exception:
     _PyTable = None
 try:
-    from pyairtable import Api as _PyApi      # v2 style
+    from pyairtable import Api as _PyApi  # v2 style
 except Exception:
     _PyApi = None
 
@@ -46,33 +46,36 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
 
 
 # ------------- ENV (fields & tables) -------------
-AIRTABLE_API_KEY   = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE  = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-CONVOS_TABLE_NAME  = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CONVOS_TABLE_NAME = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
-PHONE_FIELD        = os.getenv("CONV_FROM_FIELD", "phone")
-MESSAGE_FIELD      = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD       = os.getenv("CONV_STATUS_FIELD", "status")
-DIRECTION_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
+PHONE_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
+MESSAGE_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
+STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
+DIRECTION_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
 
-RETRY_COUNT_FIELD  = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
-RETRY_AFTER_FIELD  = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
-RETRIED_AT_FIELD   = os.getenv("CONV_RETRIED_AT_FIELD", "retried_at")
-LAST_ERROR_FIELD   = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
-PERM_FAIL_REASON   = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
+RETRY_COUNT_FIELD = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
+RETRY_AFTER_FIELD = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
+RETRIED_AT_FIELD = os.getenv("CONV_RETRIED_AT_FIELD", "retried_at")
+LAST_ERROR_FIELD = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
+PERM_FAIL_REASON = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
 
 # ------------- Retry tuning -------------
-MAX_RETRIES            = int(os.getenv("MAX_RETRIES", "3"))
-BASE_BACKOFF_MINUTES   = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
 
 FAILED_STATES = {"FAILED", "DELIVERY_FAILED", "UNDELIVERED", "UNDELIVERABLE", "THROTTLED"}
+
 
 # ------------- Helpers -------------
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def _now_iso() -> str:
     return _now().isoformat()
+
 
 def _parse_dt(s: Any) -> Optional[datetime]:
     if not s:
@@ -82,9 +85,12 @@ def _parse_dt(s: Any) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def _norm(s: str) -> str:
     import re
+
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     keys: List[str] = []
@@ -101,6 +107,7 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         pass
     return {_norm(k): k for k in keys}
 
+
 def _remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     amap = _auto_field_map(tbl)
     if not amap:
@@ -112,18 +119,30 @@ def _remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
             out[ak] = v
     return out
 
+
 def _is_permanent_error(err: str) -> bool:
     text = (err or "").lower()
     signals = [
-        "invalid", "not a valid", "unreachable", "blacklisted", "blocked",
-        "landline", "disconnected", "undeliverable", "unknown subscriber",
-        "unknown destination", "absent subscriber", "rejected by carrier"
+        "invalid",
+        "not a valid",
+        "unreachable",
+        "blacklisted",
+        "blocked",
+        "landline",
+        "disconnected",
+        "undeliverable",
+        "unknown subscriber",
+        "unknown destination",
+        "absent subscriber",
+        "rejected by carrier",
     ]
     return any(sig in text for sig in signals)
+
 
 def _backoff_delay(retry_count: int) -> timedelta:
     # 1, 2, 4 * BASE minutes ...
     return timedelta(minutes=BASE_BACKOFF_MINUTES * max(1, 2 ** max(0, retry_count - 1)))
+
 
 # ------------- Airtable client -------------
 @lru_cache(maxsize=1)
@@ -132,6 +151,7 @@ def _t_convos():
     if not tbl:
         print("⚠️ RetryRunner: No Airtable config → MOCK mode")
     return tbl
+
 
 # ------------- Filtering (Python-side, robust to schema drift) -------------
 def _is_retryable(f: Dict[str, Any]) -> bool:
@@ -155,6 +175,7 @@ def _is_retryable(f: Dict[str, Any]) -> bool:
     ra_dt = _parse_dt(ra)
     return (ra_dt is None) or (ra_dt <= _now())
 
+
 def _pick_candidates(convos, limit: int, view: Optional[str]) -> List[Dict]:
     # Try: view → Python filter; else attempt formula; else full scan + filter
     try:
@@ -168,15 +189,18 @@ def _pick_candidates(convos, limit: int, view: Optional[str]) -> List[Dict]:
     try:
         rows = convos.all()
         cands = [r for r in rows if _is_retryable(r.get("fields", {}))]
+
         # Oldest retriable first by retry_after/sent time
         def _sort_key(r):
             f = r.get("fields", {})
             return _parse_dt(f.get(RETRY_AFTER_FIELD) or f.get("retry_after") or f.get("sent_at")) or _now()
+
         cands.sort(key=_sort_key)
         return cands[:limit]
     except Exception:
         traceback.print_exc()
         return []
+
 
 # ------------- send primitive (MessageProcessor preferred) -------------
 def _send(phone: str, body: str) -> None:
@@ -190,6 +214,7 @@ def _send(phone: str, body: str) -> None:
         return
     # MOCK
     print(f"[MOCK] send → {phone}: {body[:140]}")
+
 
 # ------------- main -------------
 def run_retry(limit: int = 100, view: str | None = None) -> Dict[str, Any]:
@@ -206,7 +231,7 @@ def run_retry(limit: int = 100, view: str | None = None) -> Dict[str, Any]:
         rid = r.get("id")
         f = r.get("fields", {})
         phone = f.get(PHONE_FIELD) or f.get("Phone") or f.get("From")
-        body  = f.get(MESSAGE_FIELD) or f.get("Body") or f.get("message")
+        body = f.get(MESSAGE_FIELD) or f.get("Body") or f.get("message")
         retries_prev = int(f.get(RETRY_COUNT_FIELD) or f.get("retry_count") or 0)
 
         if not phone or not body or not rid:
@@ -225,13 +250,16 @@ def run_retry(limit: int = 100, view: str | None = None) -> Dict[str, Any]:
             safe = _remap_existing_only(convos, patch)
             # minimal fallbacks if fields differ in case
             if not safe:
-                safe = _remap_existing_only(convos, {
-                    "Status": "SENT",
-                    "retry_count": retries_prev + 1,
-                    "retried_at": _now_iso(),
-                    "last_retry_error": None,
-                    "retry_after": None,
-                })
+                safe = _remap_existing_only(
+                    convos,
+                    {
+                        "Status": "SENT",
+                        "retry_count": retries_prev + 1,
+                        "retried_at": _now_iso(),
+                        "last_retry_error": None,
+                        "retry_after": None,
+                    },
+                )
             if safe:
                 convos.update(rid, safe)
 

@@ -23,19 +23,20 @@ except Exception:
 
 # ---------- ENV / CONFIG ----------
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE         = os.getenv("LEADS_TABLE", "Leads")
-PROSPECTS_TABLE     = os.getenv("PROSPECTS_TABLE", "Prospects")
+LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
+PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
 
 # Offer math (override in env if desired)
-OFFER_MAO_PCT          = float(os.getenv("OFFER_MAO_PCT", "0.70"))   # 70% rule default
-CLOSING_FEE_FLAT       = float(os.getenv("CLOSING_FEE_FLAT", "4000"))
-WHOLESALE_FEE_FLAT     = float(os.getenv("WHOLESALE_FEE_FLAT", "8000"))
-REPAIR_FLOOR_PER_SQFT  = float(os.getenv("REPAIR_FLOOR_PER_SQFT", "12"))  # min repair/sqft
-REPAIR_CEIL_PER_SQFT   = float(os.getenv("REPAIR_CEIL_PER_SQFT", "55"))   # max repair/sqft
-MIN_CASH_OFFER         = float(os.getenv("MIN_CASH_OFFER", "5000"))
+OFFER_MAO_PCT = float(os.getenv("OFFER_MAO_PCT", "0.70"))  # 70% rule default
+CLOSING_FEE_FLAT = float(os.getenv("CLOSING_FEE_FLAT", "4000"))
+WHOLESALE_FEE_FLAT = float(os.getenv("WHOLESALE_FEE_FLAT", "8000"))
+REPAIR_FLOOR_PER_SQFT = float(os.getenv("REPAIR_FLOOR_PER_SQFT", "12"))  # min repair/sqft
+REPAIR_CEIL_PER_SQFT = float(os.getenv("REPAIR_CEIL_PER_SQFT", "55"))  # max repair/sqft
+MIN_CASH_OFFER = float(os.getenv("MIN_CASH_OFFER", "5000"))
 
-DM_ENABLED     = bool(os.getenv("DEALMACHINE_API_KEY"))
+DM_ENABLED = bool(os.getenv("DEALMACHINE_API_KEY"))
 ZILLOW_ENABLED = bool(os.getenv("ZILLOW_RAPIDAPI_KEY"))
+
 
 # ---------- Airtable lazy clients (safe; may return None) ----------
 @lru_cache(maxsize=None)
@@ -52,8 +53,10 @@ def _get_airtable(table_name: str) -> Optional[Any]:
     except Exception:
         return None
 
+
 def _iso_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 # ---------- Utilities ----------
 # Accepts: 125k, $137,500, 1.25m, 97500, $98k, 98 K, etc.
@@ -67,6 +70,7 @@ _PRICE_RE = re.compile(
     """,
     re.VERBOSE,
 )
+
 
 def _extract_ask_price(text: str) -> Optional[float]:
     """
@@ -95,6 +99,7 @@ def _extract_ask_price(text: str) -> Optional[float]:
     except Exception:
         return None
 
+
 def _median(nums: List[float]) -> Optional[float]:
     nums = [float(n) for n in nums if isinstance(n, (int, float)) and not math.isnan(float(n))]
     if not nums:
@@ -104,8 +109,10 @@ def _median(nums: List[float]) -> Optional[float]:
     except Exception:
         return None
 
+
 def _soft_cap(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
 
 # ---------- “API” stubs (replace with real calls) ----------
 def _fetch_dealmachine_comps(address: str, city: str = "", state: str = "", zipc: str = "") -> List[Dict[str, Any]]:
@@ -118,6 +125,7 @@ def _fetch_dealmachine_comps(address: str, city: str = "", state: str = "", zipc
     # TODO: Implement real HTTP call
     return []
 
+
 def _fetch_zillow_comps(address: str, city: str = "", state: str = "", zipc: str = "") -> List[Dict[str, Any]]:
     """
     Stub: Replace with a real Zillow (RapidAPI) call.
@@ -127,6 +135,7 @@ def _fetch_zillow_comps(address: str, city: str = "", state: str = "", zipc: str
         return []
     # TODO: Implement real HTTP call
     return []
+
 
 # ---------- Normalization / ARV ----------
 def _normalize_comps(*comp_lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -139,7 +148,7 @@ def _normalize_comps(*comp_lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for c in merged:
         try:
             price = float(c.get("price")) if c.get("price") is not None else None
-            sqft  = float(c.get("sqft")) if c.get("sqft") is not None else None
+            sqft = float(c.get("sqft")) if c.get("sqft") is not None else None
         except Exception:
             continue
         if price is None or not (30_000 <= price <= 2_000_000):
@@ -148,6 +157,7 @@ def _normalize_comps(*comp_lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         out.append(c)
     return out
+
 
 def _estimate_arv(comps: List[Dict[str, Any]], subject_sqft: Optional[float]) -> Optional[float]:
     """
@@ -177,6 +187,7 @@ def _estimate_arv(comps: List[Dict[str, Any]], subject_sqft: Optional[float]) ->
     top = sorted_comps[:5] if len(sorted_comps) >= 5 else sorted_comps
     return _median([float(c["price"]) for c in top if c.get("price") is not None])
 
+
 # ---------- Repairs ----------
 def _infer_repair_severity(text: str) -> str:
     t = (text or "").lower()
@@ -187,6 +198,7 @@ def _infer_repair_severity(text: str) -> str:
     if any(w in t for w in ["needs work", "repairs", "old kitchen", "outdated"]):
         return "light"
     return "unknown"
+
 
 def _estimate_repairs(sqft: Optional[float], seller_text: str) -> float:
     """
@@ -211,12 +223,14 @@ def _estimate_repairs(sqft: Optional[float], seller_text: str) -> float:
     except Exception:
         return float(per_sqft * 1200.0)
 
+
 # ---------- Offer math ----------
 def _compute_mao(arv: float, est_repairs: float) -> float:
     """
     MAO = ARV * PCT - Repairs - Fees (closing + wholesale)
     """
     return float(arv * OFFER_MAO_PCT - est_repairs - CLOSING_FEE_FLAT - WHOLESALE_FEE_FLAT)
+
 
 # ---------- SMS copy ----------
 def _format_offer_sms(offer: float) -> str:
@@ -229,19 +243,18 @@ def _format_offer_sms(offer: float) -> str:
         f"Does that work for you?"
     )
 
+
 def _format_counterask_sms(ask: float, offer: float) -> str:
     gap = max(0.0, float(ask) - float(offer))
     if gap <= 2500:
         tgt = int(round((ask + offer) / 1000) * 1000)
-        return (
-            f"Appreciate it. We’re close — I could potentially get to about ${tgt:,} "
-            f"if we can move quickly. Would that work?"
-        )
+        return f"Appreciate it. We’re close — I could potentially get to about ${tgt:,} if we can move quickly. Would that work?"
     base = int(round(offer / 1000) * 1000)
     return (
         f"Thanks for sharing. Based on repairs and recent sales, we’re around ${base:,}. "
         f"Is there any flexibility on your ${int(ask):,} number?"
     )
+
 
 # ---------- Public entry ----------
 def run_ai_closer(from_phone: str, inbound_text: str, convo_fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -254,14 +267,9 @@ def run_ai_closer(from_phone: str, inbound_text: str, convo_fields: Dict[str, An
     Returns a dict with breakdown for logging.
     """
     # Subject context (best-effort from Airtable fields present on the conversation row)
-    address = (
-        convo_fields.get("Property Address")
-        or convo_fields.get("Address")
-        or convo_fields.get("address")
-        or ""
-    )
-    city    = convo_fields.get("City") or ""
-    state   = convo_fields.get("State") or ""
+    address = convo_fields.get("Property Address") or convo_fields.get("Address") or convo_fields.get("address") or ""
+    city = convo_fields.get("City") or ""
+    state = convo_fields.get("State") or ""
     zipcode = convo_fields.get("Zip") or convo_fields.get("Zip Code") or ""
 
     subject_sqft: Optional[float] = None
@@ -298,8 +306,8 @@ def run_ai_closer(from_phone: str, inbound_text: str, convo_fields: Dict[str, An
 
     # 2) Fetch comps
     dm_comps = _fetch_dealmachine_comps(address, city, state, zipcode)
-    z_comps  = _fetch_zillow_comps(address, city, state, zipcode)
-    comps    = _normalize_comps(dm_comps, z_comps)
+    z_comps = _fetch_zillow_comps(address, city, state, zipcode)
+    comps = _normalize_comps(dm_comps, z_comps)
 
     # 3) Estimate ARV (fallback to seller ask uplift if nothing available)
     arv = _estimate_arv(comps, subject_sqft)

@@ -1,7 +1,7 @@
 # sms/status_handler.py
 from __future__ import annotations
 
-import os, re, json, traceback, hashlib
+import os, re, traceback, hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -26,37 +26,42 @@ except Exception:
 router = APIRouter(tags=["Status"])
 
 # ---------------- env / config ----------------
-AIRTABLE_API_KEY      = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE     = os.getenv("LEADS_CONVOS_BASE")
-TEMPLATES_TABLE_NAME  = os.getenv("TEMPLATES_TABLE", "Templates")
-CONVERSATIONS_TABLE   = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
+TEMPLATES_TABLE_NAME = os.getenv("TEMPLATES_TABLE", "Templates")
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
 # Template KPI fields (override via .env if your field names differ)
 TEMPLATE_DELIVERED_FIELD = os.getenv("TEMPLATE_DELIVERED_FIELD", "Delivered")
-TEMPLATE_FAILED_FIELD    = os.getenv("TEMPLATE_FAILED_FIELD", "Failed Deliveries")
+TEMPLATE_FAILED_FIELD = os.getenv("TEMPLATE_FAILED_FIELD", "Failed Deliveries")
 
 # Optional shared secret (header: X-Webhook-Token)
 WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN") or os.getenv("CRON_TOKEN") or os.getenv("TEXTGRID_AUTH_TOKEN")
 
 # Redis / Upstash for idempotency
-REDIS_URL  = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
-REDIS_TLS  = os.getenv("REDIS_TLS", "true").lower() in ("1", "true", "yes")
-UPSTASH_REDIS_REST_URL   = os.getenv("UPSTASH_REDIS_REST_URL")  # e.g. https://xxxxx.upstash.io
+REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
+REDIS_TLS = os.getenv("REDIS_TLS", "true").lower() in ("1", "true", "yes")
+UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")  # e.g. https://xxxxx.upstash.io
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 KEY_PREFIX = os.getenv("RATE_LIMIT_KEY_PREFIX", "sms")  # reuse prefix to namespace keys
+
 
 # ---------------- small helpers ----------------
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def _norm(s: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else str(s)
 
+
 def _digits_only(v: Any) -> Optional[str]:
-    if not isinstance(v, str): return None
+    if not isinstance(v, str):
+        return None
     ds = "".join(re.findall(r"\d+", v))
     return ds if len(ds) >= 10 else None
+
 
 def _get_table(base: str, table: str):
     """
@@ -71,6 +76,7 @@ def _get_table(base: str, table: str):
         traceback.print_exc()
         return None
 
+
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
         one = tbl.all(max_records=1)
@@ -79,6 +85,7 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         keys = []
     return {_norm(k): k for k in keys}
 
+
 def _remap_existing_only(tbl, payload: Dict) -> Dict:
     amap = _auto_field_map(tbl)
     if not amap:
@@ -86,8 +93,10 @@ def _remap_existing_only(tbl, payload: Dict) -> Dict:
     out = {}
     for k, v in payload.items():
         mk = amap.get(_norm(k))
-        if mk: out[mk] = v
+        if mk:
+            out[mk] = v
     return out
+
 
 def _safe_update(tbl, rec_id: str, patch: Dict):
     try:
@@ -97,12 +106,14 @@ def _safe_update(tbl, rec_id: str, patch: Dict):
         traceback.print_exc()
         return None
 
+
 def _safe_get(tbl, rec_id: str):
     try:
         return tbl.get(rec_id)
     except Exception:
         traceback.print_exc()
         return None
+
 
 def _increment_numeric(tbl, rec_id: str, field_name: str, by: int = 1) -> bool:
     """
@@ -124,6 +135,7 @@ def _increment_numeric(tbl, rec_id: str, field_name: str, by: int = 1) -> bool:
     except Exception:
         traceback.print_exc()
         return False
+
 
 # ---------------- idempotency store (sid) ----------------
 class _Idem:
@@ -162,9 +174,7 @@ class _Idem:
             try:
                 # Check
                 g = requests.post(
-                    f"{UPSTASH_REDIS_REST_URL}/get/{key}",
-                    headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
-                    timeout=2
+                    f"{UPSTASH_REDIS_REST_URL}/get/{key}", headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}, timeout=2
                 )
                 if g.ok and g.json().get("result") is not None:
                     return True
@@ -173,7 +183,7 @@ class _Idem:
                     f"{UPSTASH_REDIS_REST_URL}/pipeline",
                     json=[["SETNX", key, "1"], ["EXPIRE", key, "21600"]],
                     headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
-                    timeout=2
+                    timeout=2,
                 )
             except Exception:
                 traceback.print_exc()
@@ -184,11 +194,14 @@ class _Idem:
         self._mem.add(key)
         return False
 
+
 IDEM = _Idem()
+
 
 # ---------------- parser ----------------
 def _extract_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize keys across providers."""
+
     def pick(d: Dict, *keys):
         for k in keys:
             if k in d:
@@ -208,6 +221,7 @@ def _extract_payload(data: Dict[str, Any]) -> Dict[str, Any]:
         norm = status or "sent"
 
     return {"sid": sid, "status": norm, "template_id": template_id}
+
 
 # ---------------- template resolver (fallback from Conversations) ----------------
 def _resolve_template_from_convos(sid: Optional[str]) -> Optional[str]:
@@ -236,6 +250,7 @@ def _resolve_template_from_convos(sid: Optional[str]) -> Optional[str]:
         traceback.print_exc()
         return None
 
+
 # ---------------- KPI logger ----------------
 def log_template_kpi(template_id: str, delivered: bool) -> None:
     if not template_id or not (AIRTABLE_API_KEY and LEADS_CONVOS_BASE and _AirTable):
@@ -251,6 +266,7 @@ def log_template_kpi(template_id: str, delivered: bool) -> None:
         print(f"📊 Template {template_id} KPI incremented → {field}")
     else:
         print(f"⚠️ KPI field '{field}' not found on Templates; no update performed")
+
 
 # ---------------- route ----------------
 @router.post("/status")
@@ -285,8 +301,8 @@ async def delivery_status(
         data = {}
 
     parsed = _extract_payload(data)
-    sid         = parsed.get("sid")
-    status      = parsed.get("status")
+    sid = parsed.get("sid")
+    status = parsed.get("status")
     template_id = parsed.get("template_id")
 
     print(f"📡 Status webhook | sid={sid or 'N/A'} | status={status or 'N/A'}")

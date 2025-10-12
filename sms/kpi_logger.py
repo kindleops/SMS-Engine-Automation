@@ -13,13 +13,11 @@ try:
 except Exception:  # pyairtable missing or import error
     _RealTable = None
 
+
 class Table:  # thin wrapper so symbol 'Table' always exists
     def __init__(self, api_key: str, base_id: str, table_name: str):
         if _RealTable is None:
-            raise ImportError(
-                "pyairtable is not installed or failed to import. "
-                "Install with: pip install pyairtable"
-            )
+            raise ImportError("pyairtable is not installed or failed to import. Install with: pip install pyairtable")
         self._t = _RealTable(api_key, base_id, table_name)
 
     def all(self, **kwargs):
@@ -36,9 +34,9 @@ class Table:  # thin wrapper so symbol 'Table' always exists
 # ENV / CONFIG
 # -----------------------
 AIRTABLE_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-PERF_BASE    = os.getenv("PERFORMANCE_BASE")
-KPI_TABLE    = os.getenv("KPI_TABLE_NAME", "KPIs")
-KPI_TZ       = os.getenv("KPI_TZ", "America/Chicago")  # business timezone
+PERF_BASE = os.getenv("PERFORMANCE_BASE")
+KPI_TABLE = os.getenv("KPI_TABLE_NAME", "KPIs")
+KPI_TZ = os.getenv("KPI_TZ", "America/Chicago")  # business timezone
 
 try:
     from zoneinfo import ZoneInfo
@@ -57,8 +55,10 @@ def _tz_now():
             pass
     return datetime.now(timezone.utc)
 
+
 def _today_local_str() -> str:
     return _tz_now().date().isoformat()
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -77,8 +77,10 @@ def _kpi_table() -> Optional[Table]:
         traceback.print_exc()
         return None
 
+
 def _norm(s):  # normalize field names
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 
 def _auto_field_map(tbl: Table) -> Dict[str, str]:
     try:
@@ -87,6 +89,7 @@ def _auto_field_map(tbl: Table) -> Dict[str, str]:
     except Exception:
         keys = []
     return {_norm(k): k for k in keys}
+
 
 def _remap_existing_only(tbl: Table, payload: Dict) -> Dict:
     amap = _auto_field_map(tbl)
@@ -98,6 +101,7 @@ def _remap_existing_only(tbl: Table, payload: Dict) -> Dict:
         if mk:
             out[mk] = v
     return out
+
 
 def _fquote(s: str) -> str:
     """Escape single quotes for Airtable formulas."""
@@ -165,13 +169,7 @@ def log_kpi(
         # Overwrite/upsert logic (today + metric + campaign)
         if overwrite:
             try:
-                formula = (
-                    f"AND("
-                    f"{{Metric}}='{_fquote(metric)}',"
-                    f"{{Date}}='{_fquote(today)}',"
-                    f"{{Campaign}}='{_fquote(campaign)}'"
-                    f")"
-                )
+                formula = f"AND({{Metric}}='{_fquote(metric)}',{{Date}}='{_fquote(today)}',{{Campaign}}='{_fquote(campaign)}')"
                 existing = kpi_tbl.all(formula=formula, max_records=1)
                 if existing:
                     rec_id = existing[0]["id"]

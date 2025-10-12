@@ -7,9 +7,10 @@ import re
 import traceback
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # --- pyairtable shims: support Api.table(...) OR direct Table(...) ---
@@ -34,44 +35,45 @@ except Exception:
 # ======================
 ALERT_PHONE: str | None = os.getenv("ALERT_PHONE")
 ALERT_EMAIL_WEBHOOK: str | None = os.getenv("ALERT_EMAIL_WEBHOOK")
-OPT_OUT_THRESHOLD: float = float(os.getenv("OPT_OUT_ALERT_THRESHOLD", "2.5"))   # %
+OPT_OUT_THRESHOLD: float = float(os.getenv("OPT_OUT_ALERT_THRESHOLD", "2.5"))  # %
 DELIVERY_THRESHOLD: float = float(os.getenv("DELIVERY_ALERT_THRESHOLD", "90"))  # %
 COOLDOWN_HOURS: int = int(os.getenv("OPT_OUT_ALERT_COOLDOWN_HOURS", "24"))
 
 # ======================
 # Env: keys + bases
 # ======================
-MAIN_KEY      = os.getenv("AIRTABLE_API_KEY")
+MAIN_KEY = os.getenv("AIRTABLE_API_KEY")
 REPORTING_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or MAIN_KEY
 
 LEADS_BASE = os.getenv("LEADS_CONVOS_BASE")
-PERF_BASE  = os.getenv("PERFORMANCE_BASE")
+PERF_BASE = os.getenv("PERFORMANCE_BASE")
 
 # ======================
 # Table names
 # ======================
-CAMPAIGNS_TABLE     = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+CAMPAIGNS_TABLE = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-KPIS_TABLE          = os.getenv("KPIS_TABLE_NAME", "KPIs")
-RUNS_TABLE          = os.getenv("RUNS_TABLE_NAME", "Runs/Logs")
+KPIS_TABLE = os.getenv("KPIS_TABLE_NAME", "KPIs")
+RUNS_TABLE = os.getenv("RUNS_TABLE_NAME", "Runs/Logs")
 
 # ======================
 # Conversations field mappings (from .env)
 # ======================
-CONV_FROM_FIELD         = os.getenv("CONV_FROM_FIELD", "phone")
-CONV_TO_FIELD           = os.getenv("CONV_TO_FIELD", "to_number")
-CONV_MESSAGE_FIELD      = os.getenv("CONV_MESSAGE_FIELD", "message")
-CONV_STATUS_FIELD       = os.getenv("CONV_STATUS_FIELD", "status")
-CONV_DIRECTION_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
-CONV_TEXTGRID_ID_FIELD  = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-CONV_RECEIVED_AT_FIELD  = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
-CONV_INTENT_FIELD       = os.getenv("CONV_INTENT_FIELD", "intent_detected")
+CONV_FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
+CONV_TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")
+CONV_MESSAGE_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
+CONV_STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
+CONV_DIRECTION_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
+CONV_TEXTGRID_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
+CONV_RECEIVED_AT_FIELD = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
+CONV_INTENT_FIELD = os.getenv("CONV_INTENT_FIELD", "intent_detected")
 CONV_PROCESSED_BY_FIELD = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
-CONV_SENT_AT_FIELD      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
+CONV_SENT_AT_FIELD = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 
 # Normalize statuses to UPPER for matching
 DELIVERED_STATES = {"DELIVERED", "SENT"}
-FAILED_STATES    = {"FAILED", "UNDELIVERED", "UNDELIVERABLE"}
+FAILED_STATES = {"FAILED", "UNDELIVERED", "UNDELIVERABLE"}
+
 
 # ======================
 # Airtable table factory (version-agnostic)
@@ -94,27 +96,33 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
         traceback.print_exc()
     return None
 
+
 @lru_cache(maxsize=None)
 def _t_campaigns():
     return _make_table(MAIN_KEY, LEADS_BASE, CAMPAIGNS_TABLE)
+
 
 @lru_cache(maxsize=None)
 def _t_convos():
     return _make_table(MAIN_KEY, LEADS_BASE, CONVERSATIONS_TABLE)
 
+
 @lru_cache(maxsize=None)
 def _t_kpis():
     return _make_table(REPORTING_KEY, PERF_BASE, KPIS_TABLE)
 
+
 @lru_cache(maxsize=None)
 def _t_runs():
     return _make_table(REPORTING_KEY, PERF_BASE, RUNS_TABLE)
+
 
 # ======================
 # Helpers
 # ======================
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _parse_dt(s: str | None) -> datetime | None:
     if not s:
@@ -124,8 +132,10 @@ def _parse_dt(s: str | None) -> datetime | None:
     except Exception:
         return None
 
+
 def _norm(s: str) -> str:
-    return re.sub(r'[^a-z0-9]+', '', s.strip().lower()) if isinstance(s, str) else s
+    return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 
 def _auto_field_map(table, sample_record_id: Optional[str] = None) -> dict[str, str]:
     """normalized_field_name -> actual Airtable field name for this table."""
@@ -140,6 +150,7 @@ def _auto_field_map(table, sample_record_id: Optional[str] = None) -> dict[str, 
         pass
     return {_norm(k): k for k in keys}
 
+
 def _remap_existing_only(table, payload: dict, sample_record_id: Optional[str] = None) -> dict:
     """Keep only keys that already exist on the table (prevents 422 UNKNOWN_FIELD_NAME)."""
     amap = _auto_field_map(table, sample_record_id)
@@ -150,16 +161,19 @@ def _remap_existing_only(table, payload: dict, sample_record_id: Optional[str] =
             out[ak] = v
     return out
 
+
 def _fbf_equals(field_name: str, value: str) -> str:
     """Safe filterByFormula '=' for string primary field comparisons."""
     safe = (value or "").replace("'", r"\'")
     return f"{{{field_name}}}='{safe}'"
+
 
 def _safe_len(x) -> int:
     try:
         return len(x)
     except Exception:
         return 0
+
 
 def _notify(msg: str) -> None:
     print(f"🚨 ALERT: {msg}")
@@ -173,9 +187,11 @@ def _notify(msg: str) -> None:
     if ALERT_EMAIL_WEBHOOK:
         try:
             import requests
+
             requests.post(ALERT_EMAIL_WEBHOOK, json={"text": msg}, timeout=10)
         except Exception as e:
             print(f"❌ Webhook alert failed: {e}")
+
 
 def _should_alert(last_alert_at, rate: float, threshold: float) -> bool:
     if rate < threshold:
@@ -187,6 +203,7 @@ def _should_alert(last_alert_at, rate: float, threshold: float) -> bool:
         return True
     return datetime.now(timezone.utc) - dt >= timedelta(hours=COOLDOWN_HOURS)
 
+
 def _mark_alerted(campaigns_tbl, camp_id: str):
     try:
         patch = _remap_existing_only(campaigns_tbl, {"last_alert_at": _now_iso()}, sample_record_id=camp_id)
@@ -195,11 +212,13 @@ def _mark_alerted(campaigns_tbl, camp_id: str):
     except Exception:
         traceback.print_exc()
 
+
 def _status(rec, field=CONV_STATUS_FIELD) -> str:
     try:
         return str(rec["fields"].get(field, "")).strip().upper()
     except Exception:
         return ""
+
 
 def _body(rec) -> str:
     try:
@@ -207,11 +226,13 @@ def _body(rec) -> str:
     except Exception:
         return ""
 
+
 def _direction(rec) -> str:
     try:
         return str(rec["fields"].get(CONV_DIRECTION_FIELD, "")).strip().upper()
     except Exception:
         return ""
+
 
 def _campaign_match_formula(campaign_name: str) -> str:
     """
@@ -220,6 +241,7 @@ def _campaign_match_formula(campaign_name: str) -> str:
     Using equality on the Campaign name works if Campaigns primary field == Name.
     """
     return _fbf_equals("Campaign", campaign_name)
+
 
 # ======================
 # Core
@@ -234,9 +256,9 @@ def update_metrics() -> dict:
     - Updates ONLY existing fields on Campaigns (no 422s)
     """
     campaigns = _t_campaigns()
-    convos    = _t_convos()
-    runs      = _t_runs()
-    kpis      = _t_kpis()
+    convos = _t_convos()
+    runs = _t_runs()
+    kpis = _t_kpis()
 
     if not (campaigns and convos):
         return {"ok": False, "error": "Missing Airtable setup (campaigns/conversations tables)"}
@@ -263,9 +285,7 @@ def update_metrics() -> dict:
 
             # Outbound messages
             try:
-                sent = convos.all(
-                    formula=f"AND({{{CONV_DIRECTION_FIELD}}}='OUT', {fbf_campaign})"
-                )
+                sent = convos.all(formula=f"AND({{{CONV_DIRECTION_FIELD}}}='OUT', {fbf_campaign})")
             except Exception:
                 traceback.print_exc()
                 sent = []
@@ -273,13 +293,11 @@ def update_metrics() -> dict:
             total_sent = _safe_len(sent)
 
             delivered = [r for r in sent if _status(r) in DELIVERED_STATES]
-            failed    = [r for r in sent if _status(r) in FAILED_STATES]
+            failed = [r for r in sent if _status(r) in FAILED_STATES]
 
             # Inbound (responses)
             try:
-                inbound = convos.all(
-                    formula=f"AND({{{CONV_DIRECTION_FIELD}}}='IN', {fbf_campaign})"
-                )
+                inbound = convos.all(formula=f"AND({{{CONV_DIRECTION_FIELD}}}='IN', {fbf_campaign})")
             except Exception:
                 traceback.print_exc()
                 inbound = []
@@ -289,7 +307,7 @@ def update_metrics() -> dict:
             total_optouts = _safe_len(optouts)
 
             delivery_rate = round((len(delivered) / total_sent * 100), 2) if total_sent else 0.0
-            optout_rate   = round((total_optouts / total_sent * 100), 2) if total_sent else 0.0
+            optout_rate = round((total_optouts / total_sent * 100), 2) if total_sent else 0.0
 
             # ---- update Campaigns (existing fields only)
             payload = {
@@ -333,34 +351,41 @@ def update_metrics() -> dict:
                     ("OPTOUT_RATE", optout_rate),
                 ]:
                     try:
-                        kpis.create(_remap_existing_only(kpis, {
-                            "Campaign": camp_name,
-                            "Metric": metric,
-                            "Value": float(value) if isinstance(value, (int, float)) else 0.0,
-                            "Date": today,
-                            "Timestamp": _now_iso(),
-                        }))
+                        kpis.create(
+                            _remap_existing_only(
+                                kpis,
+                                {
+                                    "Campaign": camp_name,
+                                    "Metric": metric,
+                                    "Value": float(value) if isinstance(value, (int, float)) else 0.0,
+                                    "Date": today,
+                                    "Timestamp": _now_iso(),
+                                },
+                            )
+                        )
                     except Exception:
                         traceback.print_exc()
 
             # ---- summary
-            summary.append({
-                "campaign": camp_name,
-                "sent": total_sent,
-                "delivered": len(delivered),
-                "failed": len(failed),
-                "responses": responses,
-                "optouts": total_optouts,
-                "delivery_rate": delivery_rate,
-                "optout_rate": optout_rate,
-            })
+            summary.append(
+                {
+                    "campaign": camp_name,
+                    "sent": total_sent,
+                    "delivered": len(delivered),
+                    "failed": len(failed),
+                    "responses": responses,
+                    "optouts": total_optouts,
+                    "delivery_rate": delivery_rate,
+                    "optout_rate": optout_rate,
+                }
+            )
 
             # ---- globals
-            global_stats["sent"]      += total_sent
+            global_stats["sent"] += total_sent
             global_stats["delivered"] += len(delivered)
-            global_stats["failed"]    += len(failed)
+            global_stats["failed"] += len(failed)
             global_stats["responses"] += responses
-            global_stats["optouts"]   += total_optouts
+            global_stats["optouts"] += total_optouts
 
         except Exception:
             print(f"❌ Metrics update failed for Campaign {camp.get('id')}")
@@ -369,20 +394,25 @@ def update_metrics() -> dict:
     # ---- Global KPIs
     if kpis:
         for metric, value in [
-            ("TOTAL_SENT",  global_stats["sent"]),
-            ("DELIVERED",   global_stats["delivered"]),
-            ("FAILED",      global_stats["failed"]),
-            ("RESPONSES",   global_stats["responses"]),
-            ("OPTOUTS",     global_stats["optouts"]),
+            ("TOTAL_SENT", global_stats["sent"]),
+            ("DELIVERED", global_stats["delivered"]),
+            ("FAILED", global_stats["failed"]),
+            ("RESPONSES", global_stats["responses"]),
+            ("OPTOUTS", global_stats["optouts"]),
         ]:
             try:
-                kpis.create(_remap_existing_only(kpis, {
-                    "Campaign": "ALL",
-                    "Metric": metric,
-                    "Value": float(value),
-                    "Date": today,
-                    "Timestamp": _now_iso(),
-                }))
+                kpis.create(
+                    _remap_existing_only(
+                        kpis,
+                        {
+                            "Campaign": "ALL",
+                            "Metric": metric,
+                            "Value": float(value),
+                            "Date": today,
+                            "Timestamp": _now_iso(),
+                        },
+                    )
+                )
             except Exception:
                 traceback.print_exc()
 
@@ -391,12 +421,17 @@ def update_metrics() -> dict:
     runs_tbl = _t_runs()
     if runs_tbl:
         try:
-            run_record = runs_tbl.create(_remap_existing_only(runs_tbl, {
-                "Type": "METRICS_UPDATE",
-                "Processed": float(global_stats["sent"]),
-                "Breakdown": json.dumps(summary, indent=2),
-                "Timestamp": _now_iso(),
-            }))
+            run_record = runs_tbl.create(
+                _remap_existing_only(
+                    runs_tbl,
+                    {
+                        "Type": "METRICS_UPDATE",
+                        "Processed": float(global_stats["sent"]),
+                        "Breakdown": json.dumps(summary, indent=2),
+                        "Timestamp": _now_iso(),
+                    },
+                )
+            )
             run_id = (run_record or {}).get("id")
         except Exception:
             traceback.print_exc()

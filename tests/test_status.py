@@ -2,6 +2,7 @@ import pytest
 from fastapi import HTTPException
 import sms.inbound_webhook as inbound_webhook
 
+
 def test_status_delivered(monkeypatch):
     called = {}
 
@@ -19,6 +20,7 @@ def test_status_delivered(monkeypatch):
     assert result["ok"] is True
     assert called["delivered"] == "+18885551234"
 
+
 def test_status_failed(monkeypatch):
     called = {}
 
@@ -35,6 +37,7 @@ def test_status_failed(monkeypatch):
 
     assert result["ok"] is True
     assert called["failed"] == "+18885551234"
+
 
 def test_status_missing_fields():
     with pytest.raises(HTTPException):

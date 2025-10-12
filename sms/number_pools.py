@@ -16,41 +16,42 @@ except Exception:
     _ATTable = None
 
 try:
-    from pyairtable import Api as _ATApi      # v2 Api().table(...)
+    from pyairtable import Api as _ATApi  # v2 Api().table(...)
 except Exception:
     _ATApi = None
 
 # =========================
 # ENV / CONFIG
 # =========================
-CONTROL_BASE_ID   = os.getenv("CAMPAIGN_CONTROL_BASE")
-NUMBERS_TABLE     = os.getenv("NUMBERS_TABLE", "Numbers")
-AIRTABLE_KEY      = os.getenv("AIRTABLE_API_KEY")
+CONTROL_BASE_ID = os.getenv("CAMPAIGN_CONTROL_BASE")
+NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
+AIRTABLE_KEY = os.getenv("AIRTABLE_API_KEY")
 DAILY_LIMIT_FALLBACK = int(os.getenv("DAILY_LIMIT", "750"))
 
 # =========================
 # FIELD NAMES (Numbers)
 # =========================
-F_NUMBER           = "Number"            # E.164 DID (preferred)
-F_FRIENDLY         = "Friendly Name"     # optional alt storage for DID
-F_MARKET           = "Market"
-F_MARKETS_MULTI    = "Markets"
-F_ACTIVE           = "Active"
-F_STATUS           = "Status"            # treat "Paused" as inactive
+F_NUMBER = "Number"  # E.164 DID (preferred)
+F_FRIENDLY = "Friendly Name"  # optional alt storage for DID
+F_MARKET = "Market"
+F_MARKETS_MULTI = "Markets"
+F_ACTIVE = "Active"
+F_STATUS = "Status"  # treat "Paused" as inactive
 
-F_SENT_TODAY       = "Sent Today"
-F_DELIV_TODAY      = "Delivered Today"
-F_FAILED_TODAY     = "Failed Today"
-F_OPTOUT_TODAY     = "Opt-Outs Today"
+F_SENT_TODAY = "Sent Today"
+F_DELIV_TODAY = "Delivered Today"
+F_FAILED_TODAY = "Failed Today"
+F_OPTOUT_TODAY = "Opt-Outs Today"
 
-F_SENT_TOTAL       = "Sent Total"
-F_DELIV_TOTAL      = "Delivered Total"
-F_FAILED_TOTAL     = "Failed Total"
-F_OPTOUT_TOTAL     = "Opt-Outs Total"
+F_SENT_TOTAL = "Sent Total"
+F_DELIV_TOTAL = "Delivered Total"
+F_FAILED_TOTAL = "Failed Total"
+F_OPTOUT_TOTAL = "Opt-Outs Total"
 
-F_REMAINING        = "Remaining"
-F_DAILY_RESET      = "Daily Reset"
-F_LAST_USED        = "Last Used"
+F_REMAINING = "Remaining"
+F_DAILY_RESET = "Daily Reset"
+F_LAST_USED = "Last Used"
+
 
 # =========================
 # Time & parsing helpers
@@ -58,8 +59,10 @@ F_LAST_USED        = "Last Used"
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def _today_str() -> str:
     return _now().date().isoformat()
+
 
 def _parse_dt(s: str | None) -> Optional[datetime]:
     if not s:
@@ -69,8 +72,10 @@ def _parse_dt(s: str | None) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 
 def _digits_only(s: str | None) -> Optional[str]:
     if not isinstance(s, str):
@@ -78,9 +83,11 @@ def _digits_only(s: str | None) -> Optional[str]:
     ds = "".join(re.findall(r"\d+", s))
     return ds if len(ds) >= 10 else None
 
+
 def _same_did(a: str | None, b: str | None) -> bool:
     da, db = _digits_only(a), _digits_only(b)
     return bool(da and db and da == db)
+
 
 # =========================
 # Airtable access (Table shim)
@@ -102,12 +109,14 @@ def _make_table(base_id: str, table_name: str):
         traceback.print_exc()
     return None
 
+
 @lru_cache(maxsize=1)
 def _numbers_tbl():
     tbl = _make_table(CONTROL_BASE_ID, NUMBERS_TABLE)
     if not tbl:
         print("⚠️ NumberPools: Airtable not configured; running in MOCK mode.")
     return tbl
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
@@ -116,6 +125,7 @@ def _auto_field_map(tbl) -> Dict[str, str]:
     except Exception:
         keys = []
     return {_norm(k): k for k in keys}
+
 
 def _remap_existing_only(tbl, payload: Dict) -> Dict:
     amap = _auto_field_map(tbl)
@@ -128,6 +138,7 @@ def _remap_existing_only(tbl, payload: Dict) -> Dict:
             out[ak] = v
     return out
 
+
 # =========================
 # Remaining & daily reset
 # =========================
@@ -138,8 +149,9 @@ def _remaining_calc(f: Dict) -> int:
         except Exception:
             pass
     sent_today = int(f.get(F_SENT_TODAY) or 0)
-    daily_cap  = int(f.get(F_DAILY_RESET) or DAILY_LIMIT_FALLBACK)
+    daily_cap = int(f.get(F_DAILY_RESET) or DAILY_LIMIT_FALLBACK)
     return max(0, daily_cap - sent_today)
+
 
 def _reset_daily_if_needed(rec: Dict) -> Dict:
     tbl = _numbers_tbl()
@@ -166,6 +178,7 @@ def _reset_daily_if_needed(rec: Dict) -> Dict:
             traceback.print_exc()
     return rec
 
+
 # =========================
 # Lookups / Filtering
 # =========================
@@ -176,6 +189,7 @@ def _is_active(f: Dict) -> bool:
         return False
     return True
 
+
 def _supports_market(f: Dict, market: Optional[str]) -> bool:
     if not market:
         return True
@@ -183,6 +197,7 @@ def _supports_market(f: Dict, market: Optional[str]) -> bool:
         return True
     ms = f.get(F_MARKETS_MULTI)
     return isinstance(ms, list) and (market in ms)
+
 
 def _all_numbers() -> List[Dict]:
     tbl = _numbers_tbl()
@@ -193,6 +208,7 @@ def _all_numbers() -> List[Dict]:
     except Exception:
         traceback.print_exc()
         return []
+
 
 def _find_record_by_number(did: str) -> Optional[Dict]:
     tbl = _numbers_tbl()
@@ -207,6 +223,7 @@ def _find_record_by_number(did: str) -> Optional[Dict]:
     except Exception:
         traceback.print_exc()
         return None
+
 
 # =========================
 # Picker
@@ -257,6 +274,7 @@ def get_from_number(market: Optional[str] = None) -> str:
 
     return did
 
+
 # =========================
 # Counter increments
 # =========================
@@ -292,23 +310,29 @@ def _bump(row: Dict, day_field: str, total_field: str, delta: int = 1, dec_remai
     except Exception:
         traceback.print_exc()
 
+
 def _ensure_row(did: str) -> Dict:
     row = _find_record_by_number(did)
     if not row:
         raise RuntimeError(f"🚨 Number not found in Numbers table: {did}")
     return row
 
+
 def increment_sent(did: str):
     _bump(_ensure_row(did), F_SENT_TODAY, F_SENT_TOTAL, delta=1, dec_remaining=True)
+
 
 def increment_delivered(did: str):
     _bump(_ensure_row(did), F_DELIV_TODAY, F_DELIV_TOTAL, delta=1, dec_remaining=False)
 
+
 def increment_failed(did: str):
     _bump(_ensure_row(did), F_FAILED_TODAY, F_FAILED_TOTAL, delta=1, dec_remaining=False)
 
+
 def increment_opt_out(did: str):
     _bump(_ensure_row(did), F_OPTOUT_TODAY, F_OPTOUT_TOTAL, delta=1, dec_remaining=False)
+
 
 # =========================
 # Convenience

@@ -17,7 +17,7 @@ try:
 except Exception:
     _PyTable = None
 try:
-    from pyairtable import Api as _PyApi      # v2 style
+    from pyairtable import Api as _PyApi  # v2 style
 except Exception:
     _PyApi = None
 
@@ -41,15 +41,15 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
 # -----------------------------
 # Env-driven Field Mapping
 # -----------------------------
-STATUS_FIELD         = os.getenv("CONV_STATUS_FIELD", "status")
-RETRY_COUNT_FIELD    = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
-RETRY_AFTER_FIELD    = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
-LAST_ERROR_FIELD     = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
-LAST_RETRY_AT_FIELD  = os.getenv("CONV_LAST_RETRY_AT_FIELD", "last_retry_at")
+STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
+RETRY_COUNT_FIELD = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
+RETRY_AFTER_FIELD = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
+LAST_ERROR_FIELD = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
+LAST_RETRY_AT_FIELD = os.getenv("CONV_LAST_RETRY_AT_FIELD", "last_retry_at")
 
-CONVERSATIONS_TABLE  = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-AIRTABLE_API_KEY     = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE    = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 
 
 # -----------------------------
@@ -61,6 +61,7 @@ def _now_iso() -> str:
 
 def _norm(s: str) -> str:
     import re
+
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
 
 

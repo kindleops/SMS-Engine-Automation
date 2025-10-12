@@ -4,6 +4,7 @@ from .devops_logger import log_devops
 
 FASTAPI_URL = os.getenv("FASTAPI_URL", "http://localhost:8000")
 
+
 def run():
     tbl = get_table("DEVOPS_BASE", "Health Checks")
     if not tbl:
@@ -30,6 +31,7 @@ def run():
             log_devops("Health Check", "FastAPI", {"mode": mode, "error": str(e)}, status="FAIL", severity="Warn")
             results[mode] = {"status": "ERROR", "error": str(e)}
     return {"ok": True, "results": results}
+
 
 if __name__ == "__main__":
     print(run())

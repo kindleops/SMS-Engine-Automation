@@ -26,7 +26,7 @@ try:
 except Exception:
     _PyTable = None
 try:
-    from pyairtable import Api as _PyApi      # v2 style
+    from pyairtable import Api as _PyApi  # v2 style
 except Exception:
     _PyApi = None
 
@@ -49,25 +49,25 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
 
 
 # ----------------- ENV / TABLES / FIELDS -----------------
-AIRTABLE_API_KEY   = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE  = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-CONVOS_TABLE_NAME  = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CONVOS_TABLE_NAME = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
 # Retry tuning
-MAX_RETRIES            = int(os.getenv("MAX_RETRIES", "3"))
-BASE_BACKOFF_MINUTES   = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
 
 # Field mapping (safe defaults, all env-driven)
-PHONE_FIELD            = os.getenv("CONV_FROM_FIELD", "phone")
-MESSAGE_FIELD          = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD           = os.getenv("CONV_STATUS_FIELD", "status")
-DIRECTION_FIELD        = os.getenv("CONV_DIRECTION_FIELD", "direction")
+PHONE_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
+MESSAGE_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
+STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
+DIRECTION_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
 
-RETRY_COUNT_FIELD      = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
-RETRY_AFTER_FIELD      = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
-RETRIED_AT_FIELD       = os.getenv("CONV_RETRIED_AT_FIELD", "retried_at")
-LAST_ERROR_FIELD       = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
-PERMANENT_FAIL_FIELD   = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
+RETRY_COUNT_FIELD = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
+RETRY_AFTER_FIELD = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
+RETRIED_AT_FIELD = os.getenv("CONV_RETRIED_AT_FIELD", "retried_at")
+LAST_ERROR_FIELD = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
+PERMANENT_FAIL_FIELD = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
 
 FAILED_STATES = {"FAILED", "DELIVERY_FAILED", "UNDELIVERED", "UNDELIVERABLE", "THROTTLED", "NEEDS_RETRY"}
 
@@ -76,8 +76,10 @@ FAILED_STATES = {"FAILED", "DELIVERY_FAILED", "UNDELIVERED", "UNDELIVERABLE", "T
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def _now_iso() -> str:
     return _now().isoformat()
+
 
 def _parse_dt(s: Any) -> Optional[datetime]:
     if not s:
@@ -87,9 +89,12 @@ def _parse_dt(s: Any) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def _norm(s: str) -> str:
     import re
+
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     """normalized_field_name -> actual Airtable field name for this table."""
@@ -107,6 +112,7 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         pass
     return {_norm(k): k for k in keys}
 
+
 def _remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Keep only keys that already exist on the table (prevents 422 UNKNOWN_FIELD_NAME)."""
     amap = _auto_field_map(tbl)
@@ -118,6 +124,7 @@ def _remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
         if ak:
             out[ak] = v
     return out
+
 
 def _is_retryable(f: Dict[str, Any]) -> bool:
     # OUT direction
@@ -137,18 +144,30 @@ def _is_retryable(f: Dict[str, Any]) -> bool:
     ra_dt = _parse_dt(ra)
     return (ra_dt is None) or (ra_dt <= _now())
 
+
 def _backoff_delay(retry_count: int) -> timedelta:
     # 30m, 60m, 120m ... with BASE_BACKOFF_MINUTES as factor
     return timedelta(minutes=BASE_BACKOFF_MINUTES * max(1, 2 ** max(0, retry_count - 1)))
 
+
 def _is_permanent_error(err: str) -> bool:
     text = (err or "").lower()
     signals = [
-        "invalid", "not a valid", "unreachable", "blacklisted", "blocked",
-        "landline", "disconnected", "undeliverable", "unknown subscriber",
-        "unknown destination", "absent subscriber", "rejected by carrier",
+        "invalid",
+        "not a valid",
+        "unreachable",
+        "blacklisted",
+        "blocked",
+        "landline",
+        "disconnected",
+        "undeliverable",
+        "unknown subscriber",
+        "unknown destination",
+        "absent subscriber",
+        "rejected by carrier",
     ]
     return any(sig in text for sig in signals)
+
 
 def _send(phone: str, body: str) -> None:
     """Preferred send path → MessageProcessor, then direct sender, else MOCK."""
@@ -218,7 +237,7 @@ def run_retry(limit: int = 100, view: str | None = None) -> Dict[str, Any]:
         rid = r.get("id")
         f = r.get("fields", {})
         phone = f.get(PHONE_FIELD) or f.get("Phone") or f.get("From")
-        body  = f.get(MESSAGE_FIELD) or f.get("Body") or f.get("message")
+        body = f.get(MESSAGE_FIELD) or f.get("Body") or f.get("message")
         retries_prev = int(f.get(RETRY_COUNT_FIELD) or f.get("retry_count") or 0)
 
         if not (rid and phone and body):
@@ -246,13 +265,16 @@ def run_retry(limit: int = 100, view: str | None = None) -> Dict[str, Any]:
             safe = _remap_existing_only(convos, patch)
             if not safe:
                 # fallbacks (in case names differ in case)
-                safe = _remap_existing_only(convos, {
-                    "Status": "SENT",
-                    "retry_count": retries_prev + 1,
-                    "retried_at": _now_iso(),
-                    "last_retry_error": None,
-                    "retry_after": None,
-                })
+                safe = _remap_existing_only(
+                    convos,
+                    {
+                        "Status": "SENT",
+                        "retry_count": retries_prev + 1,
+                        "retried_at": _now_iso(),
+                        "last_retry_error": None,
+                        "retry_after": None,
+                    },
+                )
             if safe:
                 convos.update(rid, safe)
 

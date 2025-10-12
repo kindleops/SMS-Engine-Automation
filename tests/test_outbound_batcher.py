@@ -1,5 +1,6 @@
 from sms import outbound_batcher
 
+
 def test_reset_daily_quota_runs(monkeypatch):
     """Ensure reset_daily_quotas is called once per new day."""
     called = {}

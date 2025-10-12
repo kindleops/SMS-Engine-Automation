@@ -11,6 +11,7 @@ SYNC = AirtableSync()
 # HEALTHTARGETS is JSON array of objects: [{"name":"sms-api","url":"https://your.app/health"},{"name":"web","url":"..."}]
 TARGETS = os.getenv("HEALTHTARGETS_JSON", "[]")
 
+
 def check(target: dict) -> None:
     name = target.get("name", "unknown")
     url = target.get("url")
@@ -29,6 +30,7 @@ def check(target: dict) -> None:
         latency_ms = int((time.perf_counter() - t0) * 1000)
         SYNC.log_server(name=name, status="DOWN", latency_ms=latency_ms, meta={"error": str(e)})
 
+
 def main():
     try:
         arr = json.loads(TARGETS)
@@ -36,6 +38,7 @@ def main():
         arr = []
     for t in arr:
         check(t)
+
 
 if __name__ == "__main__":
     main()

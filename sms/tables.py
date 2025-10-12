@@ -16,25 +16,25 @@ except Exception:
 # --------- ENV helpers (with synonyms you’ve used elsewhere) ---------
 _KEY_SYNONYMS = {
     "AIRTABLE_ACQUISITIONS_KEY": ["AIRTABLE_API_KEY"],
-    "AIRTABLE_COMPLIANCE_KEY":   ["AIRTABLE_API_KEY"],
-    "AIRTABLE_REPORTING_KEY":    ["AIRTABLE_API_KEY"],
+    "AIRTABLE_COMPLIANCE_KEY": ["AIRTABLE_API_KEY"],
+    "AIRTABLE_REPORTING_KEY": ["AIRTABLE_API_KEY"],
 }
 
 _BASE_SYNONYMS = {
-    "AIRTABLE_LEADS_CONVOS_BASE_ID":      ["LEADS_CONVOS_BASE"],
-    "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID":  ["CAMPAIGN_CONTROL_BASE"],
-    "AIRTABLE_PERFORMANCE_BASE_ID":       ["PERFORMANCE_BASE"],
+    "AIRTABLE_LEADS_CONVOS_BASE_ID": ["LEADS_CONVOS_BASE"],
+    "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID": ["CAMPAIGN_CONTROL_BASE"],
+    "AIRTABLE_PERFORMANCE_BASE_ID": ["PERFORMANCE_BASE"],
 }
 
 _TABLE_SYNONYMS = {
-    "DRIP_TABLE":         ["DRIP_QUEUE_TABLE"],
-    "CONVERSATIONS_TABLE":[],
-    "LEADS_TABLE":        [],
-    "PROSPECTS_TABLE":    [],
-    "CAMPAIGNS_TABLE":    [],
-    "NUMBERS_TABLE":      [],
-    "KPIS_TABLE":         ["KPIS_TABLE_NAME"],      # sometimes referenced as KPIS_TABLE_NAME
-    "RUNS_TABLE":         ["RUNS_TABLE_NAME"],
+    "DRIP_TABLE": ["DRIP_QUEUE_TABLE"],
+    "CONVERSATIONS_TABLE": [],
+    "LEADS_TABLE": [],
+    "PROSPECTS_TABLE": [],
+    "CAMPAIGNS_TABLE": [],
+    "NUMBERS_TABLE": [],
+    "KPIS_TABLE": ["KPIS_TABLE_NAME"],  # sometimes referenced as KPIS_TABLE_NAME
+    "RUNS_TABLE": ["RUNS_TABLE_NAME"],
 }
 
 VERBOSE = os.getenv("TABLES_VERBOSE", "0") in ("1", "true", "yes")
@@ -120,6 +120,7 @@ def get_convos(table_name: str = "Conversations") -> Any | None:
         table_name,
     )
 
+
 @lru_cache(maxsize=None)
 def get_leads(table_name: str = "Leads") -> Any | None:
     """Leads table (Leads/Convos base)."""
@@ -129,6 +130,7 @@ def get_leads(table_name: str = "Leads") -> Any | None:
         "LEADS_TABLE",
         table_name,
     )
+
 
 @lru_cache(maxsize=None)
 def get_prospects(table_name: str = "Prospects") -> Any | None:
@@ -140,6 +142,7 @@ def get_prospects(table_name: str = "Prospects") -> Any | None:
         table_name,
     )
 
+
 @lru_cache(maxsize=None)
 def get_drip(table_name: str = "Drip Queue") -> Any | None:
     """Drip Queue table (Leads/Convos base). Accepts DRIP_TABLE or DRIP_QUEUE_TABLE."""
@@ -149,6 +152,7 @@ def get_drip(table_name: str = "Drip Queue") -> Any | None:
         "DRIP_TABLE",  # synonyms include DRIP_QUEUE_TABLE
         table_name,
     )
+
 
 @lru_cache(maxsize=None)
 def get_campaigns(table_name: str = "Campaigns") -> Any | None:
@@ -160,6 +164,7 @@ def get_campaigns(table_name: str = "Campaigns") -> Any | None:
         table_name,
     )
 
+
 @lru_cache(maxsize=None)
 def get_numbers(table_name: str = "Numbers") -> Any | None:
     """Numbers table (Campaign Control base)."""
@@ -170,6 +175,7 @@ def get_numbers(table_name: str = "Numbers") -> Any | None:
         table_name,
     )
 
+
 @lru_cache(maxsize=None)
 def get_kpis(table_name: str = "KPIs") -> Any | None:
     """KPIs table (Performance base). Accepts KPIS_TABLE or KPIS_TABLE_NAME."""
@@ -179,6 +185,7 @@ def get_kpis(table_name: str = "KPIs") -> Any | None:
         "KPIS_TABLE",  # synonyms include KPIS_TABLE_NAME
         table_name,
     )
+
 
 @lru_cache(maxsize=None)
 def get_runs(table_name: str = "Runs/Logs") -> Any | None:

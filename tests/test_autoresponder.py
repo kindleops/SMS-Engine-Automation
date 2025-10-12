@@ -13,13 +13,18 @@ def test_autoresponder_basic(monkeypatch):
 
     # Fake Airtable-like table
     class FakeTable:
-        def __init__(self, *a, **k): pass
+        def __init__(self, *a, **k):
+            pass
+
         def all(self, *a, **k):
             return [{"id": "msg1", "fields": {"phone": "+15555550123", "message": "yes"}}]
+
         def first(self, *a, **k):
             return {"id": "rec123", "fields": {"phone": "+15555550123"}}
+
         def create(self, data):
             return {"id": "new_lead", "fields": data}
+
         def update(self, *a, **k):
             return True
 

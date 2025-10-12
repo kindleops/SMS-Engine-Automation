@@ -49,8 +49,14 @@ def _norm_comp_row(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     # Common price keys we might see
     price_keys = [
-        "sold_price", "sale_price", "price", "close_price", "closingPrice",
-        "lastSoldPrice", "zestimate", "amount",
+        "sold_price",
+        "sale_price",
+        "price",
+        "close_price",
+        "closingPrice",
+        "lastSoldPrice",
+        "zestimate",
+        "amount",
     ]
     sqft_keys = ["sqft", "square_feet", "livingArea", "living_area", "area"]
     beds_keys = ["beds", "bedrooms", "bed", "num_beds"]
@@ -146,7 +152,7 @@ def _trim_outliers_by_price(comps: List[Dict[str, Any]], keep_frac: float = 0.8)
     comps_sorted = sorted(comps, key=lambda c: c["price"])
     k = int(round(n * keep_frac))
     start = (n - k) // 2
-    return comps_sorted[start:start + k]
+    return comps_sorted[start : start + k]
 
 
 def _median(values: List[float]) -> Optional[float]:
@@ -164,10 +170,12 @@ def _select_top_by_distance(comps: List[Dict[str, Any]], top_n: int = 5) -> List
         return []
     known = [c for c in comps if c.get("distance_mi") is not None]
     if known:
-        known.sort(key=lambda c: (c["distance_mi"], abs((c.get("sqft") or 0) - (statistics.median([x.get("sqft") or 0 for x in comps]) or 0))))
+        known.sort(
+            key=lambda c: (c["distance_mi"], abs((c.get("sqft") or 0) - (statistics.median([x.get("sqft") or 0 for x in comps]) or 0)))
+        )
         return known[:top_n]
     # distance unknown, just pick by price median vicinity (already trimmed)
-    return comps[:min(top_n, len(comps))]
+    return comps[: min(top_n, len(comps))]
 
 
 # ────────────────────────────────────────────────────────────────────────────

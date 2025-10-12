@@ -24,6 +24,7 @@ except Exception:
 try:
     import pyairtable as _pyat  # the package
     from pyairtable import Api as _Api
+
     try:
         # Real v2 Table class (for advanced fallback if needed)
         from pyairtable.api.table import Table as _RealTable  # type: ignore
@@ -36,6 +37,7 @@ try:
             Table(api_key, base_id, table_name)
         Returns a v2 Table object from Api(api_key).table(base_id, table_name).
         """
+
         def __new__(cls, api_key, base_or_id, table_name, *args, **kwargs):
             # If the caller accidentally passes a Base object, try to use the real ctor.
             try:

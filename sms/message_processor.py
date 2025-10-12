@@ -17,28 +17,30 @@ from sms.retry_handler import handle_retry
 
 
 # ---------- Field mappings (env-overridable) ----------
-FROM_FIELD              = os.getenv("CONV_FROM_FIELD", "phone")          # other party (seller) phone
-TO_FIELD                = os.getenv("CONV_TO_FIELD", "to_number")        # our DID used to send
-MSG_FIELD               = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD            = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD               = os.getenv("CONV_DIRECTION_FIELD", "direction")
-SENT_AT_FIELD           = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-TEXTGRID_ID_FIELD       = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
+FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")  # other party (seller) phone
+TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")  # our DID used to send
+MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
+STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
+DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
+SENT_AT_FIELD = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
+TEXTGRID_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
 
-CONVERSATIONS_TABLE     = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE             = os.getenv("LEADS_TABLE", "Leads")
-PROSPECTS_TABLE         = os.getenv("PROSPECTS_TABLE", "Prospects")
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
+LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
+PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
 
-AIRTABLE_KEY            = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE       = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+AIRTABLE_KEY = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 
 
 # ---------- Small helpers ----------
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def _norm(s: Any) -> str:
-    return re.sub(r"[^a-z0-9]+","", s.strip().lower()) if isinstance(s, str) else str(s)
+    return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else str(s)
+
 
 def _auto_field_map(tbl: Any) -> Dict[str, str]:
     try:
@@ -47,6 +49,7 @@ def _auto_field_map(tbl: Any) -> Dict[str, str]:
     except Exception:
         keys = []
     return {_norm(k): k for k in keys}
+
 
 def _remap_existing_only(tbl: Any, payload: Dict) -> Dict:
     amap = _auto_field_map(tbl)
@@ -71,14 +74,20 @@ def _tbl(table_name: str) -> Any:
         print(f"⚠️ Airtable init failed for {table_name}: {e}")
         return None
 
+
 @lru_cache(maxsize=1)  # keep same signature as earlier helpers
-def get_convos():    return _tbl(CONVERSATIONS_TABLE)
+def get_convos():
+    return _tbl(CONVERSATIONS_TABLE)
+
 
 @lru_cache(maxsize=1)
-def get_leads():     return _tbl(LEADS_TABLE)
+def get_leads():
+    return _tbl(LEADS_TABLE)
+
 
 @lru_cache(maxsize=1)
-def get_prospects(): return _tbl(PROSPECTS_TABLE)
+def get_prospects():
+    return _tbl(PROSPECTS_TABLE)
 
 
 # ---------- Core Processor ----------
@@ -88,14 +97,14 @@ class MessageProcessor:
         phone: str,
         body: str,
         *,
-        from_number: str | None = None,        # DID you’re sending from
-        campaign_id: str | None = None,        # linked Campaign record id
-        template_id: str | None = None,        # linked Template record id
-        drip_queue_id: str | None = None,      # (optional) if you want to back-link
+        from_number: str | None = None,  # DID you’re sending from
+        campaign_id: str | None = None,  # linked Campaign record id
+        template_id: str | None = None,  # linked Template record id
+        drip_queue_id: str | None = None,  # (optional) if you want to back-link
         lead_id: str | None = None,
         property_id: str | None = None,
         direction: str = "OUT",
-        metadata: Dict[str, Any] | None = None # any extra fields to stash on Conversations
+        metadata: Dict[str, Any] | None = None,  # any extra fields to stash on Conversations
     ) -> dict:
         """
         Sends an SMS and logs it to Conversations safely.
@@ -115,7 +124,7 @@ class MessageProcessor:
             return {"status": "skipped", "reason": "missing phone or body"}
 
         convos = get_convos()
-        leads  = get_leads()
+        leads = get_leads()
 
         # ---- 1) Send via provider
         try:
@@ -143,12 +152,7 @@ class MessageProcessor:
             return {"status": "failed", "phone": phone, "error": str(e), "convo_id": convo_id}
 
         # Normalize provider response
-        sid = (
-            send_result.get("sid")
-            or send_result.get("message_sid")
-            or send_result.get("MessageSid")
-            or send_result.get("id")
-        )
+        sid = send_result.get("sid") or send_result.get("message_sid") or send_result.get("MessageSid") or send_result.get("id")
         provider_status = (send_result.get("status") or "sent").lower()
         ok = provider_status in {"sent", "queued", "accepted", "submitted", "enroute", "delivered"}
 
