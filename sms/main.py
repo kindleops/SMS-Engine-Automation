@@ -30,10 +30,19 @@ try:
 except Exception:
     def send_batch(*_a, **_k): return {"ok": False, "error": "send_batch unavailable"}
 
-try:
-    from sms.autoresponder import run_autoresponder
-except Exception:
-    def run_autoresponder(*_a, **_k): return {"ok": False, "error": "autoresponder unavailable"}
+# autoresponder can be exported as run() or run_autoresponder(); support both
+def _build_autoresponder():
+    try:
+        from sms.autoresponder import run as _run
+        return lambda limit=50, view=None: _run(limit=limit, view=view)
+    except Exception:
+        try:
+            from sms.autoresponder import run_autoresponder as _run2
+            return lambda limit=50, view=None: _run2(limit=limit, view=view)
+        except Exception:
+            return lambda *a, **k: {"ok": False, "error": "autoresponder unavailable"}
+
+run_autoresponder = _build_autoresponder()
 
 try:
     from sms.quota_reset import reset_daily_quotas
@@ -98,13 +107,12 @@ except Exception:
     def reset_numbers_daily_counters(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
 
 # ─────────────────────────── FastAPI app ────────────────────────────
-app = FastAPI(title="REI SMS Engine", version="1.3")
+app = FastAPI(title="REI SMS Engine", version="1.3.1")
 if inbound_router:
     app.include_router(inbound_router)
 
 # ─────────────────────── ENV / runtime toggles ──────────────────────
 CRON_TOKEN = os.getenv("CRON_TOKEN")
-WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
 STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
 
@@ -171,12 +179,10 @@ def _extract_token(request: Request, qp_token: Optional[str], h_webhook: Optiona
     return ""
 
 def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]):
-    # Accept either CRON_TOKEN or WEBHOOK_TOKEN (if set). If neither env is set, run open (dev mode).
-    valid_tokens = {t for t in [CRON_TOKEN, WEBHOOK_TOKEN] if t}
-    if not valid_tokens:
+    if not CRON_TOKEN:  # unsecured mode
         return
     token = _extract_token(request, qp_token, h_webhook, h_cron)
-    if token not in valid_tokens:
+    if token != CRON_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 # Quiet-hours helpers
@@ -249,7 +255,7 @@ def health():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "quiet_hours": is_quiet_hours_local(),
         "local_time_central": central_now().isoformat(),
-        "version": "1.3",
+        "version": "1.3.1",
     }
 
 @app.get("/health/strict")

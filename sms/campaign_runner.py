@@ -4,7 +4,7 @@ from __future__ import annotations
 import os, re, json, random, math, traceback
 from datetime import datetime, timezone, timedelta, date
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
@@ -24,7 +24,6 @@ try:
 except Exception:
     _PyTable = None
 
-
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
     """
     Return a table-like object exposing .all/.get/.create/.update, or None.
@@ -40,7 +39,6 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
     except Exception:
         traceback.print_exc()
     return None
-
 
 # ─────────────────────────────────────────────────────────────
 # Optional engine hooks (never hard-crash if missing)
@@ -62,7 +60,6 @@ try:
 except Exception:
     def update_metrics(*args, **kwargs):
         return {"ok": True}
-
 
 # ─────────────────────────────────────────────────────────────
 # ENV / CONFIG
@@ -114,7 +111,6 @@ STATUS_ICON = {
     "FAILED": "❌",
     "CANCELLED": "❌",
 }
-
 
 # ─────────────────────────────────────────────────────────────
 # Time / helpers
@@ -197,7 +193,6 @@ def _get_time_field(f: Dict[str, Any], *names: str) -> Optional[datetime]:
             if dt: return dt
     return None
 
-
 # ─────────────────────────────────────────────────────────────
 # Airtable table getters (compat)
 # ─────────────────────────────────────────────────────────────
@@ -229,7 +224,6 @@ def get_runs_table():
 @lru_cache(maxsize=None)
 def get_kpis_table():
     return _make_table(AIRTABLE_KEY, PERFORMANCE_BASE, "KPIs")
-
 
 # ─────────────────────────────────────────────────────────────
 # Schema helpers + bulletproof create/update
@@ -294,7 +288,6 @@ def _safe_update(tbl, rid: str, payload: Dict):
             traceback.print_exc()
             return None
     return None
-
 
 # ─────────────────────────────────────────────────────────────
 # Friendly First/Address extraction (city-safe, natural)
@@ -436,7 +429,6 @@ def _format_template(text: str, ctx: Dict[str, Any]) -> str:
         return val if val is not None else m.group(0)
     return re.sub(r"\{\{([^}]+)\}\}|\{([^}]+)\}", repl, text)
 
-
 # ─────────────────────────────────────────────────────────────
 # Numbers picking + per-number pacing (Remaining / Daily Reset)
 # ─────────────────────────────────────────────────────────────
@@ -514,46 +506,6 @@ def _load_number_pool(market: Optional[str], base_time: datetime) -> List[Number
 
     return pool
 
-def _seed_number_backlog_from_queue(drip_tbl, pool: List[NumberState], base_time: datetime):
-    """
-    Look into Drip Queue and seed each number's next_time to AFTER the latest
-    scheduled message for that same number. Prevents per-minute collisions
-    across simultaneous campaigns using the same DIDs.
-    """
-    if not (drip_tbl and pool):
-        return
-    # Quick index
-    by_e164: Dict[str, NumberState] = {n.e164: n for n in pool}
-    try:
-        rows = drip_tbl.all()  # type: ignore[attr-defined]
-    except Exception:
-        traceback.print_exc()
-        return
-
-    for r in rows:
-        f = r.get("fields", {}) or {}
-        status = str(f.get("status") or f.get("Status") or "").upper()
-        if status not in {"QUEUED", "READY", "SENDING"}:
-            continue
-        fn = f.get("from_number") or f.get("From Number") or f.get("From #")
-        if not isinstance(fn, str):
-            continue
-        if not fn.startswith("+") and _digits_only(fn):
-            fn = "+" + _digits_only(fn)
-        ns = by_e164.get(fn)
-        if not ns:
-            continue
-        when = _parse_time_maybe_ct(f.get("next_send_date") or f.get("Next Send Date"))
-        if not when:
-            continue
-        if when < base_time:
-            continue
-        # place next slot after the last scheduled, respecting per-number spacing
-        if when >= ns.next_time:
-            ns.next_time = when + timedelta(seconds=SECONDS_PER_NUMBER_MSG)
-            if _in_quiet_hours(ns.next_time):
-                ns.next_time = _shift_to_window(ns.next_time)
-
 def _pick_number_with_pacing(pool: List[NumberState]) -> Optional[NumberState]:
     # choose the number with earliest next_time, then highest remaining
     if not pool:
@@ -563,7 +515,6 @@ def _pick_number_with_pacing(pool: List[NumberState]) -> Optional[NumberState]:
     if cand.remaining <= 0:
         return None
     return cand
-
 
 # ─────────────────────────────────────────────────────────────
 # UI helper
@@ -580,7 +531,6 @@ def _refresh_ui_icons_for_campaign(drip_tbl, campaign_id: str):
                     _safe_update(drip_tbl, r["id"], {"UI": icon})
     except Exception:
         traceback.print_exc()
-
 
 # ─────────────────────────────────────────────────────────────
 # Dedupe guard (per campaign, last 10 digits)
@@ -609,25 +559,35 @@ def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
         traceback.print_exc()
         return False
 
+# ─────────────────────────────────────────────────────────────
+# Limit normalizer (prevents None/ALL crashes)
+# ─────────────────────────────────────────────────────────────
+def _normalize_limit(limit: Optional[int | str]) -> int:
+    """
+    Return a safe positive integer. None or 'ALL' → very large (effectively unlimited).
+    Any bad input is treated as unlimited instead of crashing.
+    """
+    if limit is None:
+        return 999_999
+    try:
+        s = str(limit).strip().upper()
+        if s in ("", "ALL", "UNLIMITED", "NONE"):
+            return 999_999
+        v = int(s)
+        return max(1, v)
+    except Exception:
+        return 999_999
 
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
-def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Optional[bool] = None) -> Dict[str, Any]:
+def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[bool] = None) -> Dict[str, Any]:
     """
     Queues messages for eligible campaigns (quiet hours respected, prequeue supported),
     fills templates with {First}/{Address}, round-robins across numbers with a hard
     cap of RATE_PER_NUMBER_PER_MIN per number, and optionally sends immediately.
     """
-    # Harden limit handling (prevents int(None) crash)
-    if limit is None:
-        limit = 999_999
-    if isinstance(limit, str) and limit.upper() == "ALL":
-        limit = 999_999
-    try:
-        limit = int(limit)
-    except Exception:
-        limit = 999_999
+    max_to_process = _normalize_limit(limit)
 
     if send_after_queue is None:
         send_after_queue = RUNNER_SEND_AFTER_QUEUE
@@ -654,14 +614,12 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
         f = c.get("fields", {}) or {}
         name = (f.get("Name") or f.get("name") or c.get("id"))
 
-        # honor Go Live flag
         go_live = f.get("Go Live")
         if go_live is False:
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] SKIP {name}: Go Live is False")
             continue
 
-        # status gate
         status_val = str((f.get("status") or f.get("Status") or "")).strip().lower()
         if status_val and status_val not in ("scheduled", "running"):
             if DEBUG_CAMPAIGNS:
@@ -696,7 +654,7 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
     results: List[Dict[str, Any]] = []
 
     for camp in eligible:
-        if processed >= limit:
+        if processed >= max_to_process:
             break
 
         cf = camp.get("fields", {}) or {}
@@ -705,7 +663,6 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
         view = (cf.get("View/Segment") or cf.get("View") or "").strip() or None
         market = (cf.get("Market") or cf.get("market"))
 
-        # prospects
         try:
             prospect_rows = prospects.all(view=view) if view else prospects.all()  # type: ignore[attr-defined]
         except Exception:
@@ -717,44 +674,32 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] SKIP {name}: no Templates linked")
             continue
-        # normalize template ids
-        if not isinstance(template_ids, list):
-            template_ids = [template_ids]
-
-        # preload template texts (cache by id)
-        template_text_cache: Dict[str, Optional[str]] = {}
-        def _template_text(tid: str) -> Optional[str]:
-            if tid in template_text_cache:
-                return template_text_cache[tid]
-            txt = None
-            try:
-                trow = templates.get(tid)  # type: ignore[attr-defined]
-                if trow:
-                    tf = trow.get("fields", {}) or {}
-                    txt = tf.get("Message") or tf.get("Text") or tf.get("Template") or None
-            except Exception:
-                traceback.print_exc()
-            template_text_cache[tid] = txt if (isinstance(txt, str) and txt.strip()) else None
-            return template_text_cache[tid]
 
         start_dt = _get_time_field(cf, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
         prequeue = bool(start_dt and now_utc < start_dt and PREQUEUE_BEFORE_START)
         base_utc = start_dt if prequeue else (max(now_utc, start_dt) if start_dt else now_utc)
+
+        # phase offset per campaign to reduce cross-campaign collisions
+        try:
+            phase = abs(hash(cid)) % SECONDS_PER_NUMBER_MSG
+            base_utc = base_utc + timedelta(seconds=phase)
+        except Exception:
+            pass
+
         if _in_quiet_hours(base_utc):
             base_utc = _shift_to_window(base_utc)
 
-        # Create per-number pacing pool and seed from existing queue
+        # Create per-number pacing pool
         number_pool = _load_number_pool(market, base_utc)
         if not number_pool:
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] SKIP {name}: no eligible numbers")
             continue
-        _seed_number_backlog_from_queue(drip, number_pool, base_utc)
 
         if prequeue:
-            _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
+            _safe_update(campaigns, cid, {"last_run_at": iso_now()})
         else:
-            _safe_update(get_campaigns_table(), cid, {"status": "Running", "last_run_at": iso_now()})
+            _safe_update(campaigns, cid, {"status": "Running", "last_run_at": iso_now()})
 
         queued = 0
         nums_tbl = get_numbers_table()
@@ -769,14 +714,19 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
 
             # round-robin by earliest next_time, respecting remaining
             ns = _pick_number_with_pacing(number_pool)
-            if not ns:
+            if not ns or ns.remaining <= 0:
                 break  # pool exhausted
-            if ns.remaining <= 0:
-                break
 
-            # pick a template (skip if missing)
-            tid = random.choice(template_ids)
-            raw = _template_text(tid or "")
+            # pick a template
+            tid = random.choice(template_ids) if isinstance(template_ids, list) else str(template_ids)
+            raw = None
+            try:
+                trow = get_templates_table().get(tid) if tid else None  # type: ignore[attr-defined]
+                tf = (trow.get("fields", {}) or {}) if trow else {}
+                raw = tf.get("Message") or tf.get("Text")
+            except Exception:
+                traceback.print_exc()
+                raw = None
             if not raw:
                 continue
 
@@ -800,7 +750,7 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
                 "Market": market or pf.get("Market"),
                 "phone": phone,
                 "message_preview": body,
-                "from_number": ns.e164,         # safe-filter maps to any variant
+                "from_number": ns.e164,          # maps to "From Number" if schema differs
                 "status": "QUEUED",
                 "next_send_date": scheduled_local,  # CT-naive
                 "Property ID": pf.get("Property ID"),
@@ -810,18 +760,16 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
             created = _safe_create(get_drip_table(), {k: v for k, v in payload.items() if v is not None})
             if created:
                 queued += 1
-                # update per-number pacing & counters
+                # update pacing & counters
                 ns.remaining -= 1
                 ns.next_time = scheduled + timedelta(seconds=SECONDS_PER_NUMBER_MSG)
                 if _in_quiet_hours(ns.next_time):
                     ns.next_time = _shift_to_window(ns.next_time)
-                # keep Last Used fresh (avoid bogus Sent Today increments on queue)
                 if nums_tbl:
                     _safe_update(nums_tbl, ns.rec_id, {"Last Used": iso_now()})
 
-        # Optional immediate send (only outside quiet hours and if flag enabled)
         batch_result, retry_result = {"total_sent": 0}, {}
-        if (not prequeue) and send_after_queue and queued > 0:
+        if (not prequeue) and RUNNER_SEND_AFTER_QUEUE and queued > 0:
             try:
                 batch_result = send_batch(campaign_id=cid, limit=MESSAGES_PER_MIN)
             except Exception:
@@ -840,7 +788,7 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
             if prequeue
             else (
                 "Running"
-                if queued and (sent_delta < queued or not send_after_queue)
+                if queued and (sent_delta < queued or not RUNNER_SEND_AFTER_QUEUE)
                 else ("Completed" if queued else (cf.get("status") or cf.get("Status") or "Scheduled"))
             )
         )
@@ -877,7 +825,7 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
                 {
                     "Type": "CAMPAIGN_RUN",
                     "Campaign": name,
-                    "Processed": float(sent_delta if (not prequeue and send_after_queue) else queued),
+                    "Processed": float(sent_delta if not prequeue else queued),
                     "Breakdown": json.dumps({"initial": batch_result, "retries": retry_result}),
                     "Timestamp": iso_now(),
                 },
@@ -887,8 +835,8 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
                 kpis_tbl,
                 {
                     "Campaign": name,
-                    "Metric": "OUTBOUND_SENT" if (not prequeue and send_after_queue) else "MESSAGES_QUEUED",
-                    "Value": float(sent_delta if (not prequeue and send_after_queue) else queued),
+                    "Metric": "OUTBOUND_SENT" if (not prequeue and RUNNER_SEND_AFTER_QUEUE) else "MESSAGES_QUEUED",
+                    "Value": float(sent_delta if (not prequeue and RUNNER_SEND_AFTER_QUEUE) else queued),
                     "Date": utcnow().date().isoformat(),
                 },
             )
@@ -900,7 +848,7 @@ def run_campaigns(limit: Optional[Union[int, str]] = 1, send_after_queue: Option
             {
                 "campaign": name,
                 "queued": queued,
-                "sent": 0 if prequeue else (sent_delta if send_after_queue else 0),
+                "sent": 0 if prequeue else (sent_delta if RUNNER_SEND_AFTER_QUEUE else 0),
                 "view": view,
                 "market": market,
                 "quiet_now": _in_quiet_hours(now_utc),
