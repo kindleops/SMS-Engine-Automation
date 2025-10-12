@@ -78,12 +78,14 @@ TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
 DRIP_QUEUE_TABLE = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 
-# Global & per-number rates
-MESSAGES_PER_MIN = max(1, int(os.getenv("MESSAGES_PER_MIN", "20")))  # overall send hint
-RATE_PER_NUMBER_PER_MIN = max(1, int(os.getenv("RATE_PER_NUMBER_PER_MIN", "20")))
-PER_NUMBER_GAP_SEC = max(1, int(math.ceil(60.0 / RATE_PER_NUMBER_PER_MIN)))
-
+# Global pacing (fallback; the worker also enforces)
+MESSAGES_PER_MIN = max(1, int(os.getenv("MESSAGES_PER_MIN", "20")))
+SECONDS_PER_MSG = max(1, int(math.ceil(60.0 / MESSAGES_PER_MIN)))
 JITTER_SECONDS = max(0, int(os.getenv("JITTER_SECONDS", "2")))
+
+# Per-number pacing (hard cap per DID)
+RATE_PER_NUMBER_PER_MIN = max(1, int(os.getenv("RATE_PER_NUMBER_PER_MIN", os.getenv("RATE_MAX_PER_NUMBER_PER_MIN", "20"))))
+SECONDS_PER_NUMBER_MSG = max(1, int(math.ceil(60.0 / RATE_PER_NUMBER_PER_MIN)))
 
 QUIET_TZ = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago"))
 QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", os.getenv("QUIET_START_HOUR_LOCAL", "21")))
@@ -136,6 +138,20 @@ def last10(s: Any) -> Optional[str]:
     d = _digits_only(s)
     return d[-10:] if d else None
 
+def get_phone(f: Dict[str, Any]) -> Optional[str]:
+    p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
+    p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
+    if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
+        d = _digits_only(p1)
+        if d: return d
+    if f.get("Phone 2 Verified") or f.get("Phone 2 Ownership Verified"):
+        d = _digits_only(p2)
+        if d: return d
+    for k in PHONE_FIELDS:
+        d = _digits_only(f.get(k))
+        if d: return d
+    return None
+
 def _in_quiet_hours(dt_utc: datetime) -> bool:
     local = dt_utc.astimezone(QUIET_TZ)
     return (local.hour >= QUIET_START_HOUR) or (local.hour < QUIET_END_HOUR)
@@ -151,18 +167,6 @@ def _shift_to_window(dt_utc: datetime) -> datetime:
 def _local_naive_iso(dt_utc: datetime) -> str:
     local = dt_utc.astimezone(QUIET_TZ).replace(tzinfo=None)
     return local.isoformat(timespec="seconds")
-
-def schedule_time_round_robin(base_utc: datetime, q_idx: int, numbers_count: int) -> str:
-    """
-    Per-number pacing: each DID fires every PER_NUMBER_GAP_SEC.
-    Messages are interleaved across numbers in round-robin order.
-    """
-    jitter = random.randint(0, JITTER_SECONDS) if JITTER_SECONDS else 0
-    per_number_index = q_idx // max(1, numbers_count)
-    t = base_utc + timedelta(seconds=per_number_index * PER_NUMBER_GAP_SEC + jitter)
-    if _in_quiet_hours(t):
-        t = _shift_to_window(t)
-    return _local_naive_iso(t)
 
 def _parse_time_maybe_ct(value: Any) -> Optional[datetime]:
     if not value:
@@ -191,31 +195,6 @@ def _get_time_field(f: Dict[str, Any], *names: str) -> Optional[datetime]:
         if k and f.get(k):
             dt = _parse_time_maybe_ct(f[k])
             if dt: return dt
-    return None
-
-
-# ─────────────────────────────────────────────────────────────
-# Phone extraction (robust)
-# ─────────────────────────────────────────────────────────────
-def get_phone(f: Dict[str, Any]) -> Optional[str]:
-    """
-    Prefer verified Phone 1/2, then fall back to any phone-like field.
-    Returns digits-only (may include country if present), ensures ≥10 digits.
-    """
-    p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
-    p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
-    if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
-        d = _digits_only(p1)
-        if d:
-            return d
-    if f.get("Phone 2 Verified") or f.get("Phone 2 Ownership Verified"):
-        d = _digits_only(p2)
-        if d:
-            return d
-    for k in PHONE_FIELDS:
-        d = _digits_only(f.get(k))
-        if d:
-            return d
     return None
 
 
@@ -281,7 +260,7 @@ def _safe_create(tbl, payload: Dict):
     if not (tbl and payload):
         return None
     pending = dict(payload)
-    for _ in range(6):
+    for _ in range(6):  # strip multiple unknowns if needed
         try:
             data = _safe_filter(tbl, pending)
             if not data:
@@ -318,10 +297,15 @@ def _safe_update(tbl, rid: str, payload: Dict):
 
 
 # ─────────────────────────────────────────────────────────────
-# Name & address extraction (natural sounding)
+# Friendly First/Address extraction (city-safe, natural)
 # ─────────────────────────────────────────────────────────────
 _TITLE_WORDS = {"mr","mrs","ms","miss","dr","prof","sir","madam","rev","capt","cpt","lt","sgt"}
 _ORG_HINTS = {"llc","inc","corp","co","company","trust","estates","holdings","hoa","ltd","pllc","llp","pc"}
+_BAD_NAME_KEY_HINTS = {
+    "city","property","mail","street","zip","state","county","parcel","apn","unit",
+    "neighborhood","subdivision","listing","agent","broker","company","business",
+    "entity","trust","hoa","llc","inc","corp","co","estate","address"
+}
 
 def _looks_org(full: str) -> bool:
     s = _norm(full or "")
@@ -334,15 +318,20 @@ def _is_initial(tok: str) -> bool:
     t = tok.strip()
     return bool(re.fullmatch(r"[A-Za-z]\.?", t))
 
+def _is_person_name_key(key: str) -> bool:
+    n = _norm(key or "")
+    if "name" not in n:
+        return False
+    return not any(bad in n for bad in _BAD_NAME_KEY_HINTS)
+
 def _extract_first_name_natural(full: str) -> Optional[str]:
     """
     Extract a natural, human first name.
-    • 'John R Smith' → 'John'
-    • 'John R. Smith' → 'John'
-    • 'J. Robert Smith' → 'J'
-    • 'Smith, John R' → 'John'
-    • 'Dr. Jane A. Doe' → 'Jane'
-    Returns None for obvious org names.
+      - 'John R Smith' → 'John'
+      - 'John R. Smith' → 'John'
+      - 'J. Robert Smith' → 'J'
+      - 'Smith, John R' → 'John'
+      - 'Dr. Jane A. Doe' → 'Jane'
     """
     if not full:
         return None
@@ -350,7 +339,7 @@ def _extract_first_name_natural(full: str) -> Optional[str]:
     if _looks_org(full):
         return None
 
-    if "," in full:
+    if "," in full:  # "Last, First"
         parts = [p.strip() for p in full.split(",") if p.strip()]
         if len(parts) >= 2:
             full = parts[1]
@@ -380,7 +369,7 @@ def _compose_address(fields: Dict[str, Any]) -> Optional[str]:
             return v.strip()
 
     street = fields.get("Street") or fields.get("Property Street") or fields.get("Mailing Street")
-    city   = fields.get("City") or fields.get("Property City") or fields.get("Mailing City")
+    city   = fields.get("City") or fields.get("Property City") or fields.get("Mailing City") or fields.get("City Name")
     state  = fields.get("State") or fields.get("Property State") or fields.get("Mailing State")
     postal = fields.get("Zip") or fields.get("ZIP") or fields.get("Postal") or fields.get("Property Zip")
 
@@ -390,84 +379,66 @@ def _compose_address(fields: Dict[str, Any]) -> Optional[str]:
     addr = ", ".join([p for p in parts if p])
     return addr or None
 
+def _same_letters(a: str, b: str) -> bool:
+    ra = re.sub(r"[^a-z]", "", (a or "").lower())
+    rb = re.sub(r"[^a-z]", "", (b or "").lower())
+    return bool(ra) and ra == rb
+
 def _personalization_ctx(pf: Dict[str, Any]) -> Dict[str, Any]:
-    name_fields = [
+    # Known city values to guard false positives
+    city_candidates = []
+    for ck in ("City", "Property City", "Mailing City", "City Name"):
+        cv = pf.get(ck)
+        if isinstance(cv, str) and cv.strip():
+            city_candidates.append(cv.strip())
+
+    preferred = [
         "Owner First Name", "First Name", "Owner 1 First Name", "Owner 2 First Name",
         "Owner Name", "Owner 1 Name", "Owner 2 Name", "Full Name", "Name",
     ]
     first = None
-    for k in name_fields:
+    for k in preferred:
         v = pf.get(k)
         if isinstance(v, str) and v.strip():
-            first = _extract_first_name_natural(v)
-            if first:
+            cand = _extract_first_name_natural(v)
+            if cand and not any(_same_letters(cand, c) or _same_letters(cand, c.split()[0]) for c in city_candidates):
+                first = cand
                 break
+
     if not first:
         for k, v in pf.items():
-            if "name" in _norm(k) and isinstance(v, str):
-                first = _extract_first_name_natural(v)
-                if first:
+            if not isinstance(v, str) or not v.strip():
+                continue
+            if _is_person_name_key(k):
+                cand = _extract_first_name_natural(v)
+                if cand and not any(_same_letters(cand, c) or _same_letters(cand, c.split()[0]) for c in city_candidates):
+                    first = cand
                     break
 
     address = _compose_address(pf)
     friendly_first = first or "there"
 
-    ctx = {
+    return {
         "First": friendly_first,
         "first": friendly_first,
         "Address": address or "",
         "address": address or "",
     }
-    return ctx
-
-
-# ─────────────────────────────────────────────────────────────
-# Templating
-# ─────────────────────────────────────────────────────────────
-def _get(fields: Dict, *names):
-    for n in names:
-        if n in fields:
-            return fields[n]
-    nf = {_norm(k): k for k in fields.keys()}
-    for n in names:
-        k = nf.get(_norm(n))
-        if k:
-            return fields[k]
-    return None
 
 def _format_template(text: str, ctx: Dict[str, Any]) -> str:
     if not text:
         return text
+    # normalize keys (case/spacing insensitive)
     amap = {_norm(k): ("" if v is None else str(v)) for k, v in (ctx or {}).items()}
-
     def repl(m):
-        raw = (m.group(1) or m.group(2) or "").strip()
+        raw = m.group(1) or m.group(2)
         val = amap.get(_norm(raw))
-        if val is not None and val != "":
-            return val
-        if _norm(raw) in ("first",):
-            return amap.get("first", "there")
-        if _norm(raw) in ("address",):
-            return amap.get("address", "")
-        return m.group(0)
-
+        return val if val is not None else m.group(0)
     return re.sub(r"\{\{([^}]+)\}\}|\{([^}]+)\}", repl, text)
-
-def pick_template(template_ids: Any, templates_table):
-    if not (template_ids and templates_table):
-        return (None, None)
-    tid = random.choice(template_ids) if isinstance(template_ids, list) else str(template_ids)
-    try:
-        row = templates_table.get(tid)  # type: ignore[attr-defined]
-        msg = _get(row.get("fields", {}) if row else {}, "Message", "message", "Text", "text")
-        return (msg, tid) if msg else (None, None)
-    except Exception:
-        traceback.print_exc()
-        return (None, None)
 
 
 # ─────────────────────────────────────────────────────────────
-# Numbers (market-aware) + round-robin sequence
+# Numbers picking + per-number pacing (Remaining / Daily Reset)
 # ─────────────────────────────────────────────────────────────
 def _parse_dt(s: Any) -> Optional[datetime]:
     if not s:
@@ -493,21 +464,25 @@ def _to_e164(f: Dict[str, Any]) -> Optional[str]:
             return d
     return None
 
-def load_active_numbers(market: Optional[str]) -> List[Dict[str, Any]]:
-    """
-    Return list of dicts for active numbers supporting market, sorted to balance load.
-    Dict keys: e164, rec_id, sent_today, daily_cap, remaining, last_used
-    """
-    nums = get_numbers_table()
-    if not nums:
-        return []
+class NumberState:
+    __slots__ = ("rec_id","e164","remaining","next_time")
+    def __init__(self, rec_id: str, e164: str, remaining: int, base_time: datetime):
+        self.rec_id = rec_id
+        self.e164 = e164
+        self.remaining = remaining
+        self.next_time = base_time
+
+def _load_number_pool(market: Optional[str], base_time: datetime) -> List[NumberState]:
+    nums_tbl = get_numbers_table()
+    pool: List[NumberState] = []
+    if not nums_tbl:
+        return pool
     try:
-        rows = nums.all()  # type: ignore[attr-defined]
+        rows = nums_tbl.all()  # type: ignore[attr-defined]
     except Exception:
         traceback.print_exc()
-        return []
+        return pool
 
-    elig: List[Dict[str, Any]] = []
     for r in rows:
         f = r.get("fields", {}) or {}
         if f.get("Active") is False:
@@ -517,15 +492,15 @@ def load_active_numbers(market: Optional[str]) -> List[Dict[str, Any]]:
         if not _supports_market(f, market):
             continue
 
+        # compute remaining capacity for the day
         rem = f.get("Remaining")
         try:
             rem = int(rem) if rem is not None else None
         except Exception:
             rem = None
-
-        sent_today = int(f.get("Sent Today") or 0)
-        daily_cap = int(f.get("Daily Reset") or DAILY_LIMIT_FALLBACK)
         if rem is None:
+            sent_today = int(f.get("Sent Today") or 0)
+            daily_cap = int(f.get("Daily Reset") or DAILY_LIMIT_FALLBACK)
             rem = max(0, daily_cap - sent_today)
         if rem <= 0:
             continue
@@ -534,39 +509,24 @@ def load_active_numbers(market: Optional[str]) -> List[Dict[str, Any]]:
         if not e164:
             continue
 
-        last_used = _parse_dt(f.get("Last Used")) or datetime(1970, 1, 1, tzinfo=timezone.utc)
-        elig.append({
-            "e164": e164,
-            "rec_id": r["id"],
-            "sent_today": sent_today,
-            "daily_cap": daily_cap,
-            "remaining": rem,
-            "last_used": last_used,
-        })
+        ns = NumberState(r["id"], e164, int(rem), base_time)
+        pool.append(ns)
 
-    if not elig:
-        return []
+    return pool
 
-    # Sort: highest remaining first, then least recently used
-    elig.sort(key=lambda d: (-int(d["remaining"]), d["last_used"]))
-    return elig
-
-def bump_number_usage(num: Dict[str, Any]):
-    nums = get_numbers_table()
-    if not (nums and num and num.get("rec_id")):
-        return
-    try:
-        num["sent_today"] = int(num.get("sent_today") or 0) + 1
-        _safe_update(nums, num["rec_id"], {
-            "Sent Today": num["sent_today"],
-            "Last Used": iso_now(),
-        })
-    except Exception:
-        traceback.print_exc()
+def _pick_number_with_pacing(pool: List[NumberState]) -> Optional[NumberState]:
+    # choose the number with earliest next_time, then highest remaining
+    if not pool:
+        return None
+    pool.sort(key=lambda n: (n.next_time, -n.remaining, n.e164))
+    cand = pool[0]
+    if cand.remaining <= 0:
+        return None
+    return cand
 
 
 # ─────────────────────────────────────────────────────────────
-# UI helpers
+# UI helper
 # ─────────────────────────────────────────────────────────────
 def _refresh_ui_icons_for_campaign(drip_tbl, campaign_id: str):
     try:
@@ -616,8 +576,8 @@ def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
 def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None) -> Dict[str, Any]:
     """
     Queues messages for eligible campaigns (quiet hours respected, prequeue supported),
-    round-robins across active numbers at RATE_PER_NUMBER_PER_MIN, de-dupes per campaign,
-    and optionally triggers immediate send.
+    fills templates with {First}/{Address}, round-robins across numbers with a hard
+    cap of RATE_PER_NUMBER_PER_MIN per number, and optionally sends immediately.
     """
     if isinstance(limit, str) and limit.upper() == "ALL":
         limit = 999_999
@@ -646,7 +606,7 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
 
     for c in all_campaigns:
         f = c.get("fields", {}) or {}
-        name = _get(f, "Name", "name") or c.get("id")
+        name = (f.get("Name") or f.get("name") or c.get("id"))
 
         go_live = f.get("Go Live")
         if go_live is False:
@@ -654,7 +614,7 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
                 print(f"[campaign] SKIP {name}: Go Live is False")
             continue
 
-        status_val = str(_get(f, "status", "Status") or "").strip().lower()
+        status_val = str((f.get("status") or f.get("Status") or "")).strip().lower()
         if status_val and status_val not in ("scheduled", "running"):
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] SKIP {name}: status={status_val!r}")
@@ -693,33 +653,20 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
 
         cf = camp.get("fields", {}) or {}
         cid = camp["id"]
-        name = _get(cf, "Name", "name") or "Unnamed"
+        name = (cf.get("Name") or cf.get("name") or "Unnamed")
         view = (cf.get("View/Segment") or cf.get("View") or "").strip() or None
-        market = _get(cf, "Market", "market")
-
-        # numbers for this campaign/market
-        numbers = load_active_numbers(market)
-        if not numbers:
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] SKIP {name}: no eligible numbers")
-            _safe_update(campaigns, cid, {"last_run_at": iso_now()})
-            processed += 1
-            continue
+        market = (cf.get("Market") or cf.get("market"))
 
         try:
             prospect_rows = prospects.all(view=view) if view else prospects.all()  # type: ignore[attr-defined]
         except Exception:
             traceback.print_exc()
-            _safe_update(campaigns, cid, {"last_run_at": iso_now()})
-            processed += 1
             continue
 
-        template_ids = _get(cf, "Templates", "templates") or []
+        template_ids = cf.get("Templates") or cf.get("templates") or []
         if not template_ids:
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] SKIP {name}: no Templates linked")
-            _safe_update(campaigns, cid, {"last_run_at": iso_now()})
-            processed += 1
             continue
 
         start_dt = _get_time_field(cf, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
@@ -728,14 +675,20 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
         if _in_quiet_hours(base_utc):
             base_utc = _shift_to_window(base_utc)
 
+        # Create per-number pacing pool
+        number_pool = _load_number_pool(market, base_utc)
+        if not number_pool:
+            if DEBUG_CAMPAIGNS:
+                print(f"[campaign] SKIP {name}: no eligible numbers")
+            continue
+
         if prequeue:
             _safe_update(campaigns, cid, {"last_run_at": iso_now()})
         else:
             _safe_update(campaigns, cid, {"status": "Running", "last_run_at": iso_now()})
 
         queued = 0
-        ncount = len(numbers)
-        q_idx = 0  # counts only successfully queued messages (drives schedule & round-robin)
+        nums_tbl = get_numbers_table()
 
         for pr in prospect_rows:
             pf = pr.get("fields", {}) or {}
@@ -745,17 +698,39 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             if already_queued(drip, phone, cid):
                 continue
 
-            # pick number in RR using only queued count
-            num = numbers[q_idx % ncount]
-            did, did_rec = num["e164"], num["rec_id"]
+            # round-robin by earliest next_time, respecting remaining
+            ns = _pick_number_with_pacing(number_pool)
+            if not ns:
+                break  # pool exhausted
+            if ns.remaining <= 0:
+                break
 
-            raw, tid = pick_template(template_ids, templates)
+            # pick a template
+            tid = random.choice(template_ids) if isinstance(template_ids, list) else str(template_ids)
+            raw = None
+            try:
+                trow = get_templates_table().get(tid) if tid else None  # type: ignore[attr-defined]
+                raw = (trow.get("fields", {}) or {}).get("Message") or (trow.get("fields", {}) or {}).get("Text")
+            except Exception:
+                traceback.print_exc()
+                raw = None
             if not raw:
                 continue
 
-            ctx = _personalization_ctx(pf)
-            body = _format_template(raw, ctx)
-            scheduled_local = schedule_time_round_robin(base_utc, q_idx, ncount)
+            # personalization -> body
+            ctx = dict(pf)  # include all fields
+            ctx.update(_personalization_ctx(pf))
+            body = _format_template(str(raw), ctx)
+
+            # schedule for this number's next available slot
+            scheduled = ns.next_time
+            # jitter (optional)
+            if JITTER_SECONDS:
+                scheduled = scheduled + timedelta(seconds=random.randint(0, JITTER_SECONDS))
+            # ensure not in quiet hours
+            if _in_quiet_hours(scheduled):
+                scheduled = _shift_to_window(scheduled)
+            scheduled_local = _local_naive_iso(scheduled)
 
             payload = {
                 "Prospect": [pr["id"]],
@@ -764,18 +739,24 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
                 "Market": market or pf.get("Market"),
                 "phone": phone,
                 "message_preview": body,
-                "from_number": did,                # schema-mapper adapts to "From Number" if needed
+                "from_number": ns.e164,         # if base uses "From Number", safe_filter will map it
                 "status": "QUEUED",
-                "next_send_date": scheduled_local, # CT-naive
+                "next_send_date": scheduled_local,  # CT-naive
                 "Property ID": pf.get("Property ID"),
-                "Number Record Id": did_rec,
+                "Number Record Id": ns.rec_id,
                 "UI": STATUS_ICON.get("QUEUED", "⏳"),
             }
             created = _safe_create(get_drip_table(), {k: v for k, v in payload.items() if v is not None})
             if created:
                 queued += 1
-                q_idx += 1
-                bump_number_usage(num)  # increments Sent Today + Last Used
+                # update per-number pacing & counters
+                ns.remaining -= 1
+                ns.next_time = scheduled + timedelta(seconds=SECONDS_PER_NUMBER_MSG)
+                if _in_quiet_hours(ns.next_time):
+                    ns.next_time = _shift_to_window(ns.next_time)
+                # keep Airtable Numbers "Sent Today"/"Last Used" fresh
+                if nums_tbl:
+                    _safe_update(nums_tbl, ns.rec_id, {"Sent Today": 1 + int(0), "Last Used": iso_now()})
 
         batch_result, retry_result = {"total_sent": 0}, {}
         if (not prequeue) and RUNNER_SEND_AFTER_QUEUE and queued > 0:
@@ -798,7 +779,7 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             else (
                 "Running"
                 if queued and (sent_delta < queued or not RUNNER_SEND_AFTER_QUEUE)
-                else ("Completed" if queued else (_get(cf, "status", "Status") or "Scheduled"))
+                else ("Completed" if queued else (cf.get("status") or cf.get("Status") or "Scheduled"))
             )
         )
 
@@ -810,9 +791,8 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             "View": view,
             "Market": market,
             "QuietHoursNow": _in_quiet_hours(now_utc),
-            "PerNumberRate": RATE_PER_NUMBER_PER_MIN,
-            "NumbersUsed": ncount,
-            "MPM_hint": MESSAGES_PER_MIN,
+            "MPM": MESSAGES_PER_MIN,
+            "PerNumberMPM": RATE_PER_NUMBER_PER_MIN,
             "Prequeued": prequeue,
         }
 
@@ -862,8 +842,8 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
                 "view": view,
                 "market": market,
                 "quiet_now": _in_quiet_hours(now_utc),
-                "per_number_rate": RATE_PER_NUMBER_PER_MIN,
-                "numbers_used": ncount,
+                "mpm": MESSAGES_PER_MIN,
+                "per_number_mpm": RATE_PER_NUMBER_PER_MIN,
             }
         )
         processed += 1
