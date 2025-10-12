@@ -1,102 +1,96 @@
 # ops/webhooks.py
+from __future__ import annotations
+
 import os
 import traceback
-import platform
-import psutil  # pip install psutil
-from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException
-from pyairtable import Table
+from typing import Any, Dict, List, Optional
 
-app = FastAPI(title="REI DevOps Service")
+# Optional system stats
+try:
+    import psutil  # optional
+except Exception:  # pragma: no cover
+    psutil = None  # type: ignore
 
-CRON_TOKEN = os.getenv("CRON_TOKEN")
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-DEVOPS_BASE = os.getenv("AIRTABLE_DEVOPS_BASE_ID")
-
-# Airtable tables
-logs_table = Table(AIRTABLE_API_KEY, DEVOPS_BASE, "Logs")
-metrics_table = Table(AIRTABLE_API_KEY, DEVOPS_BASE, "Metrics")
-alerts_table = Table(AIRTABLE_API_KEY, DEVOPS_BASE, "Alerts")
+# Optional Airtable client (v2)
+try:
+    from pyairtable import Api  # type: ignore
+except Exception:  # pragma: no cover
+    Api = None  # type: ignore
 
 
-def check_token(token: str):
-    if not CRON_TOKEN or token != CRON_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid cron token")
-
-
-def iso_timestamp():
-    return datetime.now(timezone.utc).isoformat()
-
-
-@app.post("/sync-logs")
-async def sync_logs(x_cron_token: str = None):
+def _get_airtable_table(table_name: str):
+    """
+    Lazy, safe table getter. Returns None if env or client missing.
+    Works with pyairtable v2: Api(key).table(base_id, table_name)
+    """
     try:
-        check_token(x_cron_token)
-        print("📝 [DevOps] Syncing error logs...")
+        key = os.getenv("AIRTABLE_API_KEY")
+        base = os.getenv("DEVOPS_BASE") or os.getenv("AIRTABLE_DEVOPS_BASE_ID")
+        if not (Api and key and base):
+            return None
+        return Api(key).table(base, table_name)
+    except Exception:
+        traceback.print_exc()
+        return None
 
-        # Example: capture latest errors from file/stdout (stubbed here)
-        sample_log = {
-            "Service": "rei-sms-engine",
-            "Level": "ERROR",
-            "Message": "Sample error for debugging",
-            "Timestamp": iso_timestamp(),
+
+def system_stats() -> Dict[str, Any]:
+    """
+    Lightweight system metrics. Never crashes if psutil is absent.
+    """
+    if not psutil:
+        return {
+            "ok": True,
+            "psutil_available": False,
+            "note": "psutil not installed; returning minimal stats",
         }
-
-        logs_table.create(sample_log)
-        return {"ok": True, "message": "Logs synced", "data": sample_log}
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/sync-metrics")
-async def sync_metrics(x_cron_token: str = None):
     try:
-        check_token(x_cron_token)
-        print("📊 [DevOps] Syncing server metrics...")
-
-        cpu = psutil.cpu_percent(interval=1)
-        mem = psutil.virtual_memory().percent
-
-        metric = {
-            "Service": "rei-sms-engine",
-            "CPU %": cpu,
-            "Memory %": mem,
-            "Host": platform.node(),
-            "Timestamp": iso_timestamp(),
+        vm = psutil.virtual_memory()
+        cpu = psutil.cpu_percent(interval=0.0)  # non-blocking snapshot
+        return {
+            "ok": True,
+            "psutil_available": True,
+            "cpu_percent": cpu,
+            "mem_percent": vm.percent,
+            "mem_used_mb": round(vm.used / (1024 * 1024), 1),
+            "mem_total_mb": round(vm.total / (1024 * 1024), 1),
         }
-
-        metrics_table.create(metric)
-        return {"ok": True, "message": "Metrics synced", "data": metric}
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"ok": False, "error": "stats_failed"}
 
 
-@app.post("/alerts")
-async def alerts(x_cron_token: str = None):
+def devops_log(event: str, **fields) -> Dict[str, Any]:
+    """
+    Best-effort: write a row to DevOps Logs table (if configured).
+    Never raises; returns status dict.
+    """
+    tbl = _get_airtable_table("Logs")
+    if not tbl:
+        return {"ok": False, "skipped": "devops_base_or_client_missing"}
+
+    payload = {
+        "Event": event,
+        "Payload": {k: v for k, v in fields.items() if v is not None},
+    }
     try:
-        check_token(x_cron_token)
-        print("🚨 [DevOps] Checking for alerts...")
-
-        # Example: alert if CPU > 80%
-        cpu = psutil.cpu_percent(interval=1)
-        if cpu > 80:
-            alert = {
-                "Service": "rei-sms-engine",
-                "Alert": f"High CPU usage detected: {cpu}%",
-                "Severity": "HIGH",
-                "Timestamp": iso_timestamp(),
-            }
-            alerts_table.create(alert)
-            return {"ok": True, "alert_triggered": True, "data": alert}
-
-        return {"ok": True, "alert_triggered": False}
-    except Exception as e:
+        rec = tbl.create(payload)
+        return {"ok": True, "id": rec.get("id")}
+    except Exception:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"ok": False, "error": "create_failed"}
 
 
-@app.get("/healthz")
-async def healthz():
-    return {"status": "ok", "service": "rei-devops"}
+def recent_logs(limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Fetch recent devops logs (if table configured). Never raises.
+    """
+    tbl = _get_airtable_table("Logs")
+    if not tbl:
+        return []
+    try:
+        rows = tbl.all(max_records=max(1, min(limit, 100)))
+        return rows or []
+    except Exception:
+        traceback.print_exc()
+        return []
