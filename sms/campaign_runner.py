@@ -271,7 +271,9 @@ def get_kpis_table():
     return _make_table(AIRTABLE_KEY, PERFORMANCE_BASE, "KPIs")
 
 
-# schema-aware filter to avoid UNKNOWN_FIELD_NAME
+# ─────────────────────────────────────────────────────────────
+# Schema helpers + bulletproof create/update
+# ─────────────────────────────────────────────────────────────
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
         rows = tbl.all(max_records=1)  # type: ignore[attr-defined]
@@ -284,8 +286,9 @@ def _auto_field_map(tbl) -> Dict[str, str]:
 def _safe_filter(tbl, payload: Dict) -> Dict:
     amap = _auto_field_map(tbl)
     if not amap:
+        # No schema info yet; send as-is (retry logic will trim unknowns if needed)
         return dict(payload)
-    out = {}
+    out: Dict[str, Any] = {}
     for k, v in payload.items():
         mk = amap.get(_norm(k))
         if mk:
@@ -293,22 +296,51 @@ def _safe_filter(tbl, payload: Dict) -> Dict:
     return out
 
 
+_UNKNOWN_RE = re.compile(r'Unknown field name:\s*"([^"]+)"')
+
+
 def _safe_create(tbl, payload: Dict):
-    try:
-        data = _safe_filter(tbl, payload)
-        return tbl.create(data) if data else None  # type: ignore[attr-defined]
-    except Exception:
-        traceback.print_exc()
+    """Create with schema-map and automatic retry removing unknown fields."""
+    if not (tbl and payload):
         return None
+    pending = dict(payload)
+    for _ in range(6):  # allow multiple unknowns to be stripped
+        try:
+            data = _safe_filter(tbl, pending)
+            if not data:
+                return None
+            return tbl.create(data)  # type: ignore[attr-defined]
+        except Exception as e:
+            m = _UNKNOWN_RE.search(str(e))
+            if m:
+                bad = m.group(1)
+                pending.pop(bad, None)
+                continue
+            traceback.print_exc()
+            return None
+    return None
 
 
 def _safe_update(tbl, rid: str, payload: Dict):
-    try:
-        data = _safe_filter(tbl, payload)
-        return tbl.update(rid, data) if (rid and data) else None  # type: ignore[attr-defined]
-    except Exception:
-        traceback.print_exc()
+    """Update with schema-map and automatic retry removing unknown fields."""
+    if not (tbl and rid and payload):
         return None
+    pending = dict(payload)
+    for _ in range(6):
+        try:
+            data = _safe_filter(tbl, pending)
+            if not data:
+                return None
+            return tbl.update(rid, data)  # type: ignore[attr-defined]
+        except Exception as e:
+            m = _UNKNOWN_RE.search(str(e))
+            if m:
+                bad = m.group(1)
+                pending.pop(bad, None)
+                continue
+            traceback.print_exc()
+            return None
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -382,7 +414,12 @@ def _to_e164(f: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def pick_from_number(market: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+def pick_from_number(market: Optional[str], reserve: bool = True) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Choose an active number that supports the market and has capacity.
+    If reserve=True, consume 1 unit of today's capacity immediately
+    (appropriate when sending right now). If False, do not consume.
+    """
     nums = get_numbers_table()
     if not nums:
         return (None, None)
@@ -415,6 +452,7 @@ def pick_from_number(market: Optional[str]) -> Tuple[Optional[str], Optional[str
             continue
 
         last_used = _parse_dt(f.get("Last Used")) or datetime(1970, 1, 1, tzinfo=timezone.utc)
+        # sort priority: highest remaining (via negative), then oldest last used
         elig.append(((-rem, last_used), r))
 
     if not elig:
@@ -427,14 +465,15 @@ def pick_from_number(market: Optional[str]) -> Tuple[Optional[str], Optional[str
     if not did:
         return (None, None)
 
-    _safe_update(
-        nums,
-        chosen["id"],
-        {
-            "Sent Today": int(cf.get("Sent Today") or 0) + 1,
-            "Last Used": iso_now(),
-        },
-    )
+    if reserve:
+        _safe_update(
+            nums,
+            chosen["id"],
+            {
+                "Sent Today": int(cf.get("Sent Today") or 0) + 1,
+                "Last Used": iso_now(),
+            },
+        )
     return did, chosen["id"]
 
 
@@ -458,13 +497,13 @@ def _refresh_ui_icons_for_campaign(drip_tbl, campaign_id: str):
 # ─────────────────────────────────────────────────────────────
 # Dedupe guard (per campaign, last 10 digits)
 # ─────────────────────────────────────────────────────────────
-def _last_n_hours_iso(hours: int) -> str:
-    return (utcnow() - timedelta(hours=hours)).isoformat()
+def _last_n_hours_dt(hours: int) -> datetime:
+    return utcnow() - timedelta(hours=hours)
 
 
 def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
     try:
-        cutoff = _last_n_hours_iso(DEDUPE_HOURS)
+        cutoff_dt = _last_n_hours_dt(DEDUPE_HOURS)
         l10 = last10(phone)
         for r in drip_tbl.all():  # type: ignore[attr-defined]
             f = r.get("fields", {})
@@ -474,8 +513,9 @@ def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
                 cids = cids if isinstance(cids, list) else [cids]
                 if campaign_id in cids:
                     status = str(f.get("status") or f.get("Status") or "")
-                    when = f.get("next_send_date") or f.get("Next Send Date") or f.get("created_at") or ""
-                    if status in ("QUEUED", "SENDING", "READY") and (not cutoff or str(when) >= cutoff):
+                    when_raw = f.get("next_send_date") or f.get("Next Send Date") or f.get("created_at") or ""
+                    when_dt = _parse_time_maybe_ct(when_raw) or utcnow()
+                    if status in ("QUEUED", "SENDING", "READY") and when_dt >= cutoff_dt:
                         return True
         return False
     except Exception:
@@ -488,15 +528,8 @@ def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
 # ─────────────────────────────────────────────────────────────
 def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None) -> Dict[str, Any]:
     """
-    Queues messages for eligible campaigns:
-
-      • Go Live != False
-      • Status ∈ {Scheduled, Running} OR blank
-      • PREQUEUE_BEFORE_START:
-          - now < Start ⇒ queue now with next_send_date=Start (CT-naive) but keep Status=Scheduled
-          - else ⇒ queue and flip Status=Running
-      • Respect quiet hours: queue allowed only if ALLOW_QUEUE_OUTSIDE_HOURS (default true)
-      • Numbers picked from Numbers.Number (market-aware, Remaining > 0)
+    Queues messages for eligible campaigns (quiet hours respected, prequeue supported),
+    picks market-aware numbers, de-dupes, and optionally sends immediately.
     """
     if isinstance(limit, str) and limit.upper() == "ALL":
         limit = 999_999
@@ -609,7 +642,9 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             if already_queued(drip, phone, cid):
                 continue
 
-            from_number, number_rec_id = pick_from_number(market or pf.get("Market"))
+            # Reserve capacity only if we'll try to send right after queue
+            reserve_now = (not prequeue) and bool(send_after_queue)
+            from_number, number_rec_id = pick_from_number(market or pf.get("Market"), reserve=reserve_now)
             if not from_number:
                 continue
 
@@ -620,6 +655,8 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             body = _format_template(raw, pf)
             scheduled_local = schedule_time(base_utc, idx)
 
+            # Only "from_number" here; if base uses "From Number", _safe_filter will map it,
+            # and if neither exists, retry logic will drop it rather than 422.
             payload = {
                 "Prospect": [pr["id"]],
                 "Campaign": [cid],
@@ -628,19 +665,18 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
                 "phone": phone,
                 "message_preview": body,
                 "from_number": from_number,
-                "From Number": from_number,
                 "status": "QUEUED",
                 "next_send_date": scheduled_local,  # CT-naive
                 "Property ID": pf.get("Property ID"),
                 "Number Record Id": number_rec_id,
-                "UI": "⏳",
+                "UI": STATUS_ICON.get("QUEUED", "⏳"),
             }
             created = _safe_create(get_drip_table(), {k: v for k, v in payload.items() if v is not None})
             if created:
                 queued += 1
 
         batch_result, retry_result = {"total_sent": 0}, {}
-        if (not prequeue) and RUNNER_SEND_AFTER_QUEUE and queued > 0:
+        if (not prequeue) and send_after_queue and queued > 0:
             try:
                 batch_result = send_batch(campaign_id=cid, limit=MESSAGES_PER_MIN)
             except Exception:
@@ -659,7 +695,7 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             if prequeue
             else (
                 "Running"
-                if queued and (sent_delta < queued or not RUNNER_SEND_AFTER_QUEUE)
+                if queued and (sent_delta < queued or not send_after_queue)
                 else ("Completed" if queued else (_get(cf, "status", "Status") or "Scheduled"))
             )
         )
@@ -705,8 +741,8 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
                 kpis_tbl,
                 {
                     "Campaign": name,
-                    "Metric": "OUTBOUND_SENT" if (not prequeue and RUNNER_SEND_AFTER_QUEUE) else "MESSAGES_QUEUED",
-                    "Value": float(sent_delta if (not prequeue and RUNNER_SEND_AFTER_QUEUE) else queued),
+                    "Metric": "OUTBOUND_SENT" if (not prequeue and send_after_queue) else "MESSAGES_QUEUED",
+                    "Value": float(sent_delta if (not prequeue and send_after_queue) else queued),
                     "Date": utcnow().date().isoformat(),
                 },
             )
@@ -718,7 +754,7 @@ def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None)
             {
                 "campaign": name,
                 "queued": queued,
-                "sent": 0 if prequeue else (sent_delta if RUNNER_SEND_AFTER_QUEUE else 0),
+                "sent": 0 if prequeue else (sent_delta if send_after_queue else 0),
                 "view": view,
                 "market": market,
                 "quiet_now": _in_quiet_hours(now_utc),
