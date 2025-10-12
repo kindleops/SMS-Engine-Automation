@@ -38,17 +38,31 @@ services:
       - key: CRON_TOKEN
         sync: false
 
-      # --- Limiter (choose Upstash REST here; do NOT set REDIS_URL) ---
+      # --- Limiter (Upstash REST only; do NOT set REDIS_URL with a redis://) ---
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
+      - key: REDIS_URL              # explicitly empty to prevent accidental redis:// picks
+        value: ""
+      - key: REDIS_TLS
+        value: "true"
 
-      # --- Engine/runtime knobs ---
+      # --- Quiet Hours (Central) — both styles to satisfy all modules ---
+      - key: QUIET_TZ
+        value: "America/Chicago"
+      - key: QUIET_START_HOUR
+        value: "21"
+      - key: QUIET_END_HOUR
+        value: "9"
+      - key: QUIET_HOURS_ENFORCED
+        value: "true"
       - key: QUIET_START_HOUR_LOCAL
         value: "21"
       - key: QUIET_END_HOUR_LOCAL
         value: "9"
+
+      # --- Engine/runtime knobs ---
       - key: RATE_PER_NUMBER_PER_MIN
         value: "20"
       - key: GLOBAL_RATE_PER_MIN
@@ -61,6 +75,20 @@ services:
         value: "20"
       - key: JITTER_SECONDS
         value: "2"
+      - key: ALLOW_QUEUE_OUTSIDE_HOURS
+        value: "true"
+      - key: PREQUEUE_BEFORE_START
+        value: "true"
+      - key: RUNNER_SEND_AFTER_QUEUE      # default behavior in campaign runner
+        value: "false"
+      - key: AUTORESPONDER_ALWAYS_ON
+        value: "true"
+      - key: TEST_MODE
+        value: "false"
+      - key: STRICT_MODE
+        value: "false"
+      - key: DEBUG_CAMPAIGNS
+        value: "false"
 
       # --- Optional: disable embedded schedulers (we use a Worker) ---
       - key: ENABLE_EMBEDDED_SCHEDULER
@@ -102,11 +130,15 @@ services:
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
 
-      # Use Upstash REST limiter (do NOT set REDIS_URL)
+      # Upstash REST limiter (no redis://)
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
+      - key: REDIS_URL
+        value: ""
+      - key: REDIS_TLS
+        value: "true"
 
       # Worker loop knobs
       - key: WORKER_INTERVAL_SEC
@@ -120,15 +152,37 @@ services:
       - key: AUTORESPONDER_VIEW      # matches worker.py
         value: "Unprocessed Inbounds"
 
-      # Campaign runner behavior
+      # Campaign runner behavior (worker-side defaults)
       - key: RUNNER_SEND_AFTER_QUEUE
         value: "false"
 
-      # Quiet hours guard
+      # Quiet hours guard (dup to be explicit for worker)
+      - key: QUIET_TZ
+        value: "America/Chicago"
+      - key: QUIET_START_HOUR
+        value: "21"
+      - key: QUIET_END_HOUR
+        value: "9"
+      - key: QUIET_HOURS_ENFORCED
+        value: "true"
       - key: QUIET_START_HOUR_LOCAL
         value: "21"
       - key: QUIET_END_HOUR_LOCAL
         value: "9"
+
+      # General flags
+      - key: ALLOW_QUEUE_OUTSIDE_HOURS
+        value: "true"
+      - key: PREQUEUE_BEFORE_START
+        value: "true"
+      - key: AUTORESPONDER_ALWAYS_ON
+        value: "true"
+      - key: TEST_MODE
+        value: "false"
+      - key: STRICT_MODE
+        value: "false"
+      - key: DEBUG_CAMPAIGNS
+        value: "false"
 
     command: python -u -m sms.worker
 
@@ -137,54 +191,63 @@ cronJobs:
   - name: run-autoresponder
     schedule: "*/10 * * * *"
     command: |
-      curl --fail --silent --show-error --max-time 25 \
+      curl --http1.1 --retry 3 --retry-connrefused --retry-delay 2 \
+        --fail --silent --show-error --max-time 25 -H "Connection: close" \
         -X POST "https://rei-sms-engine.onrender.com/autoresponder/autoresponder" \
         -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: run-campaigns
     schedule: "*/10 * * * *"
     command: |
-      curl --fail --silent --show-error --max-time 25 \
-        -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL" \
+      # Use large integer to avoid ANY 'None' handling in code paths
+      curl --http1.1 --retry 3 --retry-connrefused --retry-delay 2 \
+        --fail --silent --show-error --max-time 25 -H "Connection: close" \
+        -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=999999" \
         -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: sms-retry-runner
     schedule: "*/30 * * * *"
     command: |
-      curl --fail --silent --show-error --max-time 25 \
+      curl --http1.1 --retry 3 --retry-connrefused --retry-delay 2 \
+        --fail --silent --show-error --max-time 25 -H "Connection: close" \
         -X POST "https://rei-sms-engine.onrender.com/retry" \
         -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: reset-daily-quotas
     schedule: "0 0 * * *"
     command: |
-      curl --fail --silent --show-error --max-time 25 \
+      curl --http1.1 --retry 3 --retry-connrefused --retry-delay 2 \
+        --fail --silent --show-error --max-time 25 -H "Connection: close" \
         -X POST "https://rei-sms-engine.onrender.com/reset-quotas" \
         -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: aggregate-kpis-daily
     schedule: "0 1 * * *"
     command: |
-      curl --fail --silent --show-error --max-time 25 \
+      curl --http1.1 --retry 3 --retry-connrefused --retry-delay 2 \
+        --fail --silent --show-error --max-time 25 -H "Connection: close" \
         -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
         -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: aggregate-kpis-weekly
     schedule: "0 2 * * 1"
     command: |
-      curl --fail --silent --show-error --max-time 25 \
+      curl --http1.1 --retry 3 --retry-connrefused --retry-delay 2 \
+        --fail --silent --show-error --max-time 25 -H "Connection: close" \
         -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
         -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: aggregate-kpis-monthly
     schedule: "0 3 1 * *"
     command: |
-      curl --fail --silent --show-error --max-time 25 \
+      curl --http1.1 --retry 3 --retry-connrefused --retry-delay 2 \
+        --fail --silent --show-error --max-time 25 -H "Connection: close" \
         -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
         -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: health-ping
     schedule: "*/5 * * * *"
     command: |
-      curl --fail --silent --show-error --max-time 10 \
+      curl --http1.1 --retry 3 --retry-connrefused --retry-delay 2 \
+        --fail --silent --show-error --max-time 10 -H "Connection: close" \
         "https://rei-sms-engine.onrender.com/health"

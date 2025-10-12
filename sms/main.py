@@ -104,6 +104,7 @@ if inbound_router:
 
 # ─────────────────────── ENV / runtime toggles ──────────────────────
 CRON_TOKEN = os.getenv("CRON_TOKEN")
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
 STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
 
@@ -170,10 +171,12 @@ def _extract_token(request: Request, qp_token: Optional[str], h_webhook: Optiona
     return ""
 
 def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]):
-    if not CRON_TOKEN:  # unsecured mode
+    # Accept either CRON_TOKEN or WEBHOOK_TOKEN (if set). If neither env is set, run open (dev mode).
+    valid_tokens = {t for t in [CRON_TOKEN, WEBHOOK_TOKEN] if t}
+    if not valid_tokens:
         return
     token = _extract_token(request, qp_token, h_webhook, h_cron)
-    if token != CRON_TOKEN:
+    if token not in valid_tokens:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 # Quiet-hours helpers
@@ -269,7 +272,6 @@ def _parse_limit_param(raw: Optional[str]) -> Optional[int]:
         v = int(s)
         return max(v, 1)
     except Exception:
-        # Don't crash. Log and treat as unlimited.
         print(f"[warn] Invalid limit param: {raw!r} → treating as None")
         return None
 
@@ -339,7 +341,7 @@ async def autoresponder_endpoint(
     x_webhook_token: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
 ):
-    _require_token(request, token, x_cron_token=x_cron_token, h_webhook=x_webhook_token)
+    _require_token(request, token, x_webhook_token, x_cron_token)
     os.environ["PROCESSED_BY_LABEL"] = mode.replace("-", " ").title()
     if TEST_MODE:
         return {"ok": True, "status": "mock_autoresponder", "mode": mode}
