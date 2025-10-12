@@ -6,32 +6,30 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
-from dotenv import load_dotenv
 
+# .env loader (safe if missing)
 try:
-    from zoneinfo import ZoneInfo
+    from dotenv import load_dotenv  # type: ignore
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
+    load_dotenv(dotenv_path=ENV_PATH, override=True)
 except Exception:
-    ZoneInfo = None
+    pass
 
+# Optional zoneinfo
 try:
-    from pyairtable import Api, Table  # noqa
+    from zoneinfo import ZoneInfo  # py3.9+
 except Exception:
-    Api = None
-    Table = None
+    ZoneInfo = None  # type: ignore
 
-# -----------------------------
-# .env loader (project root)
-# -----------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
-load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 # -----------------------------
 # Env helpers
 # -----------------------------
 def env_bool(key: str, default: bool = False) -> bool:
     v = os.getenv(key)
-    if v is None: return default
+    if v is None:
+        return default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 def env_int(key: str, default: int) -> int:
@@ -51,6 +49,7 @@ def env_float(key: str, default: float) -> float:
 def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(key)
     return v if (v is not None and str(v).strip() != "") else default
+
 
 # -----------------------------
 # Static field name maps
@@ -74,6 +73,7 @@ PHONE_FIELDS = [
     "Owner Phone","Owner Phone 1","Owner Phone 2",
     "Phone 1 (from Linked Owner)","Phone 2 (from Linked Owner)","Phone 3 (from Linked Owner)",
 ]
+
 
 # -----------------------------
 # Settings object
@@ -130,15 +130,16 @@ class Settings:
     # Security / API
     CRON_TOKEN: Optional[str]
 
+
 @lru_cache(maxsize=1)
 def settings() -> Settings:
     return Settings(
         AIRTABLE_API_KEY = env_str("AIRTABLE_API_KEY"),
         AIRTABLE_REPORTING_KEY = env_str("AIRTABLE_REPORTING_KEY"),
 
-        LEADS_CONVOS_BASE = env_str("LEADS_CONVOS_BASE"),
-        CAMPAIGN_CONTROL_BASE = env_str("CAMPAIGN_CONTROL_BASE"),
-        PERFORMANCE_BASE = env_str("PERFORMANCE_BASE"),
+        LEADS_CONVOS_BASE = env_str("LEADS_CONVOS_BASE") or env_str("AIRTABLE_LEADS_CONVOS_BASE_ID"),
+        CAMPAIGN_CONTROL_BASE = env_str("CAMPAIGN_CONTROL_BASE") or env_str("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"),
+        PERFORMANCE_BASE = env_str("PERFORMANCE_BASE") or env_str("AIRTABLE_PERFORMANCE_BASE_ID"),
 
         PROSPECTS_TABLE = env_str("PROSPECTS_TABLE", "Prospects"),
         LEADS_TABLE = env_str("LEADS_TABLE", "Leads"),
@@ -173,6 +174,7 @@ def settings() -> Settings:
         CRON_TOKEN = env_str("CRON_TOKEN"),
     )
 
+
 # -----------------------------
 # Time helpers
 # -----------------------------
@@ -184,53 +186,52 @@ def tz_now() -> datetime:
     return datetime.now(tz)
 
 def in_quiet_hours() -> bool:
-    if not settings().QUIET_HOURS_ENFORCED:
+    s = settings()
+    if not s.QUIET_HOURS_ENFORCED:
         return False
     h = tz_now().hour
-    return (h >= settings().QUIET_START_HOUR) or (h < settings().QUIET_END_HOUR)
+    return (h >= s.QUIET_START_HOUR) or (h < s.QUIET_END_HOUR)
+
 
 # -----------------------------
-# Airtable client helpers
+# Airtable table shorthands
+# (These return pyairtable.Table if configured, else None)
 # -----------------------------
-@lru_cache(maxsize=1)
-def api_main() -> Any:
-    s = settings()
-    if not (s.AIRTABLE_API_KEY and s.LEADS_CONVOS_BASE and Api):
-        return None
-    return Api(s.AIRTABLE_API_KEY)
+try:
+    from pyairtable import Api  # type: ignore
+except Exception:
+    Api = None  # type: ignore
 
 @lru_cache(maxsize=1)
-def api_control() -> Any:
+def api_main():
     s = settings()
-    if not (s.AIRTABLE_API_KEY and s.CAMPAIGN_CONTROL_BASE and Api):
-        return None
-    return Api(s.AIRTABLE_API_KEY)
+    return Api(s.AIRTABLE_API_KEY) if (Api and s.AIRTABLE_API_KEY and s.LEADS_CONVOS_BASE) else None
 
 @lru_cache(maxsize=1)
-def api_perf() -> Any:
+def api_control():
+    s = settings()
+    return Api(s.AIRTABLE_API_KEY) if (Api and s.AIRTABLE_API_KEY and s.CAMPAIGN_CONTROL_BASE) else None
+
+@lru_cache(maxsize=1)
+def api_perf():
     s = settings()
     key = s.AIRTABLE_REPORTING_KEY or s.AIRTABLE_API_KEY
-    if not (key and s.PERFORMANCE_BASE and Api):
-        return None
-    return Api(key)
+    return Api(key) if (Api and key and s.PERFORMANCE_BASE) else None
 
 def table_main(table_name: str):
-    """Return a Table in the main base (Leads/Convos)."""
-    s = settings()
     a = api_main()
-    return a.table(s.LEADS_CONVOS_BASE, table_name) if a else None
+    b = settings().LEADS_CONVOS_BASE
+    return a.table(b, table_name) if a else None  # type: ignore[union-attr]
 
 def table_control(table_name: str):
-    """Return a Table in the campaign control base (Numbers)."""
-    s = settings()
     a = api_control()
-    return a.table(s.CAMPAIGN_CONTROL_BASE, table_name) if a else None
+    b = settings().CAMPAIGN_CONTROL_BASE
+    return a.table(b, table_name) if a else None  # type: ignore[union-attr]
 
 def table_perf(table_name: str):
-    """Return a Table in the performance base (KPIs / Runs)."""
-    s = settings()
     a = api_perf()
-    return a.table(s.PERFORMANCE_BASE, table_name) if a else None
+    b = settings().PERFORMANCE_BASE
+    return a.table(b, table_name) if a else None  # type: ignore[union-attr]
 
 # Shorthand resolvers (cached)
 @lru_cache(maxsize=None)
@@ -252,6 +253,7 @@ def runs_logs():     return table_perf("Runs/Logs")
 @lru_cache(maxsize=None)
 def kpis():          return table_perf("KPIs")
 
+
 # -----------------------------
 # Field-safe mapping helpers
 # -----------------------------
@@ -261,7 +263,7 @@ def norm(s: Any) -> Any:
 
 def auto_field_map(tbl) -> Dict[str, str]:
     try:
-        probe = tbl.all(max_records=1)
+        probe = tbl.all(max_records=1)  # type: ignore[attr-defined]
         keys = list((probe[0] or {}).get("fields", {}).keys()) if probe else []
     except Exception:
         keys = []
@@ -272,5 +274,31 @@ def remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for k, v in (payload or {}).items():
         ak = amap.get(norm(k))
-        if ak: out[ak] = v
+        if ak:
+            out[ak] = v
     return out
+
+
+# -----------------------------
+# Back-compat module-level exports
+# (Some older modules expect these names on sms.config)
+# -----------------------------
+S = settings()
+AIRTABLE_API_KEY: Optional[str]      = S.AIRTABLE_API_KEY
+AIRTABLE_REPORTING_KEY: Optional[str]= S.AIRTABLE_REPORTING_KEY
+LEADS_CONVOS_BASE: Optional[str]     = S.LEADS_CONVOS_BASE
+CAMPAIGN_CONTROL_BASE: Optional[str] = S.CAMPAIGN_CONTROL_BASE
+PERFORMANCE_BASE: Optional[str]      = S.PERFORMANCE_BASE
+
+__all__ = [
+    "settings",
+    # time helpers
+    "utcnow", "tz_now", "in_quiet_hours",
+    # tables
+    "conversations","leads","prospects","templates","drip_queue","campaigns","numbers","runs_logs","kpis",
+    "table_main","table_control","table_perf",
+    # helpers
+    "CONV_FIELDS","PHONE_FIELDS","remap_existing_only","auto_field_map","norm",
+    # back-compat names
+    "AIRTABLE_API_KEY","AIRTABLE_REPORTING_KEY","LEADS_CONVOS_BASE","CAMPAIGN_CONTROL_BASE","PERFORMANCE_BASE",
+]
