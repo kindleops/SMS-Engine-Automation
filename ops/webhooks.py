@@ -2,95 +2,126 @@
 from __future__ import annotations
 
 import os
+import json
 import traceback
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional
+from datetime import datetime, timezone
 
-# Optional system stats
+from fastapi import FastAPI, Header, Request
+
+# ---- pyairtable v1/v2 compatibility -----------------------------------------
 try:
-    import psutil  # optional
+    from pyairtable import Table as _PyTable  # v1 style
 except Exception:  # pragma: no cover
-    psutil = None  # type: ignore
-
-# Optional Airtable client (v2)
+    _PyTable = None
 try:
-    from pyairtable import Api  # type: ignore
+    from pyairtable import Api as _PyApi  # v2 style
 except Exception:  # pragma: no cover
-    Api = None  # type: ignore
+    _PyApi = None
 
 
-def _get_airtable_table(table_name: str):
-    """
-    Lazy, safe table getter. Returns None if env or client missing.
-    Works with pyairtable v2: Api(key).table(base_id, table_name)
-    """
-    try:
-        key = os.getenv("AIRTABLE_API_KEY")
-        base = os.getenv("DEVOPS_BASE") or os.getenv("AIRTABLE_DEVOPS_BASE_ID")
-        if not (Api and key and base):
-            return None
-        return Api(key).table(base, table_name)
-    except Exception:
-        traceback.print_exc()
+def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
+    """Return a Table-like object or None (never throws)."""
+    if not (api_key and base_id):
         return None
-
-
-def system_stats() -> Dict[str, Any]:
-    """
-    Lightweight system metrics. Never crashes if psutil is absent.
-    """
-    if not psutil:
-        return {
-            "ok": True,
-            "psutil_available": False,
-            "note": "psutil not installed; returning minimal stats",
-        }
     try:
-        vm = psutil.virtual_memory()
-        cpu = psutil.cpu_percent(interval=0.0)  # non-blocking snapshot
-        return {
-            "ok": True,
-            "psutil_available": True,
-            "cpu_percent": cpu,
-            "mem_percent": vm.percent,
-            "mem_used_mb": round(vm.used / (1024 * 1024), 1),
-            "mem_total_mb": round(vm.total / (1024 * 1024), 1),
-        }
+        if _PyTable:
+            # v1 signature: Table(api_key, base_id, table_name)
+            return _PyTable(api_key, base_id, table_name)
+        if _PyApi:
+            # v2 signature: Api(api_key).table(base_id, table_name)
+            return _PyApi(api_key).table(base_id, table_name)
     except Exception:
         traceback.print_exc()
-        return {"ok": False, "error": "stats_failed"}
+    return None
 
 
-def devops_log(event: str, **fields) -> Dict[str, Any]:
+# ---- Config & env ------------------------------------------------------------
+AIRTABLE_API_KEY = (
+    os.getenv("AIRTABLE_REPORTING_KEY")
+    or os.getenv("PERFORMANCE_KEY")
+    or os.getenv("AIRTABLE_API_KEY")
+)
+DEVOPS_BASE = (
+    os.getenv("DEVOPS_BASE")
+    or os.getenv("PERFORMANCE_BASE")
+    or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
+)
+LOGS_TABLE_NAME = os.getenv("DEVOPS_LOGS_TABLE", "Logs")
+
+WEBHOOK_TOKEN = (
+    os.getenv("WEBHOOK_TOKEN")
+    or os.getenv("CRON_TOKEN")
+    or os.getenv("TEXTGRID_AUTH_TOKEN")
+)
+
+
+def get_logs_table():
+    """Lazy init; safe if env missing."""
+    return _make_table(AIRTABLE_API_KEY, DEVOPS_BASE, LOGS_TABLE_NAME)
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def log_devops(event: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """
-    Best-effort: write a row to DevOps Logs table (if configured).
-    Never raises; returns status dict.
+    Best-effort logging to Airtable; falls back to stdout if not configured.
     """
-    tbl = _get_airtable_table("Logs")
-    if not tbl:
-        return {"ok": False, "skipped": "devops_base_or_client_missing"}
-
-    payload = {
+    fields = {
         "Event": event,
-        "Payload": {k: v for k, v in fields.items() if v is not None},
+        "Payload": json.dumps(payload or {}, ensure_ascii=False)[:2000],
+        "Timestamp": iso_now(),
     }
-    try:
-        rec = tbl.create(payload)
-        return {"ok": True, "id": rec.get("id")}
-    except Exception:
-        traceback.print_exc()
-        return {"ok": False, "error": "create_failed"}
 
-
-def recent_logs(limit: int = 50) -> List[Dict[str, Any]]:
-    """
-    Fetch recent devops logs (if table configured). Never raises.
-    """
-    tbl = _get_airtable_table("Logs")
+    tbl = get_logs_table()
     if not tbl:
-        return []
+        print(f"[DEVOPS_LOG] {event} | {fields['Payload']}")
+        return {"ok": True, "mock": True, "note": "airtable not configured"}
+
     try:
-        rows = tbl.all(max_records=max(1, min(limit, 100)))
-        return rows or []
-    except Exception:
+        rec = tbl.create({k: v for k, v in fields.items() if v is not None})
+        return {"ok": True, "id": rec.get("id")}
+    except Exception as e:  # pragma: no cover
         traceback.print_exc()
-        return []
+        return {"ok": False, "error": str(e)}
+
+
+# ---- FastAPI app -------------------------------------------------------------
+app = FastAPI(title="Ops Webhooks", version="1.0.0")
+
+
+@app.get("/health")
+def health():
+    """
+    Always return ok=True so the service boots even without Airtable.
+    Expose whether Airtable is configured for observability.
+    """
+    return {
+        "ok": True,
+        "airtable_configured": bool(AIRTABLE_API_KEY and DEVOPS_BASE),
+        "table_ready": bool(get_logs_table()),
+        "time": iso_now(),
+    }
+
+
+@app.post("/ops/webhook")
+async def ops_webhook(
+    request: Request,
+    x_webhook_token: Optional[str] = Header(None),
+):
+    """
+    Generic webhook endpoint that logs the payload.
+    Optional token check via WEBHOOK_TOKEN/CRON_TOKEN/TEXTGRID_AUTH_TOKEN.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {"raw": await request.body()}
+
+    if WEBHOOK_TOKEN and (x_webhook_token or "") != WEBHOOK_TOKEN:
+        return {"ok": False, "error": "invalid token"}
+
+    res = log_devops("webhook", body if isinstance(body, dict) else {"payload": str(body)})
+    return {"ok": True, "logged": res.get("ok", False), "airtable": res}
