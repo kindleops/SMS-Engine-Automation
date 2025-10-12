@@ -1,9 +1,13 @@
 # sms/outbound_batcher.py
 from __future__ import annotations
 
-import os, re, time, traceback, hashlib
-from datetime import datetime, timezone, timedelta, date
-from typing import Dict, Any, Optional, Tuple, List
+import hashlib
+import os
+import re
+import time
+import traceback
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 # -------------------------------
 # pyairtable compatibility layer
@@ -48,6 +52,11 @@ CONTROL_BASE_ENV = "CAMPAIGN_CONTROL_BASE"  # Numbers base
 DRIP_TABLE_NAME = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 NUMBERS_TABLE_NAME = os.getenv("NUMBERS_TABLE", "Numbers")
 CAMPAIGNS_TABLE_NAME = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+
+# ---- Back-compat constants expected by tests / older code
+DRIP_QUEUE_TABLE = DRIP_TABLE_NAME
+NUMBERS_TABLE = NUMBERS_TABLE_NAME
+CAMPAIGNS_TABLE = CAMPAIGNS_TABLE_NAME
 
 # Rate limits (enforced with Redis across all workers)
 RATE_PER_NUMBER_PER_MIN = int(os.getenv("RATE_PER_NUMBER_PER_MIN", "20"))
@@ -314,7 +323,15 @@ def _digits_only(s: Any) -> Optional[str]:
     return ds if len(ds) >= 10 else None
 
 
-STATUS_ICON = {"QUEUED": "⏳", "READY": "⏳", "SENDING": "⏳", "SENT": "✅", "DELIVERED": "✅", "FAILED": "❌", "CANCELLED": "❌"}
+STATUS_ICON = {
+    "QUEUED": "⏳",
+    "READY": "⏳",
+    "SENDING": "⏳",
+    "SENT": "✅",
+    "DELIVERED": "✅",
+    "FAILED": "❌",
+    "CANCELLED": "❌",
+}
 
 
 def _set_ui(drip_tbl: Any, rec_id: str, status: str):
@@ -711,3 +728,14 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         "quiet_hours": False,
         "errors": errors,
     }
+
+
+# =========================
+# Back-compat shim for tests
+# =========================
+def reset_daily_quotas():
+    """
+    Legacy hook referenced by tests; real implementation lives elsewhere.
+    Kept as a harmless stub so tests can monkeypatch it.
+    """
+    return {"ok": True, "note": "noop (stubbed in tests)"}
