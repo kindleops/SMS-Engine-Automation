@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Header, Request, Query, HTTPException
 
-# ---- optional engine hooks (never hard-crash) -------------------------------
+# ─────────────────────────────────────────────────────────────
+# Optional engine hooks (safe fallbacks if modules missing)
+# ─────────────────────────────────────────────────────────────
 try:
     from sms.campaign_runner import run_campaigns
 except Exception:
@@ -32,7 +34,9 @@ except Exception:
     def run_autoresponder(limit: int = 50, view: Optional[str] = None):
         return {"ok": True, "processed": 0, "mock": True}
 
-# ---- pyairtable v1/v2 compatibility -----------------------------------------
+# ─────────────────────────────────────────────────────────────
+# pyairtable v1/v2 compatibility
+# ─────────────────────────────────────────────────────────────
 try:
     from pyairtable import Table as _PyTable  # v1
 except Exception:
@@ -57,7 +61,9 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
     return None
 
 
-# ---- Config & env ------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
+# Config & env
+# ─────────────────────────────────────────────────────────────
 AIRTABLE_API_KEY = (
     os.getenv("AIRTABLE_REPORTING_KEY")
     or os.getenv("PERFORMANCE_KEY")
@@ -87,7 +93,16 @@ AUTORESPONDER_LIMIT = int(os.getenv("AUTORESPONDER_LIMIT", "50"))
 AUTORESPONDER_VIEW = os.getenv("AUTORESPONDER_VIEW", "Unprocessed Inbounds")
 
 
-# ---- Airtable helpers --------------------------------------------------------
+# ─────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _norm(s: Any) -> Any:
+    import re
+    return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
         rows = tbl.all(max_records=1)  # type: ignore[attr-defined]
@@ -95,10 +110,6 @@ def _auto_field_map(tbl) -> Dict[str, str]:
     except Exception:
         keys = []
     return { _norm(k): k for k in keys }
-
-def _norm(s: Any) -> Any:
-    import re
-    return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
 
 def _safe_update(tbl, rid: str, payload: Dict):
     if not (tbl and rid and payload):
@@ -118,12 +129,9 @@ def _safe_update(tbl, rid: str, payload: Dict):
         return None
 
 
-# ---- DevOps logging ----------------------------------------------------------
+# DevOps logging
 def get_logs_table():
     return _make_table(AIRTABLE_API_KEY, DEVOPS_BASE, LOGS_TABLE_NAME)
-
-def iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 def log_devops(event: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     fields = {
@@ -143,9 +151,8 @@ def log_devops(event: str, payload: Dict[str, Any] | None = None) -> Dict[str, A
         return {"ok": False, "error": str(e)}
 
 
-# ---- Auth helper -------------------------------------------------------------
+# Auth helpers (support ?token=, x-webhook-token, x-cron-token, or Bearer)
 def _extract_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]) -> str:
-    # Priority: query ?token=  →  x-webhook-token  →  x-cron-token  →  Authorization: Bearer
     if qp_token:
         return qp_token
     if h_webhook:
@@ -162,11 +169,13 @@ def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optiona
         return  # unsecured mode
     token = _extract_token(request, qp_token, h_webhook, h_cron)
     if token != WEBHOOK_TOKEN:
-        raise HTTPException(status_code=403, detail="invalid token")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# ---- FastAPI app -------------------------------------------------------------
-app = FastAPI(title="SMS Engine Ops", version="2.0.0")
+# ─────────────────────────────────────────────────────────────
+# FastAPI app & routes
+# ─────────────────────────────────────────────────────────────
+app = FastAPI(title="SMS Engine Ops", version="3.0.0")
 
 @app.get("/health")
 def health():
@@ -177,7 +186,29 @@ def health():
         "time": iso_now(),
     }
 
-# Keep the generic logger for external integrations if you want it
+@app.get("/ping")
+def ping():
+    return {"ok": True, "pong": True, "time": iso_now()}
+
+@app.post("/echo-token")
+def echo_token(
+    x_cron_token: str | None = Header(None),
+    x_webhook_token: str | None = Header(None),
+):
+    return {"ok": True, "x_cron_token": x_cron_token, "x_webhook_token": x_webhook_token}
+
+@app.get("/debug/env")
+def debug_env():
+    keys = [
+        "AIRTABLE_API_KEY","LEADS_CONVOS_BASE","AIRTABLE_LEADS_CONVOS_BASE_ID",
+        "CAMPAIGN_CONTROL_BASE","AIRTABLE_CAMPAIGN_CONTROL_BASE_ID",
+        "PERFORMANCE_BASE","AIRTABLE_PERFORMANCE_BASE_ID",
+        "UPSTASH_REDIS_REST_URL","UPSTASH_REDIS_REST_TOKEN",
+        "WEBHOOK_TOKEN","CRON_TOKEN","TEXTGRID_AUTH_TOKEN"
+    ]
+    return {"ok": True, "present": {k: bool(os.getenv(k)) for k in keys}}
+
+# Generic logger (optional)
 @app.post("/ops/webhook")
 async def ops_webhook(
     request: Request,
@@ -193,19 +224,21 @@ async def ops_webhook(
     res = log_devops("webhook", body if isinstance(body, dict) else {"payload": str(body)})
     return {"ok": True, "logged": res.get("ok", False), "airtable": res}
 
-# -------- Cron/worker endpoints to match your Render yaml ---------------------
+# ---- Cron/worker endpoints (single, canonical definitions) -------------------
 
 @app.post("/run-campaigns")
 def run_campaigns_ep(
     request: Request,
     limit: str = Query("1"),
     send_after_queue: Optional[bool] = Query(None),
-    campaign_id: Optional[str] = Query(None),    # future use if you want per-campaign queue
+    dry: bool = Query(False, description="If true, skip actual run and return quickly"),
     x_webhook_token: Optional[str] = Header(None),
     x_cron_token: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
+    if dry:
+        return {"ok": True, "dry": True, "time": iso_now(), "limit": limit, "send_after_queue": send_after_queue}
     result = run_campaigns(limit=limit, send_after_queue=send_after_queue)
     log_devops("run-campaigns", {"limit": limit, "send_after_queue": send_after_queue, "result": result})
     return result
@@ -245,9 +278,6 @@ def reset_quotas_ep(
     x_cron_token: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
 ):
-    """
-    Set Numbers.'Sent Today' → 0 (and gently try to map the real field names).
-    """
     _require_token(request, token, x_webhook_token, x_cron_token)
 
     tbl = _make_table(AIRTABLE_API_KEY, CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
@@ -265,7 +295,6 @@ def reset_quotas_ep(
         rid = r.get("id")
         if not rid:
             continue
-        # tolerate schema variations
         payload = {"Sent Today": 0}
         if r.get("fields", {}).get("Daily Reset") is not None and r.get("fields", {}).get("Remaining") is not None:
             try:
