@@ -4,7 +4,7 @@ from __future__ import annotations
 import os, re, json, random, math, traceback
 from datetime import datetime, timezone, timedelta, date
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
@@ -25,10 +25,7 @@ except Exception:
     _PyTable = None
 
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
-    """
-    Return a table-like object exposing .all/.get/.create/.update, or None.
-    Works with both pyairtable v2 (Api) and v1 (Table).
-    """
+    """Return a table-like object exposing .all/.get/.create/.update, or None."""
     if not (api_key and base_id):
         return None
     try:
@@ -46,20 +43,17 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
 try:
     from sms.outbound_batcher import send_batch
 except Exception:
-    def send_batch(*args, **kwargs):
-        return {"total_sent": 0}
+    def send_batch(*args, **kwargs): return {"total_sent": 0}
 
 try:
     from sms.retry_runner import run_retry
 except Exception:
-    def run_retry(*args, **kwargs):
-        return {"retried": 0}
+    def run_retry(*args, **kwargs): return {"retried": 0}
 
 try:
     from sms.metrics_tracker import update_metrics
 except Exception:
-    def update_metrics(*args, **kwargs):
-        return {"ok": True}
+    def update_metrics(*args, **kwargs): return {"ok": True}
 
 # ─────────────────────────────────────────────────────────────
 # ENV / CONFIG
@@ -86,14 +80,14 @@ SECONDS_PER_NUMBER_MSG = max(1, int(math.ceil(60.0 / RATE_PER_NUMBER_PER_MIN)))
 
 QUIET_TZ = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago"))
 QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", os.getenv("QUIET_START_HOUR_LOCAL", "21")))
-QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", os.getenv("QUIET_END_HOUR_LOCAL", "9")))
+QUIET_END_HOUR   = int(os.getenv("QUIET_END_HOUR",   os.getenv("QUIET_END_HOUR_LOCAL",   "9")))
 
-RUNNER_SEND_AFTER_QUEUE = os.getenv("RUNNER_SEND_AFTER_QUEUE", "false").lower() in ("1", "true", "yes")
+RUNNER_SEND_AFTER_QUEUE   = os.getenv("RUNNER_SEND_AFTER_QUEUE", "false").lower() in ("1", "true", "yes")
 ALLOW_QUEUE_OUTSIDE_HOURS = os.getenv("ALLOW_QUEUE_OUTSIDE_HOURS", "true").lower() in ("1", "true", "yes")
-PREQUEUE_BEFORE_START = os.getenv("PREQUEUE_BEFORE_START", "true").lower() in ("1", "true", "yes")
-DEDUPE_HOURS = int(os.getenv("DEDUPE_HOURS", "72"))
-DAILY_LIMIT_FALLBACK = int(os.getenv("DAILY_LIMIT", "750"))
-DEBUG_CAMPAIGNS = os.getenv("DEBUG_CAMPAIGNS", "false").lower() in ("1", "true", "yes")
+PREQUEUE_BEFORE_START     = os.getenv("PREQUEUE_BEFORE_START", "true").lower() in ("1", "true", "yes")
+DEDUPE_HOURS              = int(os.getenv("DEDUPE_HOURS", "72"))
+DAILY_LIMIT_FALLBACK      = int(os.getenv("DAILY_LIMIT", "750"))
+DEBUG_CAMPAIGNS           = os.getenv("DEBUG_CAMPAIGNS", "false").lower() in ("1", "true", "yes")
 
 PHONE_FIELDS = [
     "phone", "Phone", "Mobile", "Cell", "Phone Number", "Primary Phone",
@@ -293,7 +287,7 @@ def _safe_update(tbl, rid: str, payload: Dict):
 # Friendly First/Address extraction (city-safe, natural)
 # ─────────────────────────────────────────────────────────────
 _TITLE_WORDS = {"mr","mrs","ms","miss","dr","prof","sir","madam","rev","capt","cpt","lt","sgt"}
-_ORG_HINTS = {"llc","inc","corp","co","company","trust","estates","holdings","hoa","ltd","pllc","llp","pc"}
+_ORG_HINTS   = {"llc","inc","corp","co","company","trust","estates","holdings","hoa","ltd","pllc","llp","pc"}
 _BAD_NAME_KEY_HINTS = {
     "city","property","mail","street","zip","state","county","parcel","apn","unit",
     "neighborhood","subdivision","listing","agent","broker","company","business",
@@ -421,7 +415,6 @@ def _personalization_ctx(pf: Dict[str, Any]) -> Dict[str, Any]:
 def _format_template(text: str, ctx: Dict[str, Any]) -> str:
     if not text:
         return text
-    # normalize keys (case/spacing insensitive)
     amap = {_norm(k): ("" if v is None else str(v)) for k, v in (ctx or {}).items()}
     def repl(m):
         raw = m.group(1) or m.group(2)
@@ -507,7 +500,6 @@ def _load_number_pool(market: Optional[str], base_time: datetime) -> List[Number
     return pool
 
 def _pick_number_with_pacing(pool: List[NumberState]) -> Optional[NumberState]:
-    # choose the number with earliest next_time, then highest remaining
     if not pool:
         return None
     pool.sort(key=lambda n: (n.next_time, -n.remaining, n.e164))
@@ -616,34 +608,29 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         go_live = f.get("Go Live")
         if go_live is False:
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] SKIP {name}: Go Live is False")
+            if DEBUG_CAMPAIGNS: print(f"[campaign] SKIP {name}: Go Live is False")
             continue
 
         status_val = str((f.get("status") or f.get("Status") or "")).strip().lower()
         if status_val and status_val not in ("scheduled", "running"):
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] SKIP {name}: status={status_val!r}")
+            if DEBUG_CAMPAIGNS: print(f"[campaign] SKIP {name}: status={status_val!r}")
             continue
 
         start_dt = _get_time_field(f, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
-        end_dt = _get_time_field(f, "End Time", "End", "End At", "end_time", "End Date", "Schedule End")
+        end_dt   = _get_time_field(f, "End Time",   "End",   "End At",   "end_time",   "End Date",   "Schedule End")
 
         if end_dt and now_utc >= end_dt:
             _safe_update(campaigns, c["id"], {"status": "Completed", "last_run_at": iso_now()})
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] COMPLETE {name}: now>=end")
+            if DEBUG_CAMPAIGNS: print(f"[campaign] COMPLETE {name}: now>=end")
             continue
 
         if start_dt and now_utc < start_dt and not PREQUEUE_BEFORE_START:
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] WAIT {name}: now<start (prequeue off)")
+            if DEBUG_CAMPAIGNS: print(f"[campaign] WAIT {name}: now<start (prequeue off)")
             continue
 
         if start_dt and now_utc < start_dt and PREQUEUE_BEFORE_START:
             if not ALLOW_QUEUE_OUTSIDE_HOURS and _in_quiet_hours(start_dt):
-                if DEBUG_CAMPAIGNS:
-                    print(f"[campaign] WAIT {name}: start in quiet; queue-off")
+                if DEBUG_CAMPAIGNS: print(f"[campaign] WAIT {name}: start in quiet; queue-off")
                 continue
 
         if DEBUG_CAMPAIGNS:
@@ -671,8 +658,7 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         template_ids = cf.get("Templates") or cf.get("templates") or []
         if not template_ids:
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] SKIP {name}: no Templates linked")
+            if DEBUG_CAMPAIGNS: print(f"[campaign] SKIP {name}: no Templates linked")
             continue
 
         start_dt = _get_time_field(cf, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
@@ -681,7 +667,7 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         # phase offset per campaign to reduce cross-campaign collisions
         try:
-            phase = abs(hash(cid)) % SECONDS_PER_NUMBER_MSG
+            phase = abs(hash(cid)) % max(1, SECONDS_PER_NUMBER_MSG)
             base_utc = base_utc + timedelta(seconds=phase)
         except Exception:
             pass
@@ -692,8 +678,7 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         # Create per-number pacing pool
         number_pool = _load_number_pool(market, base_utc)
         if not number_pool:
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] SKIP {name}: no eligible numbers")
+            if DEBUG_CAMPAIGNS: print(f"[campaign] SKIP {name}: no eligible numbers")
             continue
 
         if prequeue:
@@ -703,11 +688,16 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         queued = 0
         nums_tbl = get_numbers_table()
+        # Within-run de-dupe for this campaign to avoid duplicates if Prospects view has dup rows
+        seen_l10: set[str] = set()
 
         for pr in prospect_rows:
             pf = pr.get("fields", {}) or {}
             phone = get_phone(pf)
-            if not phone:
+            l10 = last10(phone) if phone else None
+            if not phone or not l10:
+                continue
+            if l10 in seen_l10:
                 continue
             if already_queued(drip, phone, cid):
                 continue
@@ -735,13 +725,25 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             ctx.update(_personalization_ctx(pf))
             body = _format_template(str(raw), ctx)
 
-            # schedule for this number's next available slot
+            # schedule for this number's next available slot (never in the past)
             scheduled = ns.next_time
             if JITTER_SECONDS:
                 scheduled = scheduled + timedelta(seconds=random.randint(0, JITTER_SECONDS))
+            # ensure not in quiet hours
             if _in_quiet_hours(scheduled):
                 scheduled = _shift_to_window(scheduled)
-            scheduled_local = _local_naive_iso(scheduled)
+            # guard: never schedule in the past
+            if not prequeue and scheduled < utcnow():
+                scheduled = utcnow() + timedelta(seconds=1)
+
+            # dual-write: CT-naive and absolute UTC to be bulletproof for downstream parsers
+            scheduled_local_naive_dt = scheduled.astimezone(QUIET_TZ).replace(tzinfo=None)
+            now_local_naive_dt = utcnow().astimezone(QUIET_TZ).replace(tzinfo=None)
+            if not prequeue and scheduled_local_naive_dt < now_local_naive_dt:
+                scheduled_local_naive_dt = now_local_naive_dt + timedelta(seconds=1)
+
+            scheduled_local = scheduled_local_naive_dt.isoformat(timespec="seconds")
+            scheduled_utc   = scheduled.isoformat()
 
             payload = {
                 "Prospect": [pr["id"]],
@@ -750,9 +752,12 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
                 "Market": market or pf.get("Market"),
                 "phone": phone,
                 "message_preview": body,
-                "from_number": ns.e164,          # maps to "From Number" if schema differs
+                "from_number": ns.e164,              # maps to "From Number" if schema differs
                 "status": "QUEUED",
-                "next_send_date": scheduled_local,  # CT-naive
+                "next_send_date": scheduled_local,   # CT-naive (if table uses this)
+                "Next Send Date": scheduled_local,   # alt casing / name
+                "next_send_date_utc": scheduled_utc, # absolute UTC (if table has this)
+                "Next Send Date UTC": scheduled_utc, # alt casing / name
                 "Property ID": pf.get("Property ID"),
                 "Number Record Id": ns.rec_id,
                 "UI": STATUS_ICON.get("QUEUED", "⏳"),
@@ -760,6 +765,7 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             created = _safe_create(get_drip_table(), {k: v for k, v in payload.items() if v is not None})
             if created:
                 queued += 1
+                seen_l10.add(l10)
                 # update pacing & counters
                 ns.remaining -= 1
                 ns.next_time = scheduled + timedelta(seconds=SECONDS_PER_NUMBER_MSG)
