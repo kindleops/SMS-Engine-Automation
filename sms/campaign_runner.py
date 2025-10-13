@@ -122,10 +122,10 @@ STATUS_ICON = {
     "CANCELLED": "❌",
 }
 
-ALLOWED_STATUSES = {"scheduled", "running", "ready"}
+ALLOWED_STATUSES = {"Scheduled", "Running", "Ready"}
 BLOCKED_STATUSES = {
-    "paused", "inactive", "on hold", "hold", "stopped", "stop",
-    "complete", "completed", "disabled", "draft", "cancelled", "canceled",
+    "Paused", "Inactive", "On Hold", "Hold", "Stopped", "Stop",
+    "Complete", "Completed", "Disabled", "Draft", "Cancelled", "Canceled",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -488,7 +488,7 @@ def _load_number_pool(market: Optional[str], base_time: datetime) -> List[Number
         f = r.get("fields", {}) or {}
         if f.get("Active") is False:
             continue
-        if str(f.get("Status") or "").strip().lower() in ("paused", "inactive", "disabled"):
+        if str(f.get("Status") or "").strip().lower() in ("Paused", "Inactive", "Disabled"):
             continue
         if not _supports_market(f, market):
             continue
