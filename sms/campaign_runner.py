@@ -172,14 +172,11 @@ def _is_dnc(f: Dict[str, Any]) -> bool:
         v = f.get(k)
         if v is None:
             continue
-        # Treat any truthy / "STOP" / "UNSUB" style as DNC = True
         if isinstance(v, str) and v.strip():
             t = v.strip().lower()
             if t in ("stop", "stopped", "unsubscribed", "do not contact", "do not text", "do not sms"):
                 return True
-        if _truthy(v):
-            return True
-        if v is True:
+        if v is True or _truthy(v):
             return True
     return False
 
@@ -289,21 +286,24 @@ def _safe_filter(tbl, payload: Dict) -> Dict:
             out[mk] = v
     return out
 
-_UNKNOWN_RE = re.compile(r'Unknown field name:\s*"([^"]+)"')
+_UNKNOWN_RE   = re.compile(r'Unknown field name:\s*"([^"]+)"', re.I)
+_COMPUTED_RE  = re.compile(r'Field\s*"([^"]+)"\s*cannot accept a value because the field is computed', re.I)
+_INVALIDVAL_RE= re.compile(r'INVALID_VALUE_FOR_COLUMN.*?Field\s*"([^"]+)"', re.I)
 
 def _safe_create(tbl, payload: Dict):
-    """Create with schema-map and automatic retry removing unknown fields."""
+    """Create with schema-map and automatic retry removing unknown/computed fields."""
     if not (tbl and payload):
         return None
     pending = dict(payload)
-    for _ in range(6):  # strip multiple unknowns if needed
+    for _ in range(8):  # strip multiple offenders if needed
         try:
             data = _safe_filter(tbl, pending)
             if not data:
                 return None
             return tbl.create(data)  # type: ignore[attr-defined]
         except Exception as e:
-            m = _UNKNOWN_RE.search(str(e))
+            msg = str(e)
+            m = _UNKNOWN_RE.search(msg) or _COMPUTED_RE.search(msg) or _INVALIDVAL_RE.search(msg)
             if m:
                 pending.pop(m.group(1), None)
                 continue
@@ -312,18 +312,19 @@ def _safe_create(tbl, payload: Dict):
     return None
 
 def _safe_update(tbl, rid: str, payload: Dict):
-    """Update with schema-map and automatic retry removing unknown fields."""
+    """Update with schema-map and automatic retry removing unknown/computed fields."""
     if not (tbl and rid and payload):
         return None
     pending = dict(payload)
-    for _ in range(6):
+    for _ in range(8):
         try:
             data = _safe_filter(tbl, pending)
             if not data:
                 return None
             return tbl.update(rid, data)  # type: ignore[attr-defined]
         except Exception as e:
-            m = _UNKNOWN_RE.search(str(e))
+            msg = str(e)
+            m = _UNKNOWN_RE.search(msg) or _COMPUTED_RE.search(msg) or _INVALIDVAL_RE.search(msg)
             if m:
                 pending.pop(m.group(1), None)
                 continue
@@ -432,12 +433,7 @@ def _personalization_ctx(pf: Dict[str, Any]) -> Dict[str, Any]:
                     break
     address = _compose_address(pf)
     friendly_first = first or "there"
-    return {
-        "First": friendly_first,
-        "first": friendly_first,
-        "Address": address or "",
-        "address": address or "",
-    }
+    return {"First": friendly_first, "first": friendly_first, "Address": address or "", "address": address or ""}
 
 def _format_template(text: str, ctx: Dict[str, Any]) -> str:
     if not text:
@@ -844,17 +840,16 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             "Prequeued": prequeue,
         }
 
-        _safe_update(
-            get_campaigns_table(),
-            cid,
-            {
-                "status": new_status,
-                "messages_sent": int(cf.get("messages_sent") or 0) + sent_delta,
-                "total_sent": int(cf.get("total_sent") or 0) + sent_delta,
-                "Last Run Result": json.dumps(last_result),
-                "last_run_at": iso_now(),
-            },
-        )
+        # IMPORTANT: never push to computed fields (e.g., "total_sent")
+        campaign_update = {
+            "status": new_status,
+            "Last Run Result": json.dumps(last_result),
+            "last_run_at": iso_now(),
+        }
+        # If your base has a *writable* messages_sent, you can uncomment the next line.
+        # campaign_update["messages_sent"] = int(cf.get("messages_sent") or 0) + sent_delta
+
+        _safe_update(get_campaigns_table(), cid, campaign_update)
 
         runs_tbl, kpis_tbl = get_runs_table(), get_kpis_table()
         if runs_tbl:
