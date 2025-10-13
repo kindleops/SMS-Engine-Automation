@@ -623,8 +623,8 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         # ── Strict eligibility ──
         status_val = str((f.get("status") or f.get("Status") or "")).strip().lower()
-        go_live = _truthy(f.get("Go Live"))
-        active  = _truthy(f.get("Active") or f.get("Enabled"))
+        go_live = bool(f.get("Go Live")) or _truthy(f.get("Go Live"))
+        active  = bool(f.get("Active")) or _truthy(f.get("Active") or f.get("Enabled"))
         if STRICT_CAMPAIGN_ELIGIBILITY:
             # Require explicit live/active AND allowed status; blank status is NOT allowed
             if (status_val in BLOCKED_STATUSES) or (status_val not in ALLOWED_STATUSES) or not (go_live or active):
