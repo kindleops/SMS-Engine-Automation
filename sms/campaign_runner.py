@@ -122,10 +122,12 @@ STATUS_ICON = {
     "CANCELLED": "❌",
 }
 
-ALLOWED_STATUSES = {"Scheduled", "Running", "Ready"}
+ALLOWED_STATUSES = {"scheduled", "running", "ready", "Scheduled", "Running", "Ready"}
 BLOCKED_STATUSES = {
-    "Paused", "Inactive", "On Hold", "Hold", "Stopped", "Stop",
-    "Complete", "Completed", "Disabled", "Draft", "Cancelled", "Canceled",
+    "paused", "Paused", "inactive", "Inactive", "on hold", "On Hold",
+    "hold", "Hold", "stopped", "Stopped", "stop", "Stop",
+    "complete", "Complete", "completed", "Completed",
+    "disabled", "Disabled", "draft", "Draft", "cancelled", "Cancelled", "canceled", "Canceled",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -625,12 +627,26 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         status_val = str((f.get("status") or f.get("Status") or "")).strip().lower()
         go_live = bool(f.get("Go Live")) or _truthy(f.get("Go Live"))
         active  = bool(f.get("Active")) or _truthy(f.get("Active") or f.get("Enabled"))
+        
         if STRICT_CAMPAIGN_ELIGIBILITY:
-            # Require explicit live/active AND allowed status; blank status is NOT allowed
-            if (status_val in BLOCKED_STATUSES) or (status_val not in ALLOWED_STATUSES) or not (go_live or active):
-                if DEBUG_CAMPAIGNS:
-                    print(f"[campaign] SKIP {name}: go_live={go_live} active={active} status={status_val!r}")
-                continue
+        # Require explicit live/active AND allowed status; blank status is NOT allowed
+            if DEBUG_CAMPAIGNS:
+                print(f"[debug] checking {name} → go_live={go_live!r}, active={active!r}, status={status_val!r}")
+
+        if (status_val in BLOCKED_STATUSES):
+            if DEBUG_CAMPAIGNS:
+                print(f"[skip] {name} because status '{status_val}' is BLOCKED.")
+            continue
+
+        if (status_val not in ALLOWED_STATUSES):
+            if DEBUG_CAMPAIGNS:
+                print(f"[skip] {name} because status '{status_val}' is NOT in allowed list {ALLOWED_STATUSES}.")
+            continue
+
+        if not (go_live or active):
+            if DEBUG_CAMPAIGNS:
+                print(f"[skip] {name} because Go Live={go_live} and Active={active} (both false).")
+            continue
         else:
             # Legacy permissive mode: only explicit False blocks
             if f.get("Go Live") is False:
@@ -876,26 +892,6 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         if DEBUG_CAMPAIGNS:
             print(f"[campaign] {name}: queued={queued}, sent_now={0 if prequeue else sent_delta}, status→{new_status}")
-
-        if STRICT_CAMPAIGN_ELIGIBILITY:
-        # Require explicit live/active AND allowed status; blank status is NOT allowed
-            if DEBUG_CAMPAIGNS:
-                print(f"[debug] checking {name} → go_live={go_live!r}, active={active!r}, status={status_val!r}")
-
-        if (status_val in BLOCKED_STATUSES):
-            if DEBUG_CAMPAIGNS:
-                print(f"[skip] {name} because status '{status_val}' is BLOCKED.")
-            continue
-
-        if (status_val not in ALLOWED_STATUSES):
-            if DEBUG_CAMPAIGNS:
-                print(f"[skip] {name} because status '{status_val}' is NOT in allowed list {ALLOWED_STATUSES}.")
-            continue
-
-        if not (go_live or active):
-            if DEBUG_CAMPAIGNS:
-                print(f"[skip] {name} because Go Live={go_live} and Active={active} (both false).")
-            continue
 
         results.append(
             {
