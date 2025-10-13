@@ -122,7 +122,7 @@ STATUS_ICON = {
     "CANCELLED": "❌",
 }
 
-ALLOWED_STATUSES = {"scheduled", "running", "ready", "Scheduled", "Running", "Ready"}
+ALLOWED_STATUSES = {"scheduled", "running", "ready", "Scheduled", "Running", "Ready", "Active", "active", ""}
 BLOCKED_STATUSES = {
     "paused", "Paused", "inactive", "Inactive", "on hold", "On Hold",
     "hold", "Hold", "stopped", "Stopped", "stop", "Stop",
