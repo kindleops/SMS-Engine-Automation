@@ -877,6 +877,26 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         if DEBUG_CAMPAIGNS:
             print(f"[campaign] {name}: queued={queued}, sent_now={0 if prequeue else sent_delta}, status→{new_status}")
 
+        if STRICT_CAMPAIGN_ELIGIBILITY:
+        # Require explicit live/active AND allowed status; blank status is NOT allowed
+            if DEBUG_CAMPAIGNS:
+                print(f"[debug] checking {name} → go_live={go_live!r}, active={active!r}, status={status_val!r}")
+
+        if (status_val in BLOCKED_STATUSES):
+            if DEBUG_CAMPAIGNS:
+                print(f"[skip] {name} because status '{status_val}' is BLOCKED.")
+            continue
+
+        if (status_val not in ALLOWED_STATUSES):
+            if DEBUG_CAMPAIGNS:
+                print(f"[skip] {name} because status '{status_val}' is NOT in allowed list {ALLOWED_STATUSES}.")
+            continue
+
+        if not (go_live or active):
+            if DEBUG_CAMPAIGNS:
+                print(f"[skip] {name} because Go Live={go_live} and Active={active} (both false).")
+            continue
+
         results.append(
             {
                 "campaign": name,
