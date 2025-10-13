@@ -4,10 +4,11 @@ from __future__ import annotations
 import os, re, json, random, math, traceback
 from datetime import datetime, timezone, timedelta, date
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
+# Load env once at import time
 load_dotenv()
 
 # ─────────────────────────────────────────────────────────────
@@ -30,7 +31,7 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
     Return a table-like object exposing .all/.get/.create/.update, or None.
     Works with both pyairtable v2 (Api) and v1 (Table).
     """
-    if not (api_key and base_id):
+    if not (api_key and base_id and table_name):
         return None
     try:
         if _PyApi:
@@ -84,7 +85,9 @@ SECONDS_PER_MSG = max(1, int(math.ceil(60.0 / MESSAGES_PER_MIN)))
 JITTER_SECONDS = max(0, int(os.getenv("JITTER_SECONDS", "2")))
 
 # Per-number pacing (hard cap per DID)
-RATE_PER_NUMBER_PER_MIN = max(1, int(os.getenv("RATE_PER_NUMBER_PER_MIN", os.getenv("RATE_MAX_PER_NUMBER_PER_MIN", "20"))))
+RATE_PER_NUMBER_PER_MIN = max(
+    1, int(os.getenv("RATE_PER_NUMBER_PER_MIN", os.getenv("RATE_MAX_PER_NUMBER_PER_MIN", "20")))
+)
 SECONDS_PER_NUMBER_MSG = max(1, int(math.ceil(60.0 / RATE_PER_NUMBER_PER_MIN)))
 
 QUIET_TZ = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago"))
@@ -122,13 +125,15 @@ STATUS_ICON = {
     "CANCELLED": "❌",
 }
 
-ALLOWED_STATUSES = {"scheduled", "running", "ready", "Scheduled", "Running", "Ready", "Active", "active", ""}
-BLOCKED_STATUSES = {
-    "paused", "Paused", "inactive", "Inactive", "on hold", "On Hold",
-    "hold", "Hold", "stopped", "Stopped", "stop", "Stop",
-    "complete", "Complete", "completed", "Completed",
-    "disabled", "Disabled", "draft", "Draft", "cancelled", "Cancelled", "canceled", "Canceled",
+# Normalize statuses to lowercase for comparison
+ALLOWED_STATUSES_RAW = {"scheduled", "running", "ready", "active", ""}  # blank allowed only in permissive mode
+BLOCKED_STATUSES_RAW = {
+    "paused", "inactive", "on hold", "hold", "stopped", "stop",
+    "complete", "completed", "disabled", "draft", "cancelled", "canceled",
 }
+
+ALLOWED_STATUSES = {s.lower() for s in ALLOWED_STATUSES_RAW}
+BLOCKED_STATUSES = {s.lower() for s in BLOCKED_STATUSES_RAW}
 
 # ─────────────────────────────────────────────────────────────
 # Time / helpers
@@ -140,6 +145,8 @@ def iso_now() -> str:
     return utcnow().isoformat()
 
 def _truthy(x: Any) -> bool:
+    if isinstance(x, bool):
+        return x
     return str(x).strip().lower() in ("1", "true", "yes", "y", "on")
 
 def _norm(s: Any) -> Any:
@@ -154,6 +161,27 @@ def _digits_only(s: Any) -> Optional[str]:
 def last10(s: Any) -> Optional[str]:
     d = _digits_only(s)
     return d[-10:] if d else None
+
+def _field(f: Dict[str, Any], *names: str, default=None):
+    """Case-insensitive field getter with normalization."""
+    if not f:
+        return default
+    amap = {_norm(k): k for k in f.keys()}
+    for n in names:
+        k = amap.get(_norm(n))
+        if k in f:
+            return f.get(k)
+    # fallback: exact keys if provided exactly
+    for n in names:
+        if n in f:
+            return f[n]
+    return default
+
+def _get_bool(f: Dict[str, Any], *names: str, default: bool=False) -> bool:
+    v = _field(f, *names, default=None)
+    if v is None:
+        return default
+    return _truthy(v)
 
 def get_phone(f: Dict[str, Any]) -> Optional[str]:
     p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
@@ -220,10 +248,12 @@ def _parse_time_maybe_ct(value: Any) -> Optional[datetime]:
         return None
 
 def _get_time_field(f: Dict[str, Any], *names: str) -> Optional[datetime]:
+    # direct
     for n in names:
         if n in f and f[n]:
             dt = _parse_time_maybe_ct(f[n])
             if dt: return dt
+    # case-insensitive
     nf = {_norm(k): k for k in f.keys()}
     for n in names:
         k = nf.get(_norm(n))
@@ -457,7 +487,11 @@ def _supports_market(f: Dict[str, Any], market: Optional[str]) -> bool:
     if f.get("Market") == market:
         return True
     ms = f.get("Markets")
-    return isinstance(ms, list) and market in ms
+    if isinstance(ms, list):
+        return market in ms
+    if isinstance(ms, str) and ms.strip():
+        return market in [m.strip() for m in ms.split(",")]
+    return False
 
 def _to_e164(f: Dict[str, Any]) -> Optional[str]:
     for key in ("Number", "A Number", "Phone", "E164", "Friendly Name"):
@@ -488,9 +522,13 @@ def _load_number_pool(market: Optional[str], base_time: datetime) -> List[Number
 
     for r in rows:
         f = r.get("fields", {}) or {}
-        if f.get("Active") is False:
+
+        # active flag + status permissive allowlist for numbers
+        n_active = _get_bool(f, "Active", "Enabled", default=True)
+        n_status = str(_field(f, "Status", "status", default="")).strip().lower()
+        if not n_active:
             continue
-        if str(f.get("Status") or "").strip().lower() in ("Paused", "Inactive", "Disabled"):
+        if n_status in {"paused", "inactive", "disabled"}:
             continue
         if not _supports_market(f, market):
             continue
@@ -588,6 +626,48 @@ def _normalize_limit(limit: Optional[int | str]) -> int:
 
 
 # ─────────────────────────────────────────────────────────────
+# Status/flag helpers
+# ─────────────────────────────────────────────────────────────
+def _status_tuple(f: Dict[str, Any]) -> Tuple[str, str]:
+    """Returns (normalized_status, original_status_str)"""
+    raw = _field(f, "status", "Status", default="")
+    if isinstance(raw, list):  # extremely rare (multi-select)
+        raw = raw[0] if raw else ""
+    s = str(raw or "").strip()
+    return (s.lower(), s)
+
+def _campaign_is_eligible(f: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Decide eligibility once, clearly.
+    STRICT mode:
+      - require (Go Live OR Active) is truthy AND status in ALLOWED (blank NOT allowed)
+      - block if status in BLOCKED
+    PERMISSIVE mode:
+      - allow if status is blank OR in ALLOWED, and neither Go Live nor Active is explicitly False
+    """
+    status_norm, status_raw = _status_tuple(f)
+    go_live = _get_bool(f, "Go Live", "go live", "go_live", "Live", default=False)
+    active  = _get_bool(f, "Active", "active", "Enabled", "enabled", default=False)
+
+    if status_norm in BLOCKED_STATUSES:
+        return (False, f"status '{status_raw}' is BLOCKED")
+
+    if STRICT_CAMPAIGN_ELIGIBILITY:
+        if status_norm not in (ALLOWED_STATUSES - {""}):  # blank NOT allowed in strict
+            return (False, f"status '{status_raw}' is NOT allowed in strict")
+        if not (go_live or active):
+            return (False, f"Go Live={go_live} and Active={active} (both false)")
+        return (True, "eligible (strict)")
+    else:
+        # permissive: blank ok; only explicit False blocks
+        if status_norm and status_norm not in ALLOWED_STATUSES:
+            return (False, f"status '{status_raw}' not in allowed (permissive)")
+        if f.get("Go Live") is False or f.get("Active") is False:
+            return (False, "explicit false on Go Live or Active")
+        return (True, "eligible (permissive)")
+
+
+# ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
 def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[bool] = None) -> Dict[str, Any]:
@@ -619,60 +699,35 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
     now_utc = utcnow()
     eligible: List[Dict] = []
 
+    # Decide eligibility once per campaign
     for c in all_campaigns:
         f = c.get("fields", {}) or {}
         name = (f.get("Name") or f.get("name") or c.get("id"))
+        ok, why = _campaign_is_eligible(f)
 
-        # ── Strict eligibility ──
-        status_val = str((f.get("status") or f.get("Status") or "")).strip().lower()
-        go_live = bool(f.get("Go Live")) or _truthy(f.get("Go Live"))
-        active  = bool(f.get("Active")) or _truthy(f.get("Active") or f.get("Enabled"))
-        
-        if STRICT_CAMPAIGN_ELIGIBILITY:
-        # Require explicit live/active AND allowed status; blank status is NOT allowed
+        if not ok:
             if DEBUG_CAMPAIGNS:
-                print(f"[debug] checking {name} → go_live={go_live!r}, active={active!r}, status={status_val!r}")
-
-        if (status_val in BLOCKED_STATUSES):
-            if DEBUG_CAMPAIGNS:
-                print(f"[skip] {name} because status '{status_val}' is BLOCKED.")
+                print(f"[skip] {c.get('id')} ({name}) → {why}.")
             continue
-
-        if (status_val not in ALLOWED_STATUSES):
-            if DEBUG_CAMPAIGNS:
-                print(f"[skip] {name} because status '{status_val}' is NOT in allowed list {ALLOWED_STATUSES}.")
-            continue
-
-        if not (go_live or active):
-            if DEBUG_CAMPAIGNS:
-                print(f"[skip] {name} because Go Live={go_live} and Active={active} (both false).")
-            continue
-        else:
-            # Legacy permissive mode: only explicit False blocks
-            if f.get("Go Live") is False:
-                if DEBUG_CAMPAIGNS:
-                    print(f"[campaign] SKIP {name}: Go Live is False")
-                continue
-            if status_val and status_val not in ALLOWED_STATUSES:
-                if DEBUG_CAMPAIGNS:
-                    print(f"[campaign] SKIP {name}: status={status_val!r}")
-                continue
 
         # Time window
         start_dt = _get_time_field(f, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
         end_dt   = _get_time_field(f, "End Time", "End", "End At", "end_time", "End Date", "Schedule End")
 
+        # Completed if end passed
         if end_dt and now_utc >= end_dt:
             _safe_update(campaigns, c["id"], {"status": "Completed", "last_run_at": iso_now()})
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] COMPLETE {name}: now>=end")
             continue
 
+        # If prequeue disabled and start in the future, skip
         if start_dt and now_utc < start_dt and not PREQUEUE_BEFORE_START:
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] WAIT {name}: now<start (prequeue off)")
             continue
 
+        # If prequeue enabled but start is inside quiet-hours AND not allowed to queue then, skip
         if start_dt and now_utc < start_dt and PREQUEUE_BEFORE_START:
             if not ALLOW_QUEUE_OUTSIDE_HOURS and _in_quiet_hours(start_dt):
                 if DEBUG_CAMPAIGNS:
@@ -680,7 +735,8 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
                 continue
 
         if DEBUG_CAMPAIGNS:
-            print(f"[campaign] ELIGIBLE {name}: start={start_dt}, end={end_dt}, status={status_val or '∅'}")
+            status_norm, status_raw = _status_tuple(f)
+            print(f"[campaign] ELIGIBLE {name}: start={start_dt}, end={end_dt}, status={status_raw or '∅'}")
         eligible.append(c)
 
     processed = 0
@@ -693,8 +749,8 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         cf = camp.get("fields", {}) or {}
         cid = camp["id"]
         name = (cf.get("Name") or cf.get("name") or "Unnamed")
-        view = (cf.get("View/Segment") or cf.get("View") or "").strip() or None
-        market = (cf.get("Market") or cf.get("market"))
+        view = (_field(cf, "View/Segment", "View", default="") or "").strip() or None
+        market = _field(cf, "Market", "market", default=None)
 
         try:
             prospect_rows = prospects.all(view=view) if view else prospects.all()  # type: ignore[attr-defined]
@@ -706,6 +762,8 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         if not template_ids:
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] SKIP {name}: no Templates linked")
+            # still update last_run_at so you can see it attempted
+            _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
             continue
 
         start_dt = _get_time_field(cf, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
@@ -729,17 +787,14 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         if not number_pool:
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] SKIP {name}: no eligible numbers")
+            _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
             continue
 
-        # Only reflect "Running" if eligibility said it's allowed
+        # Only reflect "Running" if not prequeue
         if prequeue:
             _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
         else:
-            status_val = str((cf.get("status") or cf.get("Status") or "")).strip().lower()
-            if status_val in ALLOWED_STATUSES:
-                _safe_update(get_campaigns_table(), cid, {"status": "Running", "last_run_at": iso_now()})
-            else:
-                _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
+            _safe_update(get_campaigns_table(), cid, {"status": "Running", "last_run_at": iso_now()})
 
         queued = 0
         nums_tbl = get_numbers_table()
@@ -819,7 +874,7 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
                     _safe_update(nums_tbl, ns.rec_id, {"Last Used": iso_now()})
 
         batch_result, retry_result = {"total_sent": 0}, {}
-        if (not prequeue) and RUNNER_SEND_AFTER_QUEUE and queued > 0:
+        if (not prequeue) and send_after_queue and queued > 0:
             try:
                 batch_result = send_batch(campaign_id=cid, limit=MESSAGES_PER_MIN)
             except Exception:
@@ -838,8 +893,8 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             if prequeue
             else (
                 "Running"
-                if queued and (sent_delta < queued or not RUNNER_SEND_AFTER_QUEUE)
-                else ("Completed" if queued else (cf.get("status") or cf.get("Status") or "Scheduled"))
+                if queued and (sent_delta < queued or not send_after_queue)
+                else ("Completed" if queued else (_field(cf, "status", "Status", default="Scheduled") or "Scheduled"))
             )
         )
 
@@ -884,8 +939,8 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
                 kpis_tbl,
                 {
                     "Campaign": name,
-                    "Metric": "OUTBOUND_SENT" if (not prequeue and RUNNER_SEND_AFTER_QUEUE) else "MESSAGES_QUEUED",
-                    "Value": float(sent_delta if (not prequeue and RUNNER_SEND_AFTER_QUEUE) else queued),
+                    "Metric": "OUTBOUND_SENT" if (not prequeue and send_after_queue) else "MESSAGES_QUEUED",
+                    "Value": float(sent_delta if (not prequeue and send_after_queue) else queued),
                     "Date": utcnow().date().isoformat(),
                 },
             )
@@ -897,7 +952,7 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             {
                 "campaign": name,
                 "queued": queued,
-                "sent": 0 if prequeue else (sent_delta if RUNNER_SEND_AFTER_QUEUE else 0),
+                "sent": 0 if prequeue else (sent_delta if send_after_queue else 0),
                 "view": view,
                 "market": market,
                 "quiet_now": _in_quiet_hours(now_utc),
