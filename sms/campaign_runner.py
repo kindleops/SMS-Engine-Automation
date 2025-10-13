@@ -136,6 +136,48 @@ ALLOWED_STATUSES = {s.lower() for s in ALLOWED_STATUSES_RAW}
 BLOCKED_STATUSES = {s.lower() for s in BLOCKED_STATUSES_RAW}
 
 # ─────────────────────────────────────────────────────────────
+# General helpers
+# ─────────────────────────────────────────────────────────────
+def _as_list(x):
+    if x is None:
+        return []
+    return x if isinstance(x, list) else [x]
+
+def _field_ci(fields: Dict[str, Any], *names: str):
+    """Case-insensitive getter across several possible names."""
+    if not fields:
+        return None
+    inv = {_norm(k): k for k in fields.keys()}
+    for n in names:
+        k = inv.get(_norm(n))
+        if k in fields:
+            return fields[k]
+    # exact fallback
+    for n in names:
+        if n in fields:
+            return fields[n]
+    return None
+
+def _normalize_linked_values(v) -> List[str]:
+    """
+    Accept strings (record ids or names), dicts like {'id': 'rec...'}, or arrays of them.
+    Return flat list of strings.
+    """
+    out: List[str] = []
+    for x in _as_list(v):
+        if isinstance(x, str):
+            s = x.strip()
+            if s:
+                out.append(s)
+        elif isinstance(x, dict):
+            rid = x.get("id")
+            if isinstance(rid, str):
+                rid = rid.strip()
+                if rid:
+                    out.append(rid)
+    return out
+
+# ─────────────────────────────────────────────────────────────
 # Time / helpers
 # ─────────────────────────────────────────────────────────────
 def utcnow() -> datetime:
@@ -153,10 +195,14 @@ def _norm(s: Any) -> Any:
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
 
 def _digits_only(s: Any) -> Optional[str]:
-    if not isinstance(s, str):
+    if isinstance(s, str):
+        ds = "".join(re.findall(r"\d+", s))
+        return ds if len(ds) >= 10 else None
+    try:
+        ds = "".join(re.findall(r"\d+", str(s)))
+        return ds if len(ds) >= 10 else None
+    except Exception:
         return None
-    ds = "".join(re.findall(r"\d+", s))
-    return ds if len(ds) >= 10 else None
 
 def last10(s: Any) -> Optional[str]:
     d = _digits_only(s)
@@ -184,17 +230,32 @@ def _get_bool(f: Dict[str, Any], *names: str, default: bool=False) -> bool:
     return _truthy(v)
 
 def get_phone(f: Dict[str, Any]) -> Optional[str]:
+    # Prefer verified slots if present; allow list or str
     p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
     p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
     if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
-        d = _digits_only(p1)
-        if d: return d
+        for cand in _as_list(p1):
+            d = _digits_only(cand)
+            if d: return d
     if f.get("Phone 2 Verified") or f.get("Phone 2 Ownership Verified"):
-        d = _digits_only(p2)
-        if d: return d
+        for cand in _as_list(p2):
+            d = _digits_only(cand)
+            if d: return d
+
+    # Named phone-like fields (string OR list)
     for k in PHONE_FIELDS:
-        d = _digits_only(f.get(k))
-        if d: return d
+        v = f.get(k)
+        for cand in _as_list(v):
+            d = _digits_only(cand)
+            if d: return d
+
+    # Generic fallback: scan *all* list fields for 10+ digit strings (lookup/rollup cases)
+    for v in f.values():
+        if isinstance(v, list):
+            for cand in v:
+                d = _digits_only(cand)
+                if d: return d
+
     return None
 
 def _is_dnc(f: Dict[str, Any]) -> bool:
@@ -684,10 +745,10 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         send_after_queue = False  # never send during quiet hours
 
     campaigns = get_campaigns_table()
-    templates = get_templates_table()
+    templates_tbl = get_templates_table()
     prospects = get_prospects_table()
     drip = get_drip_table()
-    if not all([campaigns, templates, prospects, drip]):
+    if not all([campaigns, templates_tbl, prospects, drip]):
         return {"ok": False, "processed": 0, "results": [], "errors": ["Missing Airtable tables or env"]}
 
     try:
@@ -742,6 +803,23 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
     processed = 0
     results: List[Dict[str, Any]] = []
 
+    # Build template cache once per process
+    if not hasattr(run_campaigns, "_TPL_CACHE"):
+        try:
+            all_tpl_rows = templates_tbl.all()  # type: ignore[attr-defined]
+        except Exception:
+            all_tpl_rows = []
+        run_campaigns._TPL_CACHE = {
+            "by_id":   {r["id"]: r for r in all_tpl_rows},
+            "by_name": {
+                str(((r.get("fields") or {}).get("Name") or "")).strip(): r
+                for r in all_tpl_rows
+                if (r.get("fields") or {}).get("Name")
+            },
+        }
+    TPL_BY_ID   = run_campaigns._TPL_CACHE["by_id"]
+    TPL_BY_NAME = run_campaigns._TPL_CACHE["by_name"]
+
     for camp in eligible:
         if processed >= max_to_process:
             break
@@ -752,21 +830,42 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         view = (_field(cf, "View/Segment", "View", default="") or "").strip() or None
         market = _field(cf, "Market", "market", default=None)
 
+        # Resolve templates robustly (IDs or Names; link or lookup)
+        raw_tpl_vals = (
+            _field_ci(cf, "Templates", "Template", "Initial Template", "Message Template", "Start Template")
+            or []
+        )
+        tpl_tokens = _normalize_linked_values(raw_tpl_vals)
+
+        resolved_tpl_ids: List[str] = []
+        for t in tpl_tokens:
+            if isinstance(t, str) and t.startswith("rec") and (t in TPL_BY_ID):
+                resolved_tpl_ids.append(t)
+            else:
+                m = TPL_BY_NAME.get(str(t))
+                if m:
+                    resolved_tpl_ids.append(m["id"])
+
+        candidates = resolved_tpl_ids or tpl_tokens  # fall back to raw tokens if not resolved yet
+        if DEBUG_CAMPAIGNS:
+            print(f"[debug] {name} raw Templates -> {raw_tpl_vals!r} | tokens -> {tpl_tokens!r} | resolved -> {resolved_tpl_ids!r}")
+
+        if not candidates:
+            if DEBUG_CAMPAIGNS:
+                print(f"[campaign] SKIP {name}: no Templates linked/resolved")
+            _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
+            continue
+
+        # Pull prospects (view/segment if provided)
         try:
             prospect_rows = prospects.all(view=view) if view else prospects.all()  # type: ignore[attr-defined]
         except Exception:
             traceback.print_exc()
-            continue
-
-        template_ids = cf.get("Templates") or cf.get("templates") or []
-        if not template_ids:
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] SKIP {name}: no Templates linked")
-            # still update last_run_at so you can see it attempted
             _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
             continue
 
         start_dt = _get_time_field(cf, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
+        now_utc = utcnow()
         prequeue = bool(start_dt and now_utc < start_dt and PREQUEUE_BEFORE_START)
         base_utc = start_dt if prequeue else (max(now_utc, start_dt) if start_dt else now_utc)
 
@@ -817,17 +916,26 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             if not ns or ns.remaining <= 0:
                 break  # pool exhausted
 
-            # pick a template
-            tid = random.choice(template_ids) if isinstance(template_ids, list) else str(template_ids)
-            raw = None
-            try:
-                trow = get_templates_table().get(tid) if tid else None  # type: ignore[attr-defined]
-                tf = (trow.get("fields", {}) or {}) if trow else {}
-                raw = tf.get("Message") or tf.get("Text")
-            except Exception:
-                traceback.print_exc()
-                raw = None
+            # pick a template candidate (ID or Name)
+            tid_or_name = random.choice(candidates)
+            trow = None
+            if isinstance(tid_or_name, str) and tid_or_name.startswith("rec"):
+                trow = TPL_BY_ID.get(tid_or_name) or templates_tbl.get(tid_or_name)  # type: ignore[attr-defined]
+                if trow and (tid_or_name not in TPL_BY_ID):
+                    TPL_BY_ID[tid_or_name] = trow
+            else:
+                trow = TPL_BY_NAME.get(str(tid_or_name))
+            tf = (trow.get("fields", {}) or {}) if trow else {}
+            raw = (
+                tf.get("Message")
+                or tf.get("Text")
+                or tf.get("Body")
+                or tf.get("Template")
+                or tf.get("Script")
+            )
             if not raw:
+                if DEBUG_CAMPAIGNS:
+                    print(f"[campaign] WARN {name}: template {tid_or_name!r} has no message body")
                 continue
 
             # personalization -> body
@@ -849,7 +957,7 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             payload = {
                 "Prospect": [pr["id"]],
                 "Campaign": [cid],
-                "Template": [tid] if tid else None,
+                "Template": [trow["id"]] if (trow and trow.get("id")) else None,
                 "Market": market or pf.get("Market"),
                 "phone": phone,
                 "message_preview": body,
@@ -917,8 +1025,6 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             "Last Run Result": json.dumps(last_result),
             "last_run_at": iso_now(),
         }
-        # If your base has a *writable* messages_sent, you can uncomment the next line.
-        # campaign_update["messages_sent"] = int(cf.get("messages_sent") or 0) + sent_delta
 
         _safe_update(get_campaigns_table(), cid, campaign_update)
 
@@ -968,3 +1074,15 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         traceback.print_exc()
 
     return {"ok": True, "processed": processed, "results": results, "errors": []}
+
+
+# Optional: expose for REPL diagnostics
+__all__ = [
+    "run_campaigns",
+    "_campaign_is_eligible",
+    "get_campaigns_table",
+    "get_templates_table",
+    "get_prospects_table",
+    "get_drip_table",
+    "get_numbers_table",
+]
