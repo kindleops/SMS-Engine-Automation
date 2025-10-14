@@ -21,7 +21,6 @@ try:
     )
 except Exception:
     get_runs = get_kpis = get_leads = get_convos = get_templates = lambda: None
-
     def safe_create(*_a, **_k): return None  # type: ignore
     def remap_existing_only(*_a, **_k): return {}  # type: ignore
 
@@ -31,7 +30,6 @@ try:
 except Exception:
     def send_batch(*_a, **_k): return {"ok": False, "error": "send_batch unavailable"}
 
-# autoresponder can be exported as run() or run_autoresponder(); support both
 def _build_autoresponder():
     try:
         from sms.autoresponder import run as _run
@@ -62,9 +60,10 @@ except Exception:
     inbound_router = None
 
 try:
-    from sms.campaign_runner import run_campaigns
+    from sms.campaign_runner import run_campaigns, get_campaigns_table
 except Exception:
     def run_campaigns(*_a, **_k): return {"ok": False, "error": "campaign runner unavailable"}
+    def get_campaigns_table(): return None
 
 try:
     from sms.kpi_aggregator import aggregate_kpis
@@ -100,15 +99,12 @@ except Exception:
 # Optional numbers admin wrappers (name-compat)
 try:
     from sms.admin_numbers import backfill_numbers_for_existing_queue
-
     def backfill_drip_from_numbers(dry_run: bool = True):
         res = backfill_numbers_for_existing_queue()
         res["dry_run_ignored"] = dry_run
         return res
-
     def recalc_numbers_sent_today(for_date: str):
         return {"ok": True, "note": "recalc not implemented in this build", "date": for_date}
-
     def reset_numbers_daily_counters():
         return {"ok": True, "note": "use /reset-quotas which resets Numbers daily counters"}
 except Exception:
@@ -117,7 +113,7 @@ except Exception:
     def reset_numbers_daily_counters(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
 
 # ─────────────────────────── FastAPI app ────────────────────────────
-app = FastAPI(title="REI SMS Engine", version="1.3.2")
+app = FastAPI(title="REI SMS Engine", version="1.4.0")
 if inbound_router:
     app.include_router(inbound_router)
 
@@ -141,10 +137,8 @@ LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_
 def log_error(context: str, err: Exception | str):
     msg = f"❌ {context}: {err}"
     print(msg)
-    try:
-        _notify(msg)
-    except Exception:
-        pass
+    try: _notify(msg)
+    except Exception: pass
 
 def iso_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -153,8 +147,7 @@ def get_perf_tables():
     return get_runs(), get_kpis()
 
 def log_run(runs_tbl, step: str, result: Dict[str, Any]):
-    if not runs_tbl:
-        return None
+    if not runs_tbl: return None
     try:
         payload = {
             "Type": step,
@@ -164,12 +157,10 @@ def log_run(runs_tbl, step: str, result: Dict[str, Any]):
         }
         return safe_create(runs_tbl, payload)
     except Exception as e:
-        log_error(f"Log Run {step}", e)
-        return None
+        log_error(f"Log Run {step}", e); return None
 
 def log_kpi(kpis_tbl, metric: str, value: int | float):
-    if not kpis_tbl:
-        return None
+    if not kpis_tbl: return None
     try:
         payload = {
             "Campaign": "ALL",
@@ -179,24 +170,19 @@ def log_kpi(kpis_tbl, metric: str, value: int | float):
         }
         return safe_create(kpis_tbl, payload)
     except Exception as e:
-        log_error(f"Log KPI {metric}", e)
-        return None
+        log_error(f"Log KPI {metric}", e); return None
 
 # Token intake: query ?token=, headers x-webhook-token / x-cron-token, or Authorization: Bearer
 def _extract_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]) -> str:
-    if qp_token:
-        return qp_token
-    if h_webhook:
-        return h_webhook
-    if h_cron:
-        return h_cron
+    if qp_token: return qp_token
+    if h_webhook: return h_webhook
+    if h_cron: return h_cron
     auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "):
-        return auth.split(" ", 1)[1]
+    if auth.lower().startswith("bearer "): return auth.split(" ", 1)[1]
     return ""
 
 def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]):
-    if not CRON_TOKEN:  # unsecured mode (for local dev)
+    if not CRON_TOKEN:  # unsecured mode (local dev)
         return
     token = _extract_token(request, qp_token, h_webhook, h_cron)
     if token != CRON_TOKEN:
@@ -214,32 +200,22 @@ def central_now():
     return datetime.now(timezone.utc)
 
 def is_quiet_hours_local() -> bool:
-    if not QUIET_HOURS_ENFORCED:
-        return False
+    if not QUIET_HOURS_ENFORCED: return False
     h = central_now().hour
     return (h >= QUIET_START) or (h < QUIET_END)
 
 # ───────────────────────────── Utilities ─────────────────────────────
 def _parse_limit_param(raw: Optional[str]) -> Optional[int]:
-    """
-    Convert limit to int or None (None means 'ALL').
-    Accepts: ALL, '', None, '  all  ', numeric strings.
-    Bad inputs → None (safer).
-    """
-    if raw is None:
-        return None
+    if raw is None: return None
     try:
         s = str(raw).strip().upper()
-        if s in ("", "ALL", "NONE", "UNLIMITED"):
-            return None
-        v = int(s)
-        return max(v, 1)
+        if s in ("", "ALL", "NONE", "UNLIMITED"): return None
+        v = int(s); return max(v, 1)
     except Exception:
         print(f"[warn] Invalid limit param: {raw!r} → treating as None")
         return None
 
 def _runner_limit_arg(safe_limit: Optional[int]) -> int | str:
-    """Never pass None into campaign_runner (prevents int(None) crash)."""
     return safe_limit if (safe_limit and safe_limit > 0) else "ALL"
 
 # ─────────────────────────── Startup ────────────────────────────────
@@ -251,7 +227,6 @@ def startup_checks():
         print(f"   PERFORMANCE_BASE:  {PERF_BASE}")
         print(f"   STRICT_MODE={STRICT_MODE} TEST_MODE={TEST_MODE}")
         print(f"   QUIET_HOURS_ENFORCED={QUIET_HOURS_ENFORCED} ({QUIET_START:02d}:00–{QUIET_END:02d}:00 CT)")
-
         missing = [
             k for k in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"]
             if not os.getenv(k) and not os.getenv(k.replace("BASE", "_BASE_ID"))
@@ -259,16 +234,12 @@ def startup_checks():
         if missing:
             msg = f"🚨 Missing env vars → {', '.join(missing)}"
             log_error("Startup checks", msg)
-            if STRICT_MODE:
-                raise RuntimeError(msg)
-
-        # Smoke test (non-fatal)
-        _ = get_templates(); _ = get_leads()
+            if STRICT_MODE: raise RuntimeError(msg)
+        _ = get_templates(); _ = get_leads()  # smoke
         print("✅ Startup checks passed")
     except Exception as e:
         log_error("Startup exception", e)
-        if STRICT_MODE:
-            raise
+        if STRICT_MODE: raise
 
 # ───────────────────────────── Health ───────────────────────────────
 @app.get("/ping")
@@ -297,7 +268,7 @@ def health():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "quiet_hours": is_quiet_hours_local(),
         "local_time_central": central_now().isoformat(),
-        "version": "1.3.2",
+        "version": "1.4.0",
     }
 
 @app.get("/health/strict")
@@ -360,6 +331,68 @@ async def run_campaigns_endpoint(
     except Exception as e:
         log_error("run_campaigns (normal hours)", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+# ─────────────── Manual Campaign Controls ───────────────
+def _safe_update(tbl, rid: str, patch: Dict[str, Any]):
+    if not (tbl and rid and patch): return None
+    try: return tbl.update(rid, patch)
+    except Exception as e: log_error("Airtable update", e); return None
+
+@app.post("/campaign/{campaign_id}/start")
+def campaign_start(
+    campaign_id: str,
+    request: Request,
+    x_cron_token: Optional[str] = Header(None),
+    x_webhook_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    _require_token(request, token, x_webhook_token, x_cron_token)
+    tbl = get_campaigns_table()
+    if not tbl: raise HTTPException(500, "Campaigns table unavailable")
+    _safe_update(tbl, campaign_id, {"status": "Scheduled", "Active": True, "Go Live": True, "last_run_at": iso_timestamp()})
+    return {"ok": True, "campaign": campaign_id, "status": "Scheduled"}
+
+@app.post("/campaign/{campaign_id}/stop")
+def campaign_stop(
+    campaign_id: str,
+    request: Request,
+    x_cron_token: Optional[str] = Header(None),
+    x_webhook_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    _require_token(request, token, x_webhook_token, x_cron_token)
+    tbl = get_campaigns_table()
+    if not tbl: raise HTTPException(500, "Campaigns table unavailable")
+    _safe_update(tbl, campaign_id, {"status": "Paused", "Active": False, "Go Live": False, "last_run_at": iso_timestamp()})
+    return {"ok": True, "campaign": campaign_id, "status": "Paused"}
+
+@app.post("/campaign/{campaign_id}/kick")
+def campaign_kick(
+    campaign_id: str,
+    request: Request,
+    limit: Optional[str] = Query("ALL"),
+    x_cron_token: Optional[str] = Header(None),
+    x_webhook_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    """
+    One-click: mark campaign active and immediately run the campaign runner.
+    Honors quiet hours (will queue-only or block accordingly).
+    """
+    _require_token(request, token, x_webhook_token, x_cron_token)
+    tbl = get_campaigns_table()
+    if not tbl: raise HTTPException(500, "Campaigns table unavailable")
+    _safe_update(tbl, campaign_id, {"status": "Scheduled", "Active": True, "Go Live": True})
+    # Narrow run to this campaign by letting campaign_runner filter naturally.
+    safe_limit = _parse_limit_param(limit)
+    runner_limit = _runner_limit_arg(safe_limit)
+    if is_quiet_hours_local():
+        if not ALLOW_QUEUE_OUTSIDE_HOURS:
+            return {"ok": False, "error": "Quiet hours (Central). Queueing disabled.", "quiet_hours": True}
+        res = run_campaigns(limit=runner_limit, send_after_queue=False)
+        res.update({"note": "Queued only (quiet hours).", "quiet_hours": True})
+        return res
+    return run_campaigns(limit=runner_limit, send_after_queue=True)
 
 # ─────────────── Autoresponder / Followups / Retry / KPIs ───────────
 @app.post("/autoresponder/{mode}")
