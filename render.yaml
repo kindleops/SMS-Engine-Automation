@@ -1,11 +1,10 @@
-# render.yaml — REI SMS Engine (bulletproof)
-# - Web API + Worker using the same Dockerfile.
-# - Strong curl options in cron jobs (auth header + x-cron-token, http/1.1, retries, timeouts).
-# - All secrets marked sync:false (set in Render Dashboard).
-# - Preview envs disabled to avoid duplicate jobs/services.
+# render.yaml — REI SMS Engine (Final Production)
+# - Web API + Worker using same Dockerfile
+# - Cron safely queues during quiet hours, sends automatically after
+# - Strong retry and timeout policies; no duplicate preview deploys
 
 services:
-  # 🚀 SMS Engine API
+  # 🌐 SMS Engine API
   - type: web
     name: rei-sms-engine
     env: docker
@@ -16,7 +15,7 @@ services:
       enabled: false
     healthCheckPath: /health
     envVars:
-      # --- Airtable (main & synonyms) ---
+      # --- Airtable ---
       - key: AIRTABLE_API_KEY
         sync: false
       - key: LEADS_CONVOS_BASE
@@ -34,25 +33,25 @@ services:
       - key: AIRTABLE_REPORTING_KEY
         sync: false
 
-      # --- Text/SMS provider ---
+      # --- Text/SMS Provider ---
       - key: TEXTGRID_ACCOUNT_SID
         sync: false
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
 
-      # --- Webhook / cron auth (must match Worker + CronJobs) ---
+      # --- Auth ---
       - key: WEBHOOK_TOKEN
         sync: false
       - key: CRON_TOKEN
         sync: false
 
-      # --- Limiter (use Upstash REST; do NOT set REDIS_URL) ---
+      # --- Upstash REST (Rate Limiter) ---
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
 
-      # --- Engine/runtime knobs ---
+      # --- Engine Settings ---
       - key: QUIET_HOURS_ENFORCED
         value: "true"
       - key: QUIET_START_HOUR_LOCAL
@@ -72,9 +71,7 @@ services:
       - key: JITTER_SECONDS
         value: "2"
       - key: RUNNER_SEND_AFTER_QUEUE
-        value: "false"     # queue-only by default; API param can override
-
-      # --- Optional: disable embedded schedulers (use Worker + Cron) ---
+        value: "false"  # safe default; cron now overrides when needed
       - key: ENABLE_EMBEDDED_SCHEDULER
         value: "false"
 
@@ -93,8 +90,9 @@ services:
     autoDeploy: true
     previews:
       enabled: false
+    command: python -u -m sms.worker
     envVars:
-      # Same env as API
+      # --- Same keys mirrored ---
       - key: AIRTABLE_API_KEY
         sync: false
       - key: LEADS_CONVOS_BASE
@@ -117,7 +115,6 @@ services:
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
 
-      # Use Upstash REST limiter (do NOT set REDIS_URL)
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
@@ -126,7 +123,7 @@ services:
       # Worker loop knobs
       - key: WORKER_INTERVAL_SEC
         value: "30"
-      - key: SEND_BATCH_LIMIT        # sms.worker reads these
+      - key: SEND_BATCH_LIMIT
         value: "500"
       - key: RETRY_LIMIT
         value: "100"
@@ -135,11 +132,10 @@ services:
       - key: AUTORESPONDER_VIEW
         value: "Unprocessed Inbounds"
 
-      # Campaign runner behavior from worker (queue-only by default)
+      # Enable sending once quiet hours end
       - key: RUNNER_SEND_AFTER_QUEUE
-        value: "false"
+        value: "true"
 
-      # Quiet hours guard (must mirror API)
       - key: QUIET_HOURS_ENFORCED
         value: "true"
       - key: QUIET_START_HOUR_LOCAL
@@ -147,17 +143,13 @@ services:
       - key: QUIET_END_HOUR_LOCAL
         value: "9"
 
-      # Auth (must match API + CronJobs)
+      # Auth
       - key: WEBHOOK_TOKEN
         sync: false
       - key: CRON_TOKEN
         sync: false
 
-    command: python -u -m sms.worker
-
-# 🔄 Cronjobs (safety nets; worker runs continuously)
-# - Sends both Authorization: Bearer and x-cron-token to match main.py
-# - http/1.1 avoids some h2 curl quirks; retries reduce flakiness.
+# 🔄 CRON JOBS — Bulletproof Automation
 cronJobs:
   - name: run-autoresponder
     schedule: "*/10 * * * *"
@@ -174,7 +166,7 @@ cronJobs:
     command: |
       curl --http1.1 --fail --silent --show-error --retry 3 --retry-connrefused \
         --connect-timeout 7 --max-time 55 \
-        -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL" \
+        -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL&send_after_queue=true" \
         -H "Authorization: Bearer ${CRON_TOKEN}" \
         -H "x-cron-token: ${CRON_TOKEN}" \
         --data-binary ''
