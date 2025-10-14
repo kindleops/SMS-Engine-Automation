@@ -8,11 +8,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
-# Load env once at import time
 load_dotenv()
 
 # ─────────────────────────────────────────────────────────────
-# pyairtable compat (v2: Api, v1: Table) — never crash if missing
+# pyairtable compat (v2: Api, v1: Table)
 # ─────────────────────────────────────────────────────────────
 _PyApi = None
 _PyTable = None
@@ -25,12 +24,7 @@ try:
 except Exception:
     _PyTable = None
 
-
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
-    """
-    Return a table-like object exposing .all/.get/.create/.update, or None.
-    Works with both pyairtable v2 (Api) and v1 (Table).
-    """
     if not (api_key and base_id and table_name):
         return None
     try:
@@ -42,9 +36,8 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
         traceback.print_exc()
     return None
 
-
 # ─────────────────────────────────────────────────────────────
-# Optional engine hooks (never hard-crash if missing)
+# Optional engine hooks
 # ─────────────────────────────────────────────────────────────
 try:
     from sms.outbound_batcher import send_batch
@@ -64,11 +57,11 @@ except Exception:
     def update_metrics(*args, **kwargs):
         return {"ok": True}
 
-
 # ─────────────────────────────────────────────────────────────
 # ENV / CONFIG
 # ─────────────────────────────────────────────────────────────
 AIRTABLE_KEY = os.getenv("AIRTABLE_API_KEY")
+
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
 PERFORMANCE_BASE = os.getenv("PERFORMANCE_BASE") or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
@@ -79,12 +72,10 @@ TEMPLATES_TABLE = os.getenv("TEMPLATES_TABLE", "Templates")
 DRIP_QUEUE_TABLE = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 
-# Global pacing (fallback; the worker also enforces)
 MESSAGES_PER_MIN = max(1, int(os.getenv("MESSAGES_PER_MIN", "20")))
 SECONDS_PER_MSG = max(1, int(math.ceil(60.0 / MESSAGES_PER_MIN)))
 JITTER_SECONDS = max(0, int(os.getenv("JITTER_SECONDS", "2")))
 
-# Per-number pacing (hard cap per DID)
 RATE_PER_NUMBER_PER_MIN = max(
     1, int(os.getenv("RATE_PER_NUMBER_PER_MIN", os.getenv("RATE_MAX_PER_NUMBER_PER_MIN", "20")))
 )
@@ -103,7 +94,28 @@ DEDUPE_HOURS = int(os.getenv("DEDUPE_HOURS", "72"))
 DAILY_LIMIT_FALLBACK = int(os.getenv("DAILY_LIMIT", "750"))
 DEBUG_CAMPAIGNS = os.getenv("DEBUG_CAMPAIGNS", "false").lower() in ("1", "true", "yes")
 
-# Common field names
+# ─────────────────────────────────────────────────────────────
+# Statuses / icons
+# ─────────────────────────────────────────────────────────────
+STATUS_ICON = {
+    "QUEUED": "⏳",
+    "READY": "⏳",
+    "SENDING": "🔄",
+    "SENT": "✅",
+    "DELIVERED": "✅",
+    "FAILED": "❌",
+    "CANCELLED": "❌",
+}
+
+ALLOWED_STATUSES_RAW = {"scheduled", "running", "ready", "active", ""}  # "" allowed only if permissive
+BLOCKED_STATUSES_RAW = {
+    "paused", "inactive", "on hold", "hold", "stopped", "stop",
+    "complete", "completed", "disabled", "draft", "cancelled", "canceled",
+}
+ALLOWED_STATUSES = {s.lower() for s in ALLOWED_STATUSES_RAW}
+BLOCKED_STATUSES = {s.lower() for s in BLOCKED_STATUSES_RAW}
+
+# Common phone / DNC fields
 PHONE_FIELDS = [
     "phone", "Phone", "Mobile", "Cell", "Phone Number", "Primary Phone",
     "Phone 1", "Phone 2", "Phone 3",
@@ -115,70 +127,8 @@ DNC_FIELDS = [
     "Opt Out", "Opt-Out", "Unsubscribed", "Unsubscribe", "Stop (SMS)"
 ]
 
-STATUS_ICON = {
-    "QUEUED": "⏳",
-    "READY": "⏳",
-    "SENDING": "🔄",
-    "SENT": "✅",
-    "DELIVERED": "✅",
-    "FAILED": "❌",
-    "CANCELLED": "❌",
-}
-
-# Normalize statuses to lowercase for comparison
-ALLOWED_STATUSES_RAW = {"scheduled", "running", "ready", "active", ""}  # blank allowed only in permissive mode
-BLOCKED_STATUSES_RAW = {
-    "paused", "inactive", "on hold", "hold", "stopped", "stop",
-    "complete", "completed", "disabled", "draft", "cancelled", "canceled",
-}
-
-ALLOWED_STATUSES = {s.lower() for s in ALLOWED_STATUSES_RAW}
-BLOCKED_STATUSES = {s.lower() for s in BLOCKED_STATUSES_RAW}
-
 # ─────────────────────────────────────────────────────────────
-# General helpers
-# ─────────────────────────────────────────────────────────────
-def _as_list(x):
-    if x is None:
-        return []
-    return x if isinstance(x, list) else [x]
-
-def _field_ci(fields: Dict[str, Any], *names: str):
-    """Case-insensitive getter across several possible names."""
-    if not fields:
-        return None
-    inv = {_norm(k): k for k in fields.keys()}
-    for n in names:
-        k = inv.get(_norm(n))
-        if k in fields:
-            return fields[k]
-    # exact fallback
-    for n in names:
-        if n in fields:
-            return fields[n]
-    return None
-
-def _normalize_linked_values(v) -> List[str]:
-    """
-    Accept strings (record ids or names), dicts like {'id': 'rec...'}, or arrays of them.
-    Return flat list of strings.
-    """
-    out: List[str] = []
-    for x in _as_list(v):
-        if isinstance(x, str):
-            s = x.strip()
-            if s:
-                out.append(s)
-        elif isinstance(x, dict):
-            rid = x.get("id")
-            if isinstance(rid, str):
-                rid = rid.strip()
-                if rid:
-                    out.append(rid)
-    return out
-
-# ─────────────────────────────────────────────────────────────
-# Time / helpers
+# Time / small utils
 # ─────────────────────────────────────────────────────────────
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -195,21 +145,16 @@ def _norm(s: Any) -> Any:
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
 
 def _digits_only(s: Any) -> Optional[str]:
-    if isinstance(s, str):
-        ds = "".join(re.findall(r"\d+", s))
-        return ds if len(ds) >= 10 else None
-    try:
-        ds = "".join(re.findall(r"\d+", str(s)))
-        return ds if len(ds) >= 10 else None
-    except Exception:
+    if not isinstance(s, str):
         return None
+    ds = "".join(re.findall(r"\d+", s))
+    return ds if len(ds) >= 10 else None
 
 def last10(s: Any) -> Optional[str]:
     d = _digits_only(s)
     return d[-10:] if d else None
 
 def _field(f: Dict[str, Any], *names: str, default=None):
-    """Case-insensitive field getter with normalization."""
     if not f:
         return default
     amap = {_norm(k): k for k in f.keys()}
@@ -217,7 +162,6 @@ def _field(f: Dict[str, Any], *names: str, default=None):
         k = amap.get(_norm(n))
         if k in f:
             return f.get(k)
-    # fallback: exact keys if provided exactly
     for n in names:
         if n in f:
             return f[n]
@@ -228,48 +172,6 @@ def _get_bool(f: Dict[str, Any], *names: str, default: bool=False) -> bool:
     if v is None:
         return default
     return _truthy(v)
-
-def get_phone(f: Dict[str, Any]) -> Optional[str]:
-    # Prefer verified slots if present; allow list or str
-    p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
-    p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
-    if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
-        for cand in _as_list(p1):
-            d = _digits_only(cand)
-            if d: return d
-    if f.get("Phone 2 Verified") or f.get("Phone 2 Ownership Verified"):
-        for cand in _as_list(p2):
-            d = _digits_only(cand)
-            if d: return d
-
-    # Named phone-like fields (string OR list)
-    for k in PHONE_FIELDS:
-        v = f.get(k)
-        for cand in _as_list(v):
-            d = _digits_only(cand)
-            if d: return d
-
-    # Generic fallback: scan *all* list fields for 10+ digit strings (lookup/rollup cases)
-    for v in f.values():
-        if isinstance(v, list):
-            for cand in v:
-                d = _digits_only(cand)
-                if d: return d
-
-    return None
-
-def _is_dnc(f: Dict[str, Any]) -> bool:
-    for k in DNC_FIELDS:
-        v = f.get(k)
-        if v is None:
-            continue
-        if isinstance(v, str) and v.strip():
-            t = v.strip().lower()
-            if t in ("stop", "stopped", "unsubscribed", "do not contact", "do not text", "do not sms"):
-                return True
-        if v is True or _truthy(v):
-            return True
-    return False
 
 def _in_quiet_hours(dt_utc: datetime) -> bool:
     local = dt_utc.astimezone(QUIET_TZ)
@@ -284,7 +186,6 @@ def _shift_to_window(dt_utc: datetime) -> datetime:
     return local.astimezone(timezone.utc)
 
 def _clamp_future(dt_utc: datetime, min_delta_sec: int = 2) -> datetime:
-    """Ensure scheduled time is slightly in the future to avoid 'past' timestamps."""
     floor = utcnow() + timedelta(seconds=min_delta_sec)
     return dt_utc if dt_utc > floor else floor
 
@@ -309,12 +210,10 @@ def _parse_time_maybe_ct(value: Any) -> Optional[datetime]:
         return None
 
 def _get_time_field(f: Dict[str, Any], *names: str) -> Optional[datetime]:
-    # direct
     for n in names:
         if n in f and f[n]:
-            dt = _parse_time_maybe_ct(f[n])
+            dt = _parse_time_maybe_ct(f[n]);  # direct
             if dt: return dt
-    # case-insensitive
     nf = {_norm(k): k for k in f.keys()}
     for n in names:
         k = nf.get(_norm(n))
@@ -323,29 +222,85 @@ def _get_time_field(f: Dict[str, Any], *names: str) -> Optional[datetime]:
             if dt: return dt
     return None
 
+# ─────────────────────────────────────────────────────────────
+# Base/table auto-anchoring (critical for linked Templates)
+# ─────────────────────────────────────────────────────────────
+_base_hint: Dict[str, Optional[str]] = {"campaigns": None}
 
-# ─────────────────────────────────────────────────────────────
-# Airtable table getters (prefer Control base for Campaigns)
-# ─────────────────────────────────────────────────────────────
+def _probe_table(base_id: Optional[str], table_name: str) -> bool:
+    if not (AIRTABLE_KEY and base_id):
+        return False
+    tbl = _make_table(AIRTABLE_KEY, base_id, table_name)
+    if not tbl:
+        return False
+    try:
+        tbl.all(max_records=1)  # type: ignore[attr-defined]
+        return True
+    except Exception:
+        return False
+
+def _choose_campaigns_base() -> Optional[str]:
+    """Pick the base that actually has the Campaigns table (prefer Leads/Convos if both)."""
+    # If everything is in Leads/Convos, this will be the one.
+    order = [LEADS_CONVOS_BASE, CAMPAIGN_CONTROL_BASE]
+    for b in order:
+        if _probe_table(b, CAMPAIGNS_TABLE):
+            return b
+    # last resort: whichever responds
+    for b in [CAMPAIGN_CONTROL_BASE, LEADS_CONVOS_BASE]:
+        if _probe_table(b, CAMPAIGNS_TABLE):
+            return b
+    return None
+
 @lru_cache(maxsize=None)
 def get_campaigns_table():
-    t = _make_table(AIRTABLE_KEY, CAMPAIGN_CONTROL_BASE, CAMPAIGNS_TABLE)
-    return t or _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, CAMPAIGNS_TABLE)
+    if not _base_hint["campaigns"]:
+        _base_hint["campaigns"] = _choose_campaigns_base()
+        if DEBUG_CAMPAIGNS:
+            print(f"[debug] Campaigns base → {_base_hint['campaigns'] or 'None'}")
+    return _make_table(AIRTABLE_KEY, _base_hint["campaigns"], CAMPAIGNS_TABLE)
 
 @lru_cache(maxsize=None)
 def get_templates_table():
+    # Anchor templates to the *same base* as Campaigns
+    camp_base = _base_hint.get("campaigns") or _choose_campaigns_base()
+    if DEBUG_CAMPAIGNS:
+        print(f"[debug] Templates anchored to campaigns base → {camp_base}")
+    t = _make_table(AIRTABLE_KEY, camp_base, TEMPLATES_TABLE)
+    if t:
+        try:
+            t.all(max_records=1)  # sanity touch
+            return t
+        except Exception:
+            pass
+    # fallback to Leads/Convos just in case (won't match linked IDs if bases differ)
     return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE)
 
 @lru_cache(maxsize=None)
 def get_prospects_table():
-    return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
+    # Prospects usually sit with Leads/Convos
+    if _probe_table(LEADS_CONVOS_BASE, PROSPECTS_TABLE):
+        return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
+    # else try the campaigns base
+    camp_base = _base_hint.get("campaigns") or _choose_campaigns_base()
+    return _make_table(AIRTABLE_KEY, camp_base, PROSPECTS_TABLE)
 
 @lru_cache(maxsize=None)
 def get_drip_table():
-    return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
+    # Often in Leads/Convos
+    if _probe_table(LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE):
+        return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
+    camp_base = _base_hint.get("campaigns") or _choose_campaigns_base()
+    return _make_table(AIRTABLE_KEY, camp_base, DRIP_QUEUE_TABLE)
 
 @lru_cache(maxsize=None)
 def get_numbers_table():
+    # Try campaigns base first so linked markets/etc. align
+    camp_base = _base_hint.get("campaigns") or _choose_campaigns_base()
+    t = _make_table(AIRTABLE_KEY, camp_base, NUMBERS_TABLE)
+    if t and _probe_table(camp_base, NUMBERS_TABLE):
+        return t
+    # then try the control base
     return _make_table(AIRTABLE_KEY, CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
 
 @lru_cache(maxsize=None)
@@ -356,9 +311,8 @@ def get_runs_table():
 def get_kpis_table():
     return _make_table(AIRTABLE_KEY, PERFORMANCE_BASE, "KPIs")
 
-
 # ─────────────────────────────────────────────────────────────
-# Schema helpers + bulletproof create/update
+# Safe Airtable create/update with schema filtering
 # ─────────────────────────────────────────────────────────────
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
@@ -384,11 +338,10 @@ _COMPUTED_RE  = re.compile(r'Field\s*"([^"]+)"\s*cannot accept a value because t
 _INVALIDVAL_RE= re.compile(r'INVALID_VALUE_FOR_COLUMN.*?Field\s*"([^"]+)"', re.I)
 
 def _safe_create(tbl, payload: Dict):
-    """Create with schema-map and automatic retry removing unknown/computed fields."""
     if not (tbl and payload):
         return None
     pending = dict(payload)
-    for _ in range(8):  # strip multiple offenders if needed
+    for _ in range(8):
         try:
             data = _safe_filter(tbl, pending)
             if not data:
@@ -398,14 +351,11 @@ def _safe_create(tbl, payload: Dict):
             msg = str(e)
             m = _UNKNOWN_RE.search(msg) or _COMPUTED_RE.search(msg) or _INVALIDVAL_RE.search(msg)
             if m:
-                pending.pop(m.group(1), None)
-                continue
-            traceback.print_exc()
-            return None
+                pending.pop(m.group(1), None); continue
+            traceback.print_exc(); return None
     return None
 
 def _safe_update(tbl, rid: str, payload: Dict):
-    """Update with schema-map and automatic retry removing unknown/computed fields."""
     if not (tbl and rid and payload):
         return None
     pending = dict(payload)
@@ -419,12 +369,9 @@ def _safe_update(tbl, rid: str, payload: Dict):
             msg = str(e)
             m = _UNKNOWN_RE.search(msg) or _COMPUTED_RE.search(msg) or _INVALIDVAL_RE.search(msg)
             if m:
-                pending.pop(m.group(1), None)
-                continue
-            traceback.print_exc()
-            return None
+                pending.pop(m.group(1), None); continue
+            traceback.print_exc(); return None
     return None
-
 
 # ─────────────────────────────────────────────────────────────
 # Personalization helpers
@@ -438,42 +385,31 @@ _BAD_NAME_KEY_HINTS = {
 }
 
 def _looks_org(full: str) -> bool:
-    s = _norm(full or "")
-    return any(hint in s for hint in _ORG_HINTS)
+    s = _norm(full or ""); return any(hint in s for hint in _ORG_HINTS)
 
 def _clean_token(tok: str) -> str:
     return re.sub(r"[^\w'-]+", "", tok or "").strip()
 
 def _is_initial(tok: str) -> bool:
-    t = tok.strip()
-    return bool(re.fullmatch(r"[A-Za-z]\.?", t))
+    t = tok.strip(); return bool(re.fullmatch(r"[A-Za-z]\.?", t))
 
 def _is_person_name_key(key: str) -> bool:
     n = _norm(key or "")
-    if "name" not in n:
-        return False
-    return not any(bad in n for bad in _BAD_NAME_KEY_HINTS)
+    return ("name" in n) and (not any(bad in n for bad in _BAD_NAME_KEY_HINTS))
 
 def _extract_first_name_natural(full: str) -> Optional[str]:
-    if not full:
-        return None
+    if not full: return None
     full = " ".join(str(full).split())
-    if _looks_org(full):
-        return None
-    if "," in full:  # "Last, First"
+    if _looks_org(full): return None
+    if "," in full:
         parts = [p.strip() for p in full.split(",") if p.strip()]
-        if len(parts) >= 2:
-            full = parts[1]
+        if len(parts) >= 2: full = parts[1]
     for sep in ("&", "/", "+"):
-        if sep in full:
-            full = full.split(sep, 1)[0].strip()
+        if sep in full: full = full.split(sep, 1)[0].strip()
     toks = [_clean_token(t) for t in full.split() if _clean_token(t)]
-    if not toks:
-        return None
-    while toks and toks[0].lower().rstrip(".") in _TITLE_WORDS:
-        toks.pop(0)
-    if not toks:
-        return None
+    if not toks: return None
+    while toks and toks[0].lower().rstrip(".") in _TITLE_WORDS: toks.pop(0)
+    if not toks: return None
     first = toks[0]
     return first.replace(".", "").upper() if _is_initial(first) else first
 
@@ -487,10 +423,8 @@ def _compose_address(fields: Dict[str, Any]) -> Optional[str]:
     state  = fields.get("State") or fields.get("Property State") or fields.get("Mailing State")
     postal = fields.get("Zip") or fields.get("ZIP") or fields.get("Postal") or fields.get("Property Zip")
     parts = [str(x).strip() for x in (street, city, state) if x]
-    if postal:
-        parts.append(str(postal).strip())
-    addr = ", ".join([p for p in parts if p])
-    return addr or None
+    if postal: parts.append(str(postal).strip())
+    addr = ", ".join([p for p in parts if p]); return addr or None
 
 def _same_letters(a: str, b: str) -> bool:
     ra = re.sub(r"[^a-z]", "", (a or "").lower())
@@ -513,24 +447,20 @@ def _personalization_ctx(pf: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(v, str) and v.strip():
             cand = _extract_first_name_natural(v)
             if cand and not any(_same_letters(cand, c) or _same_letters(cand, c.split()[0]) for c in city_candidates):
-                first = cand
-                break
+                first = cand; break
     if not first:
         for k, v in pf.items():
-            if not isinstance(v, str) or not v.strip():
-                continue
+            if not isinstance(v, str) or not v.strip(): continue
             if _is_person_name_key(k):
                 cand = _extract_first_name_natural(v)
                 if cand and not any(_same_letters(cand, c) or _same_letters(cand, c.split()[0]) for c in city_candidates):
-                    first = cand
-                    break
+                    first = cand; break
     address = _compose_address(pf)
     friendly_first = first or "there"
     return {"First": friendly_first, "first": friendly_first, "Address": address or "", "address": address or ""}
 
 def _format_template(text: str, ctx: Dict[str, Any]) -> str:
-    if not text:
-        return text
+    if not text: return text
     amap = {_norm(k): ("" if v is None else str(v)) for k, v in (ctx or {}).items()}
     def repl(m):
         raw = m.group(1) or m.group(2)
@@ -538,20 +468,15 @@ def _format_template(text: str, ctx: Dict[str, Any]) -> str:
         return val if val is not None else m.group(0)
     return re.sub(r"\{\{([^}]+)\}\}|\{([^}]+)\}", repl, text)
 
-
 # ─────────────────────────────────────────────────────────────
 # Numbers picking + per-number pacing
 # ─────────────────────────────────────────────────────────────
 def _supports_market(f: Dict[str, Any], market: Optional[str]) -> bool:
-    if not market:
-        return True
-    if f.get("Market") == market:
-        return True
+    if not market: return True
+    if f.get("Market") == market: return True
     ms = f.get("Markets")
-    if isinstance(ms, list):
-        return market in ms
-    if isinstance(ms, str) and ms.strip():
-        return market in [m.strip() for m in ms.split(",")]
+    if isinstance(ms, list): return market in ms
+    if isinstance(ms, str) and ms.strip(): return market in [m.strip() for m in ms.split(",")]
     return False
 
 def _to_e164(f: Dict[str, Any]) -> Optional[str]:
@@ -578,23 +503,16 @@ def _load_number_pool(market: Optional[str], base_time: datetime) -> List[Number
     try:
         rows = nums_tbl.all()  # type: ignore[attr-defined]
     except Exception:
-        traceback.print_exc()
-        return pool
+        traceback.print_exc(); return pool
 
     for r in rows:
         f = r.get("fields", {}) or {}
-
-        # active flag + status permissive allowlist for numbers
         n_active = _get_bool(f, "Active", "Enabled", default=True)
         n_status = str(_field(f, "Status", "status", default="")).strip().lower()
-        if not n_active:
-            continue
-        if n_status in {"paused", "inactive", "disabled"}:
-            continue
-        if not _supports_market(f, market):
-            continue
+        if not n_active: continue
+        if n_status in {"paused", "inactive", "disabled"}: continue
+        if not _supports_market(f, market): continue
 
-        # compute remaining capacity for the day
         rem = f.get("Remaining")
         try:
             rem = int(rem) if rem is not None else None
@@ -604,26 +522,20 @@ def _load_number_pool(market: Optional[str], base_time: datetime) -> List[Number
             sent_today = int(f.get("Sent Today") or 0)
             daily_cap = int(f.get("Daily Reset") or DAILY_LIMIT_FALLBACK)
             rem = max(0, daily_cap - sent_today)
-        if rem <= 0:
-            continue
+        if rem <= 0: continue
 
         e164 = _to_e164(f)
-        if not e164:
-            continue
+        if not e164: continue
 
         pool.append(NumberState(r["id"], e164, int(rem), base_time))
-
     return pool
 
 def _pick_number_with_pacing(pool: List[NumberState]) -> Optional[NumberState]:
-    if not pool:
-        return None
+    if not pool: return None
     pool.sort(key=lambda n: (n.next_time, -n.remaining, n.e164))
     cand = pool[0]
-    if cand.remaining <= 0:
-        return None
+    if cand.remaining <= 0: return None
     return cand
-
 
 # ─────────────────────────────────────────────────────────────
 # UI helper
@@ -641,9 +553,8 @@ def _refresh_ui_icons_for_campaign(drip_tbl, campaign_id: str):
     except Exception:
         traceback.print_exc()
 
-
 # ─────────────────────────────────────────────────────────────
-# Dedupe guard (per campaign, last 10 digits)
+# Dedupe guard
 # ─────────────────────────────────────────────────────────────
 def _last_n_hours_dt(hours: int) -> datetime:
     return utcnow() - timedelta(hours=hours)
@@ -666,46 +577,44 @@ def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
                         return True
         return False
     except Exception:
-        traceback.print_exc()
-        return False
-
+        traceback.print_exc(); return False
 
 # ─────────────────────────────────────────────────────────────
-# Limit normalizer (prevents None/ALL crashes)
+# Phones / status helpers
 # ─────────────────────────────────────────────────────────────
-def _normalize_limit(limit: Optional[int | str]) -> int:
-    if limit is None:
-        return 999_999
-    try:
-        s = str(limit).strip().upper()
-        if s in ("", "ALL", "UNLIMITED", "NONE"):
-            return 999_999
-        v = int(s)
-        return max(1, v)
-    except Exception:
-        return 999_999
+def get_phone(f: Dict[str, Any]) -> Optional[str]:
+    p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
+    p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
+    if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
+        d = _digits_only(p1)
+        if d: return d
+    if f.get("Phone 2 Verified") or f.get("Phone 2 Ownership Verified"):
+        d = _digits_only(p2)
+        if d: return d
+    for k in PHONE_FIELDS:
+        d = _digits_only(f.get(k))
+        if d: return d
+    return None
 
+def _is_dnc(f: Dict[str, Any]) -> bool:
+    for k in DNC_FIELDS:
+        v = f.get(k)
+        if v is None: continue
+        if isinstance(v, str) and v.strip():
+            t = v.strip().lower()
+            if t in ("stop", "stopped", "unsubscribed", "do not contact", "do not text", "do not sms"):
+                return True
+        if v is True or _truthy(v):
+            return True
+    return False
 
-# ─────────────────────────────────────────────────────────────
-# Status/flag helpers
-# ─────────────────────────────────────────────────────────────
 def _status_tuple(f: Dict[str, Any]) -> Tuple[str, str]:
-    """Returns (normalized_status, original_status_str)"""
     raw = _field(f, "status", "Status", default="")
-    if isinstance(raw, list):  # extremely rare (multi-select)
-        raw = raw[0] if raw else ""
+    if isinstance(raw, list): raw = raw[0] if raw else ""
     s = str(raw or "").strip()
     return (s.lower(), s)
 
 def _campaign_is_eligible(f: Dict[str, Any]) -> Tuple[bool, str]:
-    """
-    Decide eligibility once, clearly.
-    STRICT mode:
-      - require (Go Live OR Active) is truthy AND status in ALLOWED (blank NOT allowed)
-      - block if status in BLOCKED
-    PERMISSIVE mode:
-      - allow if status is blank OR in ALLOWED, and neither Go Live nor Active is explicitly False
-    """
     status_norm, status_raw = _status_tuple(f)
     go_live = _get_bool(f, "Go Live", "go live", "go_live", "Live", default=False)
     active  = _get_bool(f, "Active", "active", "Enabled", "enabled", default=False)
@@ -714,29 +623,79 @@ def _campaign_is_eligible(f: Dict[str, Any]) -> Tuple[bool, str]:
         return (False, f"status '{status_raw}' is BLOCKED")
 
     if STRICT_CAMPAIGN_ELIGIBILITY:
-        if status_norm not in (ALLOWED_STATUSES - {""}):  # blank NOT allowed in strict
+        if status_norm not in (ALLOWED_STATUSES - {""}):
             return (False, f"status '{status_raw}' is NOT allowed in strict")
         if not (go_live or active):
             return (False, f"Go Live={go_live} and Active={active} (both false)")
         return (True, "eligible (strict)")
     else:
-        # permissive: blank ok; only explicit False blocks
         if status_norm and status_norm not in ALLOWED_STATUSES:
             return (False, f"status '{status_raw}' not in allowed (permissive)")
         if f.get("Go Live") is False or f.get("Active") is False:
             return (False, "explicit false on Go Live or Active")
         return (True, "eligible (permissive)")
 
+# ─────────────────────────────────────────────────────────────
+# Template resolver (anchored to campaigns base)
+# ─────────────────────────────────────────────────────────────
+def _normalize_link_values(v) -> List[str]:
+    out: List[str] = []
+    if v is None: return out
+    items = v if isinstance(v, list) else [v]
+    for x in items:
+        if isinstance(x, str):
+            s = x.strip()
+            if s: out.append(s)
+        elif isinstance(x, dict):
+            rid = x.get("id")
+            if isinstance(rid, str) and rid.strip():
+                out.append(rid.strip())
+    return out
+
+def _resolve_templates_from_campaign(cf: Dict[str, Any]) -> List[Dict]:
+    tids = _normalize_link_values(cf.get("Templates") or cf.get("templates"))
+    if DEBUG_CAMPAIGNS:
+        cname = cf.get("Name") or cf.get("name") or "Unnamed"
+        print(f"[debug] {cname} linked Templates IDs → {tids}")
+
+    t_tbl = get_templates_table()
+    resolved: List[Dict] = []
+    for tid in tids:
+        try:
+            row = t_tbl.get(tid) if t_tbl and tid.startswith("rec") else None  # type: ignore[attr-defined]
+            if row:
+                resolved.append(row)
+        except Exception:
+            # bad ID vs wrong base → skip
+            continue
+
+    # Fallback: inline message on Campaign if available
+    if not resolved:
+        for fname in ["Message", "Text", "Body", "Script", "Initial Message", "Message Body", "First Touch Message"]:
+            body = cf.get(fname)
+            if isinstance(body, str) and body.strip():
+                resolved.append({"id": f"inline:{fname}", "fields": {"Name": f"(Inline) {fname}", "Message": body}})
+                if DEBUG_CAMPAIGNS:
+                    print(f"[debug] using inline campaign body from '{fname}'")
+                break
+
+    if DEBUG_CAMPAIGNS and not resolved:
+        print("[debug] No templates resolved. Ensure Campaigns & Templates are in the SAME base and links are populated.")
+    return resolved
 
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
+def _normalize_limit(limit: Optional[int | str]) -> int:
+    if limit is None: return 999_999
+    try:
+        s = str(limit).strip().upper()
+        if s in ("", "ALL", "UNLIMITED", "NONE"): return 999_999
+        v = int(s); return max(1, v)
+    except Exception:
+        return 999_999
+
 def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[bool] = None) -> Dict[str, Any]:
-    """
-    Queue messages for eligible campaigns (quiet hours respected, prequeue supported),
-    personalize with {First}/{Address}, round-robin across numbers with a hard cap per
-    DID, and optionally send immediately.
-    """
     max_to_process = _normalize_limit(limit)
 
     if send_after_queue is None:
@@ -745,10 +704,10 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         send_after_queue = False  # never send during quiet hours
 
     campaigns = get_campaigns_table()
-    templates_tbl = get_templates_table()
+    templates = get_templates_table()
     prospects = get_prospects_table()
     drip = get_drip_table()
-    if not all([campaigns, templates_tbl, prospects, drip]):
+    if not all([campaigns, templates, prospects, drip]):
         return {"ok": False, "processed": 0, "results": [], "errors": ["Missing Airtable tables or env"]}
 
     try:
@@ -760,65 +719,40 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
     now_utc = utcnow()
     eligible: List[Dict] = []
 
-    # Decide eligibility once per campaign
     for c in all_campaigns:
         f = c.get("fields", {}) or {}
         name = (f.get("Name") or f.get("name") or c.get("id"))
         ok, why = _campaign_is_eligible(f)
-
         if not ok:
             if DEBUG_CAMPAIGNS:
                 print(f"[skip] {c.get('id')} ({name}) → {why}.")
             continue
 
-        # Time window
         start_dt = _get_time_field(f, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
         end_dt   = _get_time_field(f, "End Time", "End", "End At", "end_time", "End Date", "Schedule End")
 
-        # Completed if end passed
         if end_dt and now_utc >= end_dt:
             _safe_update(campaigns, c["id"], {"status": "Completed", "last_run_at": iso_now()})
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] COMPLETE {name}: now>=end")
             continue
 
-        # If prequeue disabled and start in the future, skip
         if start_dt and now_utc < start_dt and not PREQUEUE_BEFORE_START:
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] WAIT {name}: now<start (prequeue off)")
+            if DEBUG_CAMPAIGNS: print(f"[campaign] WAIT {name}: now<start (prequeue off)")
             continue
 
-        # If prequeue enabled but start is inside quiet-hours AND not allowed to queue then, skip
         if start_dt and now_utc < start_dt and PREQUEUE_BEFORE_START:
             if not ALLOW_QUEUE_OUTSIDE_HOURS and _in_quiet_hours(start_dt):
-                if DEBUG_CAMPAIGNS:
-                    print(f"[campaign] WAIT {name}: start in quiet; queue-off")
+                if DEBUG_CAMPAIGNS: print(f"[campaign] WAIT {name}: start in quiet; queue-off")
                 continue
 
         if DEBUG_CAMPAIGNS:
-            status_norm, status_raw = _status_tuple(f)
+            _, status_raw = _status_tuple(f)
             print(f"[campaign] ELIGIBLE {name}: start={start_dt}, end={end_dt}, status={status_raw or '∅'}")
         eligible.append(c)
 
     processed = 0
     results: List[Dict[str, Any]] = []
-
-    # Build template cache once per process
-    if not hasattr(run_campaigns, "_TPL_CACHE"):
-        try:
-            all_tpl_rows = templates_tbl.all()  # type: ignore[attr-defined]
-        except Exception:
-            all_tpl_rows = []
-        run_campaigns._TPL_CACHE = {
-            "by_id":   {r["id"]: r for r in all_tpl_rows},
-            "by_name": {
-                str(((r.get("fields") or {}).get("Name") or "")).strip(): r
-                for r in all_tpl_rows
-                if (r.get("fields") or {}).get("Name")
-            },
-        }
-    TPL_BY_ID   = run_campaigns._TPL_CACHE["by_id"]
-    TPL_BY_NAME = run_campaigns._TPL_CACHE["by_name"]
 
     for camp in eligible:
         if processed >= max_to_process:
@@ -830,33 +764,6 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         view = (_field(cf, "View/Segment", "View", default="") or "").strip() or None
         market = _field(cf, "Market", "market", default=None)
 
-        # Resolve templates robustly (IDs or Names; link or lookup)
-        raw_tpl_vals = (
-            _field_ci(cf, "Templates", "Template", "Initial Template", "Message Template", "Start Template")
-            or []
-        )
-        tpl_tokens = _normalize_linked_values(raw_tpl_vals)
-
-        resolved_tpl_ids: List[str] = []
-        for t in tpl_tokens:
-            if isinstance(t, str) and t.startswith("rec") and (t in TPL_BY_ID):
-                resolved_tpl_ids.append(t)
-            else:
-                m = TPL_BY_NAME.get(str(t))
-                if m:
-                    resolved_tpl_ids.append(m["id"])
-
-        candidates = resolved_tpl_ids or tpl_tokens  # fall back to raw tokens if not resolved yet
-        if DEBUG_CAMPAIGNS:
-            print(f"[debug] {name} raw Templates -> {raw_tpl_vals!r} | tokens -> {tpl_tokens!r} | resolved -> {resolved_tpl_ids!r}")
-
-        if not candidates:
-            if DEBUG_CAMPAIGNS:
-                print(f"[campaign] SKIP {name}: no Templates linked/resolved")
-            _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
-            continue
-
-        # Pull prospects (view/segment if provided)
         try:
             prospect_rows = prospects.all(view=view) if view else prospects.all()  # type: ignore[attr-defined]
         except Exception:
@@ -864,24 +771,27 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
             continue
 
+        template_rows = _resolve_templates_from_campaign(cf)
+        if not template_rows:
+            if DEBUG_CAMPAIGNS:
+                print(f"[campaign] SKIP {name}: no Templates linked/resolved")
+            _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
+            continue
+
         start_dt = _get_time_field(cf, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
-        now_utc = utcnow()
         prequeue = bool(start_dt and now_utc < start_dt and PREQUEUE_BEFORE_START)
         base_utc = start_dt if prequeue else (max(now_utc, start_dt) if start_dt else now_utc)
 
-        # phase offset per campaign to reduce cross-campaign collisions
         try:
             phase = abs(hash(cid)) % SECONDS_PER_NUMBER_MSG
             base_utc = base_utc + timedelta(seconds=phase)
         except Exception:
             pass
 
-        # Quiet hours shift & future clamp
         if _in_quiet_hours(base_utc):
             base_utc = _shift_to_window(base_utc)
         base_utc = _clamp_future(base_utc, min_delta_sec=2)
 
-        # Create per-number pacing pool
         number_pool = _load_number_pool(market, base_utc)
         if not number_pool:
             if DEBUG_CAMPAIGNS:
@@ -889,7 +799,6 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
             continue
 
-        # Only reflect "Running" if not prequeue
         if prequeue:
             _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
         else:
@@ -901,7 +810,6 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         for pr in prospect_rows:
             pf = pr.get("fields", {}) or {}
 
-            # DNC / opt-out guard
             if _is_dnc(pf):
                 continue
 
@@ -911,41 +819,23 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             if already_queued(drip, phone, cid):
                 continue
 
-            # round-robin by earliest next_time, respecting remaining
             ns = _pick_number_with_pacing(number_pool)
             if not ns or ns.remaining <= 0:
-                break  # pool exhausted
+                break
 
-            # pick a template candidate (ID or Name)
-            tid_or_name = random.choice(candidates)
-            trow = None
-            if isinstance(tid_or_name, str) and tid_or_name.startswith("rec"):
-                trow = TPL_BY_ID.get(tid_or_name) or templates_tbl.get(tid_or_name)  # type: ignore[attr-defined]
-                if trow and (tid_or_name not in TPL_BY_ID):
-                    TPL_BY_ID[tid_or_name] = trow
-            else:
-                trow = TPL_BY_NAME.get(str(tid_or_name))
-            tf = (trow.get("fields", {}) or {}) if trow else {}
-            raw = (
-                tf.get("Message")
-                or tf.get("Text")
-                or tf.get("Body")
-                or tf.get("Template")
-                or tf.get("Script")
-            )
+            # choose a template and build body
+            trow = random.choice(template_rows)
+            tf = (trow.get("fields", {}) or {})
+            raw = tf.get("Message") or tf.get("Text")
             if not raw:
-                if DEBUG_CAMPAIGNS:
-                    print(f"[campaign] WARN {name}: template {tid_or_name!r} has no message body")
                 continue
 
-            # personalization -> body
-            ctx = dict(pf)  # include all fields
+            ctx = dict(pf)
             ctx.update(_personalization_ctx(pf))
             body = _format_template(str(raw), ctx).strip()
             if not body:
                 continue
 
-            # schedule for this number's next available slot
             scheduled = ns.next_time
             if JITTER_SECONDS:
                 scheduled = scheduled + timedelta(seconds=random.randint(0, JITTER_SECONDS))
@@ -957,13 +847,13 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             payload = {
                 "Prospect": [pr["id"]],
                 "Campaign": [cid],
-                "Template": [trow["id"]] if (trow and trow.get("id")) else None,
+                "Template": [trow["id"]] if trow and trow.get("id") else None,
                 "Market": market or pf.get("Market"),
                 "phone": phone,
                 "message_preview": body,
-                "from_number": ns.e164,          # maps to "From Number" if schema differs
+                "from_number": ns.e164,
                 "status": "QUEUED",
-                "next_send_date": scheduled_local,  # CT-naive
+                "next_send_date": scheduled_local,  # local-naive (QUIET_TZ)
                 "Property ID": pf.get("Property ID"),
                 "Number Record Id": ns.rec_id,
                 "UI": STATUS_ICON.get("QUEUED", "⏳"),
@@ -971,14 +861,12 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             created = _safe_create(get_drip_table(), {k: v for k, v in payload.items() if v is not None})
             if created:
                 queued += 1
-                # update pacing & counters
                 ns.remaining -= 1
                 ns.next_time = scheduled + timedelta(seconds=SECONDS_PER_NUMBER_MSG)
                 if _in_quiet_hours(ns.next_time):
                     ns.next_time = _shift_to_window(ns.next_time)
                 ns.next_time = _clamp_future(ns.next_time, min_delta_sec=2)
                 if nums_tbl:
-                    # keep Numbers table fresh without touching daily counters here
                     _safe_update(nums_tbl, ns.rec_id, {"Last Used": iso_now()})
 
         batch_result, retry_result = {"total_sent": 0}, {}
@@ -997,11 +885,8 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         sent_delta = (batch_result.get("total_sent", 0) or 0) + (retry_result.get("retried", 0) or 0)
         new_status = (
-            "Scheduled"
-            if prequeue
-            else (
-                "Running"
-                if queued and (sent_delta < queued or not send_after_queue)
+            "Scheduled" if prequeue else (
+                "Running" if queued and (sent_delta < queued or not send_after_queue)
                 else ("Completed" if queued else (_field(cf, "status", "Status", default="Scheduled") or "Scheduled"))
             )
         )
@@ -1019,14 +904,11 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             "Prequeued": prequeue,
         }
 
-        # IMPORTANT: never push to computed fields (e.g., "total_sent")
-        campaign_update = {
+        _safe_update(get_campaigns_table(), cid, {
             "status": new_status,
             "Last Run Result": json.dumps(last_result),
             "last_run_at": iso_now(),
-        }
-
-        _safe_update(get_campaigns_table(), cid, campaign_update)
+        })
 
         runs_tbl, kpis_tbl = get_runs_table(), get_kpis_table()
         if runs_tbl:
@@ -1054,18 +936,16 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         if DEBUG_CAMPAIGNS:
             print(f"[campaign] {name}: queued={queued}, sent_now={0 if prequeue else sent_delta}, status→{new_status}")
 
-        results.append(
-            {
-                "campaign": name,
-                "queued": queued,
-                "sent": 0 if prequeue else (sent_delta if send_after_queue else 0),
-                "view": view,
-                "market": market,
-                "quiet_now": _in_quiet_hours(now_utc),
-                "mpm": MESSAGES_PER_MIN,
-                "per_number_mpm": RATE_PER_NUMBER_PER_MIN,
-            }
-        )
+        results.append({
+            "campaign": name,
+            "queued": queued,
+            "sent": 0 if prequeue else (sent_delta if send_after_queue else 0),
+            "view": view,
+            "market": market,
+            "quiet_now": _in_quiet_hours(now_utc),
+            "mpm": MESSAGES_PER_MIN,
+            "per_number_mpm": RATE_PER_NUMBER_PER_MIN,
+        })
         processed += 1
 
     try:
@@ -1074,15 +954,3 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         traceback.print_exc()
 
     return {"ok": True, "processed": processed, "results": results, "errors": []}
-
-
-# Optional: expose for REPL diagnostics
-__all__ = [
-    "run_campaigns",
-    "_campaign_is_eligible",
-    "get_campaigns_table",
-    "get_templates_table",
-    "get_prospects_table",
-    "get_drip_table",
-    "get_numbers_table",
-]

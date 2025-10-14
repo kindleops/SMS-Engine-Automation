@@ -2,32 +2,40 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import traceback
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 # --- HTTP client (prefer httpx, fallback to requests) ---
 try:
-    import httpx
+    import httpx  # type: ignore
 except Exception:
     httpx = None
 try:
-    import requests  # fallback if httpx missing
+    import requests  # type: ignore
 except Exception:
     requests = None
 
-# --- Pool DID selector (already resilient) ---
+# --- Optional: Airtable formula helper for upserts ---
+try:
+    from pyairtable.formulas import match  # type: ignore
+except Exception:
+    match = None  # graceful fallback
+
+# --- Pool DID selector ---
 try:
     from sms.number_pools import get_from_number
 except Exception:
     get_from_number = None
 
-# --- Lazy Airtable table getters (robust wrappers you added) ---
+# --- Lazy Airtable table getters (wrappers you already added elsewhere) ---
 try:
     from sms.tables import get_convos, get_leads
 except Exception:
     get_convos = get_leads = lambda *a, **k: None  # type: ignore
+
 
 # =========================
 # ENV / CONFIG
@@ -37,8 +45,8 @@ AUTH_TOKEN = os.getenv("TEXTGRID_AUTH_TOKEN")
 BASE_URL = f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json" if ACCOUNT_SID else None
 
 # Conversations field mapping (defaults align with your base)
-FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")  # counterparty phone (recipient)
-TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")  # our DID used to send
+FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")          # counterparty phone (recipient)
+TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")          # our DID used to send
 MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
 STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
 DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
@@ -46,11 +54,11 @@ TG_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
 SENT_AT_FIELD = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
 
-# Optional extras we’ll write only if fields exist
-LEAD_LINK_FIELD = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")
-PROPERTY_ID_FIELD = os.getenv("CONV_PROPERTY_ID_FIELD", "Property ID")
-TEMPLATE_LINK_FLD = os.getenv("CONV_TEMPLATE_LINK_FIELD", "Template")
-CAMPAIGN_LINK_FLD = os.getenv("CONV_CAMPAIGN_LINK_FIELD", "Campaign")
+# Optional extras (will only write if fields exist)
+LEAD_LINK_FIELD = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")         # often "Lead"
+PROPERTY_ID_FIELD = os.getenv("CONV_PROPERTY_ID_FIELD", "Property ID") # link or text
+TEMPLATE_LINK_FLD = os.getenv("CONV_TEMPLATE_LINK_FIELD", "Template")  # linked
+CAMPAIGN_LINK_FLD = os.getenv("CONV_CAMPAIGN_LINK_FIELD", "Campaign")  # linked
 
 DEFAULT_SENDER_LABEL = "TextGrid Sender"
 DRY_RUN = os.getenv("TEXTGRID_DRY_RUN", "0").lower() in ("1", "true", "yes")
@@ -60,29 +68,24 @@ DRY_RUN = os.getenv("TEXTGRID_DRY_RUN", "0").lower() in ("1", "true", "yes")
 # Small helpers
 # =========================
 def _now_iso() -> str:
+    # seconds precision keeps Airtable tidy and sortable
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _digits(s: Any) -> Optional[str]:
-    if not isinstance(s, str):
-        return None
-    import re
-
-    d = "".join(re.findall(r"\d+", s))
-    return d if len(d) >= 10 else None
+def _norm(s: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
 
 
 def _safe_table_create(tbl, payload: Dict) -> Optional[Dict]:
-    """Create with 'existing fields only' to avoid 422s."""
+    """Create with 'existing fields only' to avoid 422s on computed/select fields."""
     if not tbl or not payload:
         return None
     try:
-        # Build a field whitelist by peeking at one row (or empty)
         try:
-            probe = tbl.all(max_records=1)
+            probe = tbl.all(max_records=1)  # peek schema
             keys = list((probe[0] or {}).get("fields", {}).keys()) if probe else []
         except Exception:
-            keys = list(payload.keys())  # optimistic
+            keys = list(payload.keys())
         norm = {_norm(k): k for k in keys}
         filtered = {}
         for k, v in payload.items():
@@ -96,6 +99,7 @@ def _safe_table_create(tbl, payload: Dict) -> Optional[Dict]:
 
 
 def _safe_table_update(tbl, rec_id: str, patch: Dict) -> Optional[Dict]:
+    """Update with 'existing fields only'."""
     if not tbl or not rec_id or not patch:
         return None
     try:
@@ -116,32 +120,63 @@ def _safe_table_update(tbl, rec_id: str, patch: Dict) -> Optional[Dict]:
         return None
 
 
-def _norm(s: Any) -> str:
-    import re
+def _upsert_convo_by_msgid(tbl, msg_id: Optional[str], payload: Dict) -> Optional[Dict]:
+    """
+    Create or update a Conversations row uniquely by TextGrid ID (MessageSid).
+    Falls back to create if no msg_id or formula helper unavailable.
+    """
+    if not tbl:
+        return None
+    try:
+        if not msg_id:
+            return _safe_table_create(tbl, payload)
 
-    return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+        if match:
+            existing = tbl.all(formula=match({TG_ID_FIELD: msg_id}))
+        else:
+            # Fallback formula (simple equality)
+            # Note: Airtable formula string escaping is minimal here; TG_ID_FIELD should be a simple column name.
+            existing = tbl.all(formula=f"{{{TG_ID_FIELD}}}='{msg_id}'")
+
+        if existing:
+            rec_id = existing[0]["id"]
+            return _safe_table_update(tbl, rec_id, payload)
+        else:
+            return _safe_table_create(tbl, payload)
+    except Exception:
+        traceback.print_exc()
+        return None
 
 
 def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: int = 10) -> Dict[str, Any]:
-    """POST with httpx or requests, returning parsed JSON or raising."""
+    """POST with httpx or requests, returns parsed JSON (or minimal fallback). Handles 429."""
     if DRY_RUN:
         print(f"[DRY RUN] POST {url} data={data}")
-        # Fake a TextGrid-ish response
         return {"sid": f"SM_fake_{int(time.time())}"}
+
+    client = httpx or requests
+    if client is None:
+        raise RuntimeError("No HTTP client available (install httpx or requests).")
 
     if httpx:
         resp = httpx.post(url, data=data, auth=auth, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-    if requests:
-        resp = requests.post(url, data=data, auth=auth, timeout=timeout)
+        if resp.status_code == 429:
+            raise RuntimeError(f"429 rate limited; retry_after={resp.headers.get('Retry-After')}")
         resp.raise_for_status()
         try:
             return resp.json()
         except Exception:
-            # Some carriers return urlencoded; try to coerce
             return {"raw": resp.text}
-    raise RuntimeError("No HTTP client available (install httpx or requests).")
+
+    # requests fallback
+    resp = requests.post(url, data=data, auth=auth, timeout=timeout)
+    if resp.status_code == 429:
+        raise RuntimeError(f"429 rate limited; retry_after={resp.headers.get('Retry-After')}")
+    resp.raise_for_status()
+    try:
+        return resp.json()
+    except Exception:
+        return {"raw": resp.text}
 
 
 # =========================
@@ -153,7 +188,6 @@ def _find_or_create_lead(phone_number: str, source: str = "Outbound") -> Tuple[O
     if not (leads_tbl and phone_number):
         return None, None
     try:
-        # match on exact 'phone'; extend if you keep last10 elsewhere
         recs = leads_tbl.all(formula=f"{{phone}}='{phone_number}'")
         if recs:
             lf = recs[0].get("fields", {})
@@ -181,13 +215,20 @@ def _find_or_create_lead(phone_number: str, source: str = "Outbound") -> Tuple[O
     return None, None
 
 
-def _update_lead_activity(lead_id: Optional[str], body: str, direction: str, property_id: Optional[str] = None) -> None:
+def _update_lead_activity(
+    lead_id: Optional[str],
+    body: str,
+    direction: str,
+    property_id: Optional[str] = None,
+) -> None:
     if not lead_id:
         return
     leads_tbl = get_leads()
     if not leads_tbl:
         return
     try:
+        current = leads_tbl.get(lead_id) or {}
+        f = current.get("fields", {}) if isinstance(current, dict) else {}
         patch = {
             "Last Activity": _now_iso(),
             "Last Direction": direction,
@@ -195,6 +236,7 @@ def _update_lead_activity(lead_id: Optional[str], body: str, direction: str, pro
         }
         if direction == "OUT":
             patch["Last Outbound"] = _now_iso()
+            patch["Sent Count"] = int(f.get("Sent Count", 0)) + 1
         if property_id:
             patch[PROPERTY_ID_FIELD] = property_id
         _safe_table_update(leads_tbl, lead_id, patch)
@@ -214,11 +256,12 @@ def send_message(
     property_id: Optional[str] = None,
     template_id: Optional[str] = None,
     campaign_id: Optional[str] = None,
+    media_urls: Optional[List[str]] = None,
     retries: int = 3,
     timeout: int = 10,
 ) -> Dict[str, Any]:
     """
-    Send an SMS via TextGrid and write a Conversations row.
+    Send an SMS (or MMS if media_urls provided) via TextGrid and write a Conversations row.
     Returns: {"ok": bool, "sid": str|None, "to": str, "from": str|None, "lead_id": str|None, "property_id": str|None, ...}
 
     Notes:
@@ -248,13 +291,18 @@ def send_message(
         lead_id = lead_id or _lead_id
         property_id = property_id or _prop_id
 
-    # Send with retries (exponential backoff 2^n)
+    # Send with retries (429-aware exponential backoff)
     last_err = None
     msg_id: Optional[str] = None
 
     for attempt in range(1, max(1, retries) + 1):
         try:
-            data = {"To": to, "From": sender, "Body": body}
+            data: Dict[str, Any] = {"To": to, "From": sender, "Body": body}
+            if media_urls:
+                # Many gateways accept MediaUrl, MediaUrl2, ...
+                for i, m in enumerate(media_urls):
+                    data["MediaUrl" + ("" if i == 0 else str(i + 1))] = m
+
             resp = _http_post(BASE_URL, data=data, auth=(ACCOUNT_SID, AUTH_TOKEN), timeout=timeout)
             msg_id = (resp or {}).get("sid") or (resp or {}).get("message_sid") or (resp or {}).get("id")
             print(f"📤 OUT → {to} (from {sender}) | {body[:120]}")
@@ -264,17 +312,20 @@ def send_message(
             last_err = str(e)
             print(f"❌ Send attempt {attempt}/{retries} failed → {to}: {last_err}")
             if attempt < retries:
-                wait = 2**attempt
+                wait = 2 ** attempt
+                m = re.search(r"retry_after=(\d+)", last_err or "")
+                if m:
+                    wait = max(wait, int(m.group(1)))
                 print(f"⏳ retrying in {wait}s...")
                 time.sleep(wait)
 
-    # Log to Conversations (best effort) with correct schema mapping
+    # Log to Conversations (best effort) with upsert by MessageSid to avoid duplicates
     convos_tbl = get_convos()
     try:
         if convos_tbl:
             rec: Dict[str, Any] = {
-                FROM_FIELD: to,  # counterparty phone
-                TO_FIELD: sender,  # our DID used to send
+                FROM_FIELD: to,               # counterparty phone
+                TO_FIELD: sender,             # our DID used to send
                 MSG_FIELD: body,
                 DIR_FIELD: "OUT",
                 STATUS_FIELD: "SENT" if last_err is None else "FAILED",
@@ -282,22 +333,20 @@ def send_message(
                 PROCESSED_BY: DEFAULT_SENDER_LABEL,
                 TG_ID_FIELD: msg_id,
             }
-            # optional relations if your schema has them
             if lead_id and LEAD_LINK_FIELD:
                 rec[LEAD_LINK_FIELD] = [lead_id]
             if property_id and PROPERTY_ID_FIELD:
                 rec[PROPERTY_ID_FIELD] = property_id
             if template_id and TEMPLATE_LINK_FLD:
-                # if Template is a linked field, one ID in a list is typical
                 rec[TEMPLATE_LINK_FLD] = [template_id]
             if campaign_id and CAMPAIGN_LINK_FLD:
                 rec[CAMPAIGN_LINK_FLD] = [campaign_id]
 
-            _safe_table_create(convos_tbl, rec)
+            _upsert_convo_by_msgid(convos_tbl, msg_id, rec)
     except Exception:
         traceback.print_exc()
 
-    # Update lead activity trail
+    # Update lead activity trail (increments Sent Count on OUT)
     try:
         _update_lead_activity(lead_id, body, "OUT", property_id=property_id)
     except Exception:
