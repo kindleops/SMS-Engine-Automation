@@ -120,6 +120,48 @@ def log_conversation(payload: dict):
     except Exception as log_err:
         print(f"⚠️ Failed to log to Conversations: {log_err}")
 
+        # Add near the top:
+PHONE_CANDIDATES = [
+    "phone","Phone","Mobile","Cell","Phone Number","Primary Phone",
+    "Phone 1","Phone 2","Phone 3",
+    "Owner Phone","Owner Phone 1","Owner Phone 2",
+    "Phone 1 (from Linked Owner)","Phone 2 (from Linked Owner)","Phone 3 (from Linked Owner)",
+]
+
+import re
+def _digits(s): 
+    return "".join(re.findall(r"\d+", s or "")) if isinstance(s, str) else ""
+def _last10(s):
+    d = _digits(s);  return d[-10:] if len(d) >= 10 else ""
+
+def _first_existing_fields(tbl, candidates):
+    """Return the subset of candidate column names that really exist in this table."""
+    try:
+        probe = tbl.all(max_records=1) or []
+        keys = list((probe[0] or {}).get("fields", {}).keys()) if probe else []
+    except Exception:
+        keys = []
+    existing = set(keys)
+    return [c for c in candidates if c in existing]
+
+def _find_by_phone_last10(tbl, phone):
+    """Scan the table (paged) and return the first record whose any phone-like field matches last10."""
+    if not tbl or not phone: 
+        return None
+    want = _last10(phone)
+    if not want: 
+        return None
+    fields = _first_existing_fields(tbl, PHONE_CANDIDATES)
+    try:
+        # Iterate all (Airtable SDK handles pagination)
+        for r in tbl.all():
+            f = r.get("fields", {}) or {}
+            for col in fields:
+                if _last10(f.get(col)) == want:
+                    return r
+    except Exception:
+        traceback.print_exc()
+    return None
 
 # --- Inbound SMS ---
 @router.post("/inbound")
