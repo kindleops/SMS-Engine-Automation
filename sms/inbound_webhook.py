@@ -5,6 +5,24 @@ from pyairtable import Table
 
 from sms.number_pools import increment_delivered, increment_failed, increment_opt_out
 
+def process_status(payload: dict):
+    """Testable status handler (used by CI tests and /status webhook)."""
+    msg_id = payload.get("MessageSid")
+    status = payload.get("MessageStatus")
+    to = payload.get("To")
+    from_num = payload.get("From")
+
+    print(f"📡 [TEST] Delivery receipt for {to} [{status}]")
+
+    # Update number pool stats
+    if status == "delivered":
+        increment_delivered(from_num)
+    elif status in ("failed", "undelivered"):
+        increment_failed(from_num)
+
+    # Skip Airtable updates in test mode
+    return {"status": status or "unknown"}
+
 router = APIRouter()
 
 # === ENV CONFIG ===
