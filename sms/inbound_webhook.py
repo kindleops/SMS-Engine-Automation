@@ -5,24 +5,6 @@ from pyairtable import Table
 
 from sms.number_pools import increment_delivered, increment_failed, increment_opt_out
 
-def process_status(payload: dict):
-    """Testable status handler (used by CI tests and /status webhook)."""
-    msg_id = payload.get("MessageSid")
-    status = payload.get("MessageStatus")
-    to = payload.get("To")
-    from_num = payload.get("From")
-
-    print(f"📡 [TEST] Delivery receipt for {to} [{status}]")
-
-    # Update number pool stats
-    if status == "delivered":
-        increment_delivered(from_num)
-    elif status in ("failed", "undelivered"):
-        increment_failed(from_num)
-
-    # Skip Airtable updates in test mode
-    return {"status": status or "unknown"}
-
 router = APIRouter()
 
 # === ENV CONFIG ===
@@ -51,16 +33,16 @@ prospects = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KE
 
 # === HELPERS ===
 PHONE_CANDIDATES = [
-    "phone","Phone","Mobile","Cell","Phone Number","Primary Phone",
-    "Phone 1","Phone 2","Phone 3",
-    "Owner Phone","Owner Phone 1","Owner Phone 2",
-    "Phone 1 (from Linked Owner)","Phone 2 (from Linked Owner)","Phone 3 (from Linked Owner)",
+    "phone", "Phone", "Mobile", "Cell", "Phone Number", "Primary Phone",
+    "Phone 1", "Phone 2", "Phone 3",
+    "Owner Phone", "Owner Phone 1", "Owner Phone 2",
+    "Phone 1 (from Linked Owner)", "Phone 2 (from Linked Owner)", "Phone 3 (from Linked Owner)"
 ]
 
 def iso_timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-def _digits(s): 
+def _digits(s):
     return "".join(re.findall(r"\d+", s or "")) if isinstance(s, str) else ""
 
 def _last10(s):
@@ -164,9 +146,9 @@ def log_conversation(payload: dict):
     except Exception as e:
         print(f"⚠️ Failed to log to Conversations: {e}")
 
-# === TESTABLE HANDLER (used by pytest) ===
+# === TESTABLE HANDLER (used by CI) ===
 def handle_inbound(payload: dict):
-    """Non-async testable version of inbound handler (used for CI tests)."""
+    """Non-async inbound handler used by tests."""
     from_number = payload.get("From")
     to_number = payload.get("To")
     body = payload.get("Body")
@@ -200,7 +182,7 @@ def handle_inbound(payload: dict):
 
 # === TESTABLE OPTOUT HANDLER ===
 def process_optout(payload: dict):
-    """Testable opt-out handler used by pytest and /optout webhook."""
+    """Handles STOP/unsubscribe messages for tests + webhook."""
     from_number = payload.get("From")
     body = (payload.get("Body") or "").lower()
 
@@ -232,6 +214,23 @@ def process_optout(payload: dict):
 
     return {"status": "ignored"}
 
+# === TESTABLE STATUS HANDLER ===
+def process_status(payload: dict):
+    """Testable delivery status handler used by CI and webhook."""
+    msg_id = payload.get("MessageSid")
+    status = payload.get("MessageStatus")
+    to = payload.get("To")
+    from_num = payload.get("From")
+
+    print(f"📡 [TEST] Delivery receipt for {to} [{status}]")
+
+    if status == "delivered":
+        increment_delivered(from_num)
+    elif status in ("failed", "undelivered"):
+        increment_failed(from_num)
+
+    return {"status": status or "unknown"}
+
 # === FASTAPI ROUTES ===
 @router.post("/inbound")
 async def inbound_handler(request: Request):
@@ -257,44 +256,7 @@ async def optout_handler(request: Request):
 async def status_handler(request: Request):
     try:
         data = await request.form()
-        msg_id = data.get("MessageSid")
-        status = data.get("MessageStatus")
-        to = data.get("To")
-        from_num = data.get("From")
-
-        print(f"📡 Delivery receipt for {to} [{status}]")
-
-        if status == "delivered":
-            increment_delivered(from_num)
-        elif status in ("failed", "undelivered"):
-            increment_failed(from_num)
-
-        if convos and msg_id:
-            try:
-                convos.update_by_fields({TG_ID_FIELD: msg_id}, {STATUS_FIELD: status.upper()})
-            except Exception as e:
-                print(f"⚠️ Failed to update Conversations status: {e}")
-
-        match = _find_by_phone_last10(leads, to)
-        if match:
-            lead_id = match["id"]
-            fields = match["fields"]
-            delivered_count = fields.get("Delivered Count", 0)
-            failed_count = fields.get("Failed Count", 0)
-
-            updates = {
-                "Last Activity": iso_timestamp(),
-                "Last Delivery Status": status.upper(),
-            }
-            if status == "delivered":
-                updates["Delivered Count"] = delivered_count + 1
-            elif status in ("failed", "undelivered"):
-                updates["Failed Count"] = failed_count + 1
-
-            leads.update(lead_id, updates)
-
-        return {"ok": True}
-
+        return process_status(data)
     except Exception as e:
         print("❌ Status webhook error:")
         traceback.print_exc()
