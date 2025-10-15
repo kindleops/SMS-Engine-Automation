@@ -44,7 +44,7 @@ def handle_inbound(payload: dict):
     if lead_id:
         update_lead_activity(lead_id, body, "IN", reply_increment=True)
 
-    return {"ok": True}
+    return {"status": True}
 
 # --- ENV CONFIG ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
