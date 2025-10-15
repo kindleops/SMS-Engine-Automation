@@ -7,7 +7,8 @@ def iso_now(): return datetime.now(timezone.utc).isoformat()
 def to_int(v, default=0):
     try: 
         return int(float(v))
-    except: return default
+    except (ValueError, TypeError):
+        return default
 
 def score_row(f: dict) -> tuple[int,str,str]:
     """Returns (MotivationScore 0–100, DistressTier, NextAction) using simple rules."""
