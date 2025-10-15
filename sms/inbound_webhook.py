@@ -40,7 +40,7 @@ def process_optout(payload: dict):
             record["Property ID"] = property_id
 
         log_conversation(record)
-        return {"status": "ok"}
+        return {"status": "optout"}
 
     # If not opt-out keyword
     return {"status": "ignored"}
