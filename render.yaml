@@ -1,23 +1,18 @@
-# render.yaml — REI SMS Engine (Final Production)
-# Full Blueprint for Render with Web API + Worker + AutoLinker
-# - Handles SMS inbound/outbound/status
-# - Includes full Cron automation
-# - Strong retry, no duplicate previews
-# - Bulletproof configuration for production
+# render.yaml — REI SMS Engine (Python runtime, matches existing service)
 
 services:
   # 🌐 WEB SERVICE — API & Webhooks
   - type: web
     name: rei-sms-engine
-    env: docker
+    env: python
     plan: free
-    dockerfilePath: ./Dockerfile.sms
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
     autoDeploy: true
     previews:
       enabled: false
-    healthCheckPath: /health
+    healthCheckPath: /healthz
     envVars:
-      # --- Airtable ---
       - key: AIRTABLE_API_KEY
         sync: false
       - key: LEADS_CONVOS_BASE
@@ -35,72 +30,59 @@ services:
       - key: AIRTABLE_REPORTING_KEY
         sync: false
 
-      # --- Text/SMS Provider ---
       - key: TEXTGRID_ACCOUNT_SID
         sync: false
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
 
-      # --- Auth ---
       - key: WEBHOOK_TOKEN
         sync: false
       - key: CRON_TOKEN
         sync: false
 
-      # --- Upstash REST (Rate Limiter) ---
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
 
-      # --- Engine Settings ---
       - key: QUIET_HOURS_ENFORCED
-        value: "true"
+        value: true
       - key: QUIET_START_HOUR_LOCAL
-        value: "21"
+        value: 21
       - key: QUIET_END_HOUR_LOCAL
-        value: "9"
+        value: 9
       - key: RATE_PER_NUMBER_PER_MIN
-        value: "20"
+        value: 20
       - key: GLOBAL_RATE_PER_MIN
-        value: "5000"
+        value: 5000
       - key: DAILY_LIMIT
-        value: "750"
+        value: 750
       - key: DEDUPE_HOURS
-        value: "72"
+        value: 72
       - key: MESSAGES_PER_MIN
-        value: "20"
+        value: 20
       - key: JITTER_SECONDS
-        value: "2"
+        value: 2
       - key: RUNNER_SEND_AFTER_QUEUE
-        value: "false"
+        value: false
       - key: ENABLE_EMBEDDED_SCHEDULER
-        value: "false"
+        value: false
 
-      # --- Optional Settings ---
-      - key: ENABLE_OUTBOUND_WEBHOOK
-        value: "true"
+      # Optional
       - key: LOG_LEVEL
-        value: "debug"
-
-      # --- Alerts (optional) ---
-      - key: ALERT_PHONE
-        sync: false
-      - key: ALERT_EMAIL_WEBHOOK
-        sync: false
+        value: debug
 
   # ♾️ WORKER — Continuous SMS Runner
   - type: worker
     name: rei-sms-worker
-    env: docker
+    env: python
     plan: free
-    dockerfilePath: ./Dockerfile.sms
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -u -m sms.worker
     autoDeploy: true
     previews:
       enabled: false
-    command: python -u -m sms.worker
     envVars:
-      # --- Airtable ---
       - key: AIRTABLE_API_KEY
         sync: false
       - key: LEADS_CONVOS_BASE
@@ -118,138 +100,133 @@ services:
       - key: AIRTABLE_REPORTING_KEY
         sync: false
 
-      # --- Text/SMS Provider ---
       - key: TEXTGRID_ACCOUNT_SID
         sync: false
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
 
-      # --- Upstash ---
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
 
-      # --- Worker Settings ---
       - key: WORKER_INTERVAL_SEC
-        value: "30"
+        value: 30
       - key: SEND_BATCH_LIMIT
-        value: "500"
+        value: 500
       - key: RETRY_LIMIT
-        value: "100"
+        value: 100
       - key: AUTORESPONDER_LIMIT
-        value: "50"
+        value: 50
       - key: AUTORESPONDER_VIEW
-        value: "Unprocessed Inbounds"
+        value: Unprocessed Inbounds
       - key: RUNNER_SEND_AFTER_QUEUE
-        value: "true"
+        value: true
       - key: QUIET_HOURS_ENFORCED
-        value: "true"
+        value: true
       - key: QUIET_START_HOUR_LOCAL
-        value: "21"
+        value: 21
       - key: QUIET_END_HOUR_LOCAL
-        value: "9"
+        value: 9
 
-      # --- Auth ---
       - key: WEBHOOK_TOKEN
         sync: false
       - key: CRON_TOKEN
         sync: false
 
-  # 🧠 WORKER — AutoLinker (Continuous field sync)
+  # 🧠 WORKER — AutoLinker
   - type: worker
     name: rei-autolinker
-    env: docker
+    env: python
     plan: free
-    dockerfilePath: ./Dockerfile.sms
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -u -m sms.workers.autolinker_worker
     autoDeploy: true
     previews:
       enabled: false
-    command: python -u -m sms.workers.autolinker_worker
     envVars:
       - key: AUTOLINKER_INTERVAL_SEC
-        value: "90"
+        value: 90
       - key: AUTOLINKER_BATCH
-        value: "200"
+        value: 200
       - key: AIRTABLE_API_KEY
         sync: false
       - key: LEADS_CONVOS_BASE
         sync: false
       - key: CONVERSATIONS_TABLE
-        value: "Conversations"
+        value: Conversations
       - key: PROSPECTS_TABLE
-        value: "Prospects"
+        value: Prospects
       - key: LEADS_TABLE
-        value: "Leads"
+        value: Leads
 
-# 🔄 CRON JOBS — Automated SMS Lifecycle
 cronJobs:
   - name: run-autoresponder
     schedule: "*/10 * * * *"
-    command: |
-      curl --fail --silent --show-error \
-        -X POST "https://rei-sms-engine.onrender.com/autoresponder/autoresponder" \
-        -H "Authorization: Bearer ${CRON_TOKEN}" \
-        -H "x-cron-token: ${CRON_TOKEN}"
+    command: >
+      curl --fail --silent --show-error
+      -X POST "https://rei-sms-engine.onrender.com/autoresponder/autoresponder"
+      -H "Authorization: Bearer ${CRON_TOKEN}"
+      -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: run-campaigns
     schedule: "*/10 * * * *"
-    command: |
-      curl --fail --silent --show-error \
-        -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL&send_after_queue=true" \
-        -H "Authorization: Bearer ${CRON_TOKEN}" \
-        -H "x-cron-token: ${CRON_TOKEN}"
+    command: >
+      curl --fail --silent --show-error
+      -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL&send_after_queue=true"
+      -H "Authorization: Bearer ${CRON_TOKEN}"
+      -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: sms-retry-runner
     schedule: "*/30 * * * *"
-    command: |
-      curl --fail --silent --show-error \
-        -X POST "https://rei-sms-engine.onrender.com/retry" \
-        -H "Authorization: Bearer ${CRON_TOKEN}" \
-        -H "x-cron-token: ${CRON_TOKEN}"
+    command: >
+      curl --fail --silent --show-error
+      -X POST "https://rei-sms-engine.onrender.com/retry"
+      -H "Authorization: Bearer ${CRON_TOKEN}"
+      -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: reset-daily-quotas
     schedule: "0 0 * * *"
-    command: |
-      curl --fail --silent --show-error \
-        -X POST "https://rei-sms-engine.onrender.com/reset-quotas" \
-        -H "Authorization: Bearer ${CRON_TOKEN}" \
-        -H "x-cron-token: ${CRON_TOKEN}"
+    command: >
+      curl --fail --silent --show-error
+      -X POST "https://rei-sms-engine.onrender.com/reset-quotas"
+      -H "Authorization: Bearer ${CRON_TOKEN}"
+      -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: aggregate-kpis-daily
     schedule: "0 1 * * *"
-    command: |
-      curl --fail --silent --show-error \
-        -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
-        -H "Authorization: Bearer ${CRON_TOKEN}" \
-        -H "x-cron-token: ${CRON_TOKEN}"
+    command: >
+      curl --fail --silent --show-error
+      -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis"
+      -H "Authorization: Bearer ${CRON_TOKEN}"
+      -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: aggregate-kpis-weekly
     schedule: "0 2 * * 1"
-    command: |
-      curl --fail --silent --show-error \
-        -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
-        -H "Authorization: Bearer ${CRON_TOKEN}" \
-        -H "x-cron-token: ${CRON_TOKEN}"
+    command: >
+      curl --fail --silent --show-error
+      -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis"
+      -H "Authorization: Bearer ${CRON_TOKEN}"
+      -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: aggregate-kpis-monthly
     schedule: "0 3 1 * *"
-    command: |
-      curl --fail --silent --show-error \
-        -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis" \
-        -H "Authorization: Bearer ${CRON_TOKEN}" \
-        -H "x-cron-token: ${CRON_TOKEN}"
+    command: >
+      curl --fail --silent --show-error
+      -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis"
+      -H "Authorization: Bearer ${CRON_TOKEN}"
+      -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: cron-all
     schedule: "*/15 * * * *"
-    command: |
-      curl --fail --silent --show-error \
-        -X POST "https://rei-sms-engine.onrender.com/cron/all?limit=500" \
-        -H "Authorization: Bearer ${CRON_TOKEN}" \
-        -H "x-cron-token: ${CRON_TOKEN}"
+    command: >
+      curl --fail --silent --show-error
+      -X POST "https://rei-sms-engine.onrender.com/cron/all?limit=500"
+      -H "Authorization: Bearer ${CRON_TOKEN}"
+      -H "x-cron-token: ${CRON_TOKEN}"
 
   - name: health-ping
     schedule: "*/5 * * * *"
-    command: |
-      curl --fail --silent --show-error \
-        "https://rei-sms-engine.onrender.com/health"
+    command: >
+      curl --fail --silent --show-error
+      "https://rei-sms-engine.onrender.com/healthz"
