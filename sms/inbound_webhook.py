@@ -7,6 +7,44 @@ from sms.number_pools import increment_delivered, increment_failed, increment_op
 
 router = APIRouter()
 
+def process_optout(payload: dict):
+    """
+    Testable (non-async) version of the opt-out webhook.
+    Mirrors the behavior of /optout route.
+    """
+    from_number = payload.get("From")
+    body = (payload.get("Body") or "").lower()
+
+    if not from_number or not body:
+        raise ValueError("Missing From or Body")
+
+    if "stop" in body or "unsubscribe" in body or "quit" in body:
+        print(f"🚫 [TEST] Opt-out from {from_number}")
+        increment_opt_out(from_number)
+        lead_id, property_id = promote_prospect_to_lead(from_number, source="Opt-Out")
+        if lead_id:
+            update_lead_activity(lead_id, body, "IN")
+
+        record = {
+            FROM_FIELD: from_number,
+            MSG_FIELD: body,
+            STATUS_FIELD: "OPTOUT",
+            DIR_FIELD: "IN",
+            RECEIVED_AT: iso_timestamp(),
+            PROCESSED_BY: "OptOut Handler",
+        }
+
+        if lead_id:
+            record["lead_id"] = [lead_id]
+        if property_id:
+            record["Property ID"] = property_id
+
+        log_conversation(record)
+        return {"status": "ok"}
+
+    # If not opt-out keyword
+    return {"status": "ignored"}
+
 def handle_inbound(payload: dict):
     """
     Non-async testable version of the inbound webhook handler.
