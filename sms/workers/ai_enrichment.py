@@ -5,7 +5,8 @@ from sms.tables import get_table
 
 def iso_now(): return datetime.now(timezone.utc).isoformat()
 def to_int(v, default=0):
-    try: return int(float(v))
+    try: 
+        return int(float(v))
     except: return default
 
 def score_row(f: dict) -> tuple[int,str,str]:

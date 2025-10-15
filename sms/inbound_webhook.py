@@ -97,6 +97,16 @@ def _safe_update(tbl: Table, rec_id: str, payload: dict):
     except Exception as e:
         print(f"⚠️ Update failed for {rec_id}: {e}")
 
+def log_conversation(payload: dict):
+    """Create a Conversations row; kept as a top-level function so tests can monkeypatch it."""
+    if not convos:
+        return
+    try:
+        convos.create(payload)
+    except Exception as e:
+        # Don’t raise here; just log so inbound path is resilient.
+        print(f"⚠️ Failed to log to Conversations: {e}")
+
 # --- Promotion: Prospect → Lead ---
 def promote_prospect_to_lead(phone_number: str, source="Inbound"):
     """Makes sure a Lead exists for this phone; returns (lead_id, property_id, prospect_id)."""
