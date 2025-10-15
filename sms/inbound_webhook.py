@@ -7,6 +7,45 @@ from sms.number_pools import increment_delivered, increment_failed, increment_op
 
 router = APIRouter()
 
+def handle_inbound(payload: dict):
+    """
+    Non-async testable version of the inbound webhook handler.
+    Used by unit tests; mirrors inbound_handler() FastAPI route.
+    """
+    from_number = payload.get("From")
+    to_number = payload.get("To")
+    body = payload.get("Body")
+    msg_id = payload.get("MessageSid")
+
+    if not from_number or not body:
+        raise ValueError("Missing From or Body")
+
+    print(f"📥 [TEST] Inbound SMS from {from_number}: {body}")
+
+    lead_id, property_id = promote_prospect_to_lead(from_number)
+
+    record = {
+        FROM_FIELD: from_number,
+        TO_FIELD: to_number,
+        MSG_FIELD: body,
+        STATUS_FIELD: "UNPROCESSED",
+        DIR_FIELD: "IN",
+        TG_ID_FIELD: msg_id,
+        RECEIVED_AT: iso_timestamp(),
+    }
+
+    if lead_id:
+        record["lead_id"] = [lead_id]
+    if property_id:
+        record["Property ID"] = property_id
+
+    log_conversation(record)
+
+    if lead_id:
+        update_lead_activity(lead_id, body, "IN", reply_increment=True)
+
+    return {"ok": True}
+
 # --- ENV CONFIG ---
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 BASE_ID = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
