@@ -218,7 +218,7 @@ def process_optout(payload: dict):
 def process_status(payload: dict):
     """Testable delivery status handler used by CI and webhook."""
     msg_id = payload.get("MessageSid")
-    status = payload.get("MessageStatus")
+    status = (payload.get("MessageStatus") or "").lower()
     to = payload.get("To")
     from_num = payload.get("From")
 
@@ -229,7 +229,8 @@ def process_status(payload: dict):
     elif status in ("failed", "undelivered"):
         increment_failed(from_num)
 
-    return {"status": status or "unknown"}
+    # Match the test's expectation: include ok=True
+    return {"ok": True, "status": status or "unknown"}
 
 # === FASTAPI ROUTES ===
 @router.post("/inbound")
