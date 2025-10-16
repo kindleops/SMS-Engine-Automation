@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os, re, json, random, math, traceback
 from datetime import datetime, timezone, timedelta, date
-from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -203,6 +202,33 @@ def _probe_table(base_id: Optional[str], table: str) -> bool:
 
 _base_hint: Dict[str, Optional[str]] = {"campaigns": None}
 
+_CACHE_MISSING = object()
+_table_cache: Dict[str, Any] = {
+    "campaigns": _CACHE_MISSING,
+    "templates": _CACHE_MISSING,
+    "prospects": _CACHE_MISSING,
+    "drip": _CACHE_MISSING,
+    "numbers": _CACHE_MISSING,
+    "runs": _CACHE_MISSING,
+    "kpis": _CACHE_MISSING,
+}
+
+def _cache_lookup(name: str, builder):
+    cached = _table_cache.get(name, _CACHE_MISSING)
+    if cached is not _CACHE_MISSING:
+        return cached
+    tbl = builder()
+    if tbl is None:
+        return None
+    _table_cache[name] = tbl
+    return tbl
+
+def reset_table_caches() -> None:
+    """Clear cached Airtable table handles so future calls re-resolve them."""
+    for key in _table_cache:
+        _table_cache[key] = _CACHE_MISSING
+    _base_hint["campaigns"] = None
+
 def _choose_campaigns_base() -> Optional[str]:
     order = [LEADS_CONVOS_BASE, CAMPAIGN_CONTROL_BASE]
     for b in order:
@@ -211,46 +237,93 @@ def _choose_campaigns_base() -> Optional[str]:
         if _probe_table(b, CAMPAIGNS_TABLE): return b
     return None
 
-@lru_cache(maxsize=None)
 def get_campaigns_table():
-    if not _base_hint["campaigns"]:
-        _base_hint["campaigns"] = _choose_campaigns_base()
-    return _make_table(AIRTABLE_KEY, _base_hint["campaigns"], CAMPAIGNS_TABLE)
+    def _build():
+        base = _base_hint.get("campaigns")
+        if not base:
+            cand = _choose_campaigns_base()
+            if cand:
+                _base_hint["campaigns"] = cand
+                base = cand
+        if not base:
+            return None
+        return _make_table(AIRTABLE_KEY, base, CAMPAIGNS_TABLE)
 
-@lru_cache(maxsize=None)
+    return _cache_lookup("campaigns", _build)
+
 def get_templates_table():
-    camp_base = _base_hint.get("campaigns") or _choose_campaigns_base()
-    t = _make_table(AIRTABLE_KEY, camp_base, TEMPLATES_TABLE)
-    if t:
-        try: t.all(max_records=1); return t
-        except Exception: pass
-    return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE)
+    def _build():
+        camp_base = _base_hint.get("campaigns")
+        if not camp_base:
+            cand = _choose_campaigns_base()
+            if cand:
+                _base_hint["campaigns"] = cand
+                camp_base = cand
+        if camp_base:
+            t = _make_table(AIRTABLE_KEY, camp_base, TEMPLATES_TABLE)
+            if t:
+                try:
+                    t.all(max_records=1)  # type: ignore[attr-defined]
+                    return t
+                except Exception:
+                    pass
+        return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, TEMPLATES_TABLE)
 
-@lru_cache(maxsize=None)
+    return _cache_lookup("templates", _build)
+
 def get_prospects_table():
-    if _probe_table(LEADS_CONVOS_BASE, PROSPECTS_TABLE):
-        return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
-    camp_base = _base_hint.get("campaigns") or _choose_campaigns_base()
-    return _make_table(AIRTABLE_KEY, camp_base, PROSPECTS_TABLE)
+    def _build():
+        if _probe_table(LEADS_CONVOS_BASE, PROSPECTS_TABLE):
+            return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, PROSPECTS_TABLE)
+        camp_base = _base_hint.get("campaigns")
+        if not camp_base:
+            cand = _choose_campaigns_base()
+            if cand:
+                _base_hint["campaigns"] = cand
+                camp_base = cand
+        if camp_base:
+            return _make_table(AIRTABLE_KEY, camp_base, PROSPECTS_TABLE)
+        return None
 
-@lru_cache(maxsize=None)
+    return _cache_lookup("prospects", _build)
+
 def get_drip_table():
-    if _probe_table(LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE):
-        return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
-    camp_base = _base_hint.get("campaigns") or _choose_campaigns_base()
-    return _make_table(AIRTABLE_KEY, camp_base, DRIP_QUEUE_TABLE)
+    def _build():
+        if _probe_table(LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE):
+            return _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
+        camp_base = _base_hint.get("campaigns")
+        if not camp_base:
+            cand = _choose_campaigns_base()
+            if cand:
+                _base_hint["campaigns"] = cand
+                camp_base = cand
+        if camp_base:
+            return _make_table(AIRTABLE_KEY, camp_base, DRIP_QUEUE_TABLE)
+        return None
 
-@lru_cache(maxsize=None)
+    return _cache_lookup("drip", _build)
+
 def get_numbers_table():
-    camp_base = _base_hint.get("campaigns") or _choose_campaigns_base()
-    t = _make_table(AIRTABLE_KEY, camp_base, NUMBERS_TABLE)
-    if t and _probe_table(camp_base, NUMBERS_TABLE): return t
-    return _make_table(AIRTABLE_KEY, CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
+    def _build():
+        camp_base = _base_hint.get("campaigns")
+        if not camp_base:
+            cand = _choose_campaigns_base()
+            if cand:
+                _base_hint["campaigns"] = cand
+                camp_base = cand
+        if camp_base and _probe_table(camp_base, NUMBERS_TABLE):
+            t = _make_table(AIRTABLE_KEY, camp_base, NUMBERS_TABLE)
+            if t:
+                return t
+        return _make_table(AIRTABLE_KEY, CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
 
-@lru_cache(maxsize=None)
-def get_runs_table(): return _make_table(AIRTABLE_KEY, PERFORMANCE_BASE, "Runs/Logs")
-@lru_cache(maxsize=None)
-def get_kpis_table(): return _make_table(AIRTABLE_KEY, PERFORMANCE_BASE, "KPIs")
+    return _cache_lookup("numbers", _build)
+
+def get_runs_table():
+    return _cache_lookup("runs", lambda: _make_table(AIRTABLE_KEY, PERFORMANCE_BASE, "Runs/Logs"))
+
+def get_kpis_table():
+    return _cache_lookup("kpis", lambda: _make_table(AIRTABLE_KEY, PERFORMANCE_BASE, "KPIs"))
 
 # ─────────────────────────────────────────────────────────────
 # Safe create/update
