@@ -9,7 +9,7 @@ import uuid
 import signal
 import random
 import traceback
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 from datetime import datetime, timezone
 import argparse
 
@@ -26,23 +26,84 @@ except Exception as _imp_err:
     run_engine = None
     _IMP_ERR_TXT = f"Dispatcher import failed: {_imp_err}"
 
+_TRUE_VALUES = {"1", "true", "yes", "y", "on"}
+
+
+def _env_bool(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in _TRUE_VALUES
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _prospects_limit_type(value: str) -> str | int:
+    cleaned = value.strip()
+    if not cleaned:
+        raise argparse.ArgumentTypeError("Prospects limit cannot be empty.")
+    if cleaned.upper() == "ALL":
+        return "ALL"
+    try:
+        parsed = int(cleaned)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Prospects limit must be an integer or 'ALL'.") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("Prospects limit must be non-negative or 'ALL'.")
+    return parsed
+
+
+def _env_prospects_limit(default: int | str) -> int | str:
+    raw = os.getenv("PROSPECTS_LIMIT")
+    if raw is None:
+        return default
+    try:
+        return _prospects_limit_type(raw)
+    except argparse.ArgumentTypeError:
+        return default
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Value must be an integer.") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("Value must be greater than or equal to 0.")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = _non_negative_int(value)
+    if parsed == 0:
+        raise argparse.ArgumentTypeError("Value must be greater than 0.")
+    return parsed
+
+
 # =========================
 # Env / Defaults
 # =========================
+_DEFAULT_PROSPECTS_LIMIT: int | str = 50
+
 ENV = {
-    "ENABLE_PROSPECTS": os.getenv("ENABLE_PROSPECTS", "1").lower() in ("1", "true", "yes"),
-    "ENABLE_LEADS": os.getenv("ENABLE_LEADS", "1").lower() in ("1", "true", "yes"),
-    "ENABLE_INBOUNDS": os.getenv("ENABLE_INBOUNDS", "1").lower() in ("1", "true", "yes"),
-    "PROSPECTS_LIMIT": os.getenv("PROSPECTS_LIMIT", "50"),  # "ALL" or number
-    "LEADS_RETRY_LIMIT": int(os.getenv("LEADS_RETRY_LIMIT", "100")),
-    "INBOUNDS_LIMIT": int(os.getenv("INBOUNDS_LIMIT", "25")),
+    "ENABLE_PROSPECTS": _env_bool("ENABLE_PROSPECTS", "1"),
+    "ENABLE_LEADS": _env_bool("ENABLE_LEADS", "1"),
+    "ENABLE_INBOUNDS": _env_bool("ENABLE_INBOUNDS", "1"),
+    "PROSPECTS_LIMIT": _env_prospects_limit(_DEFAULT_PROSPECTS_LIMIT),
+    "LEADS_RETRY_LIMIT": max(0, _env_int("LEADS_RETRY_LIMIT", 100)),
+    "INBOUNDS_LIMIT": max(0, _env_int("INBOUNDS_LIMIT", 25)),
     # Retries/backoff for each step
-    "RETRIES": int(os.getenv("ENGINE_RETRIES", "2")),  # per step
-    "BASE_BACKOFF_SEC": int(os.getenv("ENGINE_BASE_BACKOFF", "2")),  # exponential: 2,4,8...
+    "RETRIES": max(0, _env_int("ENGINE_RETRIES", 2)),  # per step
+    "BASE_BACKOFF_SEC": max(1, _env_int("ENGINE_BASE_BACKOFF", 2)),  # exponential: 2,4,8...
     # Distributed lock (optional)
     "REDIS_URL": os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL"),
-    "REDIS_TLS": os.getenv("REDIS_TLS", "true").lower() in ("1", "true", "yes"),
-    "LOCK_TTL_SEC": int(os.getenv("ENGINE_LOCK_TTL_SEC", "300")),
+    "REDIS_TLS": _env_bool("REDIS_TLS", "true"),
+    "LOCK_TTL_SEC": max(1, _env_int("ENGINE_LOCK_TTL_SEC", 300)),
     "LOCK_KEY": os.getenv("ENGINE_LOCK_KEY", "sms:engine_runner:lock"),
     # Observability
     "HEALTHCHECK_URL": os.getenv("HEALTHCHECK_URL"),  # optional POST ping
@@ -67,11 +128,16 @@ def _now_iso() -> str:
 
 
 def jlog(event: str, **kw):
-    print(
-        json.dumps(
-            {"ts": _now_iso(), "event": event, "service": ENV["SERVICE_NAME"], "instance": ENV["INSTANCE_ID"], **kw}, ensure_ascii=False
-        )
-    )
+    """Emit a structured JSON log line."""
+
+    payload = {
+        "ts": _now_iso(),
+        "event": event,
+        "service": ENV["SERVICE_NAME"],
+        "instance": ENV["INSTANCE_ID"],
+        **kw,
+    }
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 def _health_ping(stage: str, ok: bool, extra: Optional[Dict[str, Any]] = None):
@@ -81,7 +147,13 @@ def _health_ping(stage: str, ok: bool, extra: Optional[Dict[str, Any]] = None):
     try:
         import requests
 
-        payload = {"ts": _now_iso(), "service": ENV["SERVICE_NAME"], "instance": ENV["INSTANCE_ID"], "stage": stage, "ok": bool(ok)}
+        payload = {
+            "ts": _now_iso(),
+            "service": ENV["SERVICE_NAME"],
+            "instance": ENV["INSTANCE_ID"],
+            "stage": stage,
+            "ok": bool(ok),
+        }
         if extra:
             payload.update(extra)
         requests.post(url, json=payload, timeout=3)
@@ -129,36 +201,69 @@ class DistLock:
 
 
 # ---------- Safe runner with retries ----------
-def _run_step(name: str, fn, *args, retries: int, base_backoff: int, **kwargs) -> Tuple[bool, Dict[str, Any]]:
-    attempts = 0
-    last_err = None
-    while attempts <= retries and not _SHUTDOWN:
+def _run_step(
+    name: str,
+    fn: Callable[..., Any],
+    *args,
+    retries: int,
+    base_backoff: int,
+    **kwargs,
+) -> Tuple[bool, Dict[str, Any]]:
+    last_err: Optional[str] = None
+    for attempt in range(retries + 1):
+        if _SHUTDOWN:
+            break
+        attempt_no = attempt + 1
         try:
-            jlog("step_start", step=name, attempt=attempts + 1)
-            rv = fn(*args, **kwargs)
-            jlog("step_ok", step=name, attempt=attempts + 1, result_summary=_compact_result(rv))
-            return True, rv if isinstance(rv, dict) else {"result": rv}
-        except Exception as e:
-            last_err = str(e)
+            jlog("step_start", step=name, attempt=attempt_no)
+            result = fn(*args, **kwargs)
+            normalized = _normalize_result(result)
+            jlog("step_ok", step=name, attempt=attempt_no, result_summary=_compact_result(normalized))
+            return True, normalized
+        except Exception as exc:  # noqa: BLE001 - we want to log every error
+            last_err = str(exc)
             traceback.print_exc()
-            if attempts == retries:
+            if attempt == retries:
                 break
-            delay = base_backoff * (2**attempts)
-            # add a little jitter
-            delay += random.randint(0, 2)
-            jlog("step_retry", step=name, attempt=attempts + 1, delay_sec=delay, error=last_err)
+            delay = base_backoff * (2**attempt)
+            delay += random.randint(0, 2)  # jitter to avoid thundering herd
+            jlog("step_retry", step=name, attempt=attempt_no, delay_sec=delay, error=last_err)
             time.sleep(delay)
-            attempts += 1
     jlog("step_fail", step=name, error=last_err or "unknown")
     return False, {"ok": False, "error": last_err or "unknown"}
+
+
+def _normalize_result(result: Any) -> Dict[str, Any]:
+    if isinstance(result, dict):
+        normalized = dict(result)
+        normalized["ok"] = bool(normalized.get("ok", True))
+        return normalized
+
+    return {"result": result, "ok": bool(result)}
 
 
 def _compact_result(result: Any) -> Dict[str, Any]:
     """Trim big dicts to the fields you care about in logs."""
     if not isinstance(result, dict):
         return {"ok": bool(result)}
-    keys = ("ok", "processed", "results", "total_sent", "retried", "processed", "errors", "quiet_hours")
+    keys = (
+        "ok",
+        "processed",
+        "results",
+        "total_sent",
+        "retried",
+        "errors",
+        "quiet_hours",
+        "result",
+        "error",
+    )
     return {k: result.get(k) for k in keys if k in result}
+
+
+def _normalize_prospects_limit(limit: int | str) -> int | str:
+    if isinstance(limit, str):
+        return "ALL"
+    return limit
 
 
 # ---------- CLI ----------
@@ -169,12 +274,12 @@ def _parse_args():
     p.add_argument("--inbounds", action="store_true", help="Run inbounds step (autoresponder).")
     p.add_argument("--all", action="store_true", help="Run all steps (default).")
 
-    p.add_argument("--prospects-limit", type=str, default=ENV["PROSPECTS_LIMIT"])
-    p.add_argument("--leads-retry-limit", type=int, default=ENV["LEADS_RETRY_LIMIT"])
-    p.add_argument("--inbounds-limit", type=int, default=ENV["INBOUNDS_LIMIT"])
+    p.add_argument("--prospects-limit", type=_prospects_limit_type, default=ENV["PROSPECTS_LIMIT"])
+    p.add_argument("--leads-retry-limit", type=_non_negative_int, default=ENV["LEADS_RETRY_LIMIT"])
+    p.add_argument("--inbounds-limit", type=_non_negative_int, default=ENV["INBOUNDS_LIMIT"])
 
-    p.add_argument("--retries", type=int, default=ENV["RETRIES"])
-    p.add_argument("--backoff", type=int, default=ENV["BASE_BACKOFF_SEC"])
+    p.add_argument("--retries", type=_non_negative_int, default=ENV["RETRIES"])
+    p.add_argument("--backoff", type=_positive_int, default=ENV["BASE_BACKOFF_SEC"])
     p.add_argument("--no-lock", action="store_true", help="Skip distributed lock.")
     return p.parse_args()
 
@@ -210,46 +315,25 @@ def main():
     jlog("runner_start", steps={"prospects": do_prospects, "leads": do_leads, "inbounds": do_inbounds})
 
     try:
-        # --- Prospects (outbound campaign queueing) ---
-        if do_prospects and not _SHUTDOWN:
-            limit = args.prospects_limit.strip() if isinstance(args.prospects_limit, str) else str(args.prospects_limit)
-            ok, res = _run_step(
-                "prospects",
-                run_engine,
-                "prospects",
-                limit=("ALL" if limit.upper() == "ALL" else int(limit)),
-                retries=args.retries,
-                base_backoff=args.backoff,
-            )
-            _health_ping("prospects", ok=ok, extra=_compact_result(res))
-            if not ok:
-                exit_code = 1
+        step_plan = [
+            ("prospects", do_prospects, {"limit": _normalize_prospects_limit(args.prospects_limit)}),
+            ("leads", do_leads, {"retry_limit": args.leads_retry_limit}),
+            ("inbounds", do_inbounds, {"limit": args.inbounds_limit}),
+        ]
 
-        # --- Leads (retry worker / followups) ---
-        if do_leads and not _SHUTDOWN:
-            ok, res = _run_step(
-                "leads",
-                run_engine,
-                "leads",
-                retry_limit=int(args.leads_retry_limit),
-                retries=args.retries,
-                base_backoff=args.backoff,
-            )
-            _health_ping("leads", ok=ok, extra=_compact_result(res))
-            if not ok:
-                exit_code = 1
+        for step_name, should_run, call_kwargs in step_plan:
+            if not should_run or _SHUTDOWN:
+                continue
 
-        # --- Inbounds (autoresponder) ---
-        if do_inbounds and not _SHUTDOWN:
             ok, res = _run_step(
-                "inbounds",
+                step_name,
                 run_engine,
-                "inbounds",
-                limit=int(args.inbounds_limit),
+                step_name,
                 retries=args.retries,
                 base_backoff=args.backoff,
+                **call_kwargs,
             )
-            _health_ping("inbounds", ok=ok, extra=_compact_result(res))
+            _health_ping(step_name, ok=ok, extra=_compact_result(res))
             if not ok:
                 exit_code = 1
 
