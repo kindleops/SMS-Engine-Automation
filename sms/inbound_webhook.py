@@ -25,6 +25,7 @@ TG_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
 RECEIVED_AT = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
 SENT_AT = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
+LEAD_LINK_FIELD = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")
 
 # === AIRTABLE CLIENTS ===
 convos = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
@@ -169,8 +170,8 @@ def handle_inbound(payload: dict):
         TG_ID_FIELD: msg_id,
         RECEIVED_AT: iso_timestamp(),
     }
-    if lead_id:
-        record["lead_id"] = [lead_id]
+    if lead_id and LEAD_LINK_FIELD:
+        record[LEAD_LINK_FIELD] = [lead_id]
     if property_id:
         record["Property ID"] = property_id
 
@@ -184,12 +185,17 @@ def handle_inbound(payload: dict):
 def process_optout(payload: dict):
     """Handles STOP/unsubscribe messages for tests + webhook."""
     from_number = payload.get("From")
-    body = (payload.get("Body") or "").lower()
+    raw_body = payload.get("Body")
+    if raw_body is None:
+        raw_body = ""
+    body = str(raw_body)
 
     if not from_number or not body:
         raise HTTPException(status_code=400, detail="Missing From or Body")
 
-    if "stop" in body or "unsubscribe" in body or "quit" in body:
+    body_lower = body.lower()
+
+    if "stop" in body_lower or "unsubscribe" in body_lower or "quit" in body_lower:
         print(f"🚫 [TEST] Opt-out from {from_number}")
         increment_opt_out(from_number)
         lead_id, property_id = promote_prospect_to_lead(from_number, source="Opt-Out")
@@ -204,8 +210,8 @@ def process_optout(payload: dict):
             RECEIVED_AT: iso_timestamp(),
             PROCESSED_BY: "OptOut Handler",
         }
-        if lead_id:
-            record["lead_id"] = [lead_id]
+        if lead_id and LEAD_LINK_FIELD:
+            record[LEAD_LINK_FIELD] = [lead_id]
         if property_id:
             record["Property ID"] = property_id
 
