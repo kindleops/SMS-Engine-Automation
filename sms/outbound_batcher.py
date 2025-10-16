@@ -7,6 +7,7 @@ import re
 import time
 import traceback
 from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 # -------------------------------
@@ -275,42 +276,121 @@ def _bump_number_counters(numbers_tbl: Any, rec_id: str, f: dict):
         traceback.print_exc()
 
 
+@dataclass
+class NumberCandidate:
+    record_id: str
+    did: str
+    fields: dict
+    remaining: int
+    last_used: datetime
+
+    def sort_key(self) -> Tuple[int, datetime, str]:
+        """Return a tuple matching the legacy prioritisation order."""
+        return (-self.remaining, self.last_used, self.record_id)
+
+
+class NumberPicker:
+    """Helper that fetches and reuses Numbers rows within a batch run."""
+
+    def __init__(self):
+        self.table = get_table(CONTROL_BASE_ENV, NUMBERS_TABLE_NAME)
+        self._loaded = False
+        self._candidates: List[NumberCandidate] = []
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        if not self.table:
+            return
+        try:
+            rows = self.table.all()
+        except Exception:
+            traceback.print_exc()
+            return
+
+        for r in rows:
+            f = r.get("fields", {})
+            if not f or not f.get("Active", True):
+                continue
+            if _number_is_paused(f):
+                continue
+            did = f.get("Number") or f.get("Friendly Name")
+            if not did:
+                continue
+            remaining = _remaining_calc(f)
+            if remaining <= 0:
+                continue
+            last_used = _parse_iso(f.get("Last Used")) or datetime(1970, 1, 1, tzinfo=timezone.utc)
+            self._candidates.append(NumberCandidate(r["id"], str(did), dict(f), remaining, last_used))
+        self._candidates.sort(key=lambda c: c.sort_key())
+
+    def _refresh_candidate(self, cand: NumberCandidate) -> None:
+        if not self.table:
+            return
+        try:
+            latest = self.table.get(cand.record_id)
+        except Exception:
+            traceback.print_exc()
+            return
+        if not isinstance(latest, dict):
+            return
+        fields = dict(latest.get("fields") or {})
+        if not fields:
+            cand.fields = {}
+            cand.remaining = 0
+            return
+        cand.fields = fields
+        cand.did = str(fields.get("Number") or fields.get("Friendly Name") or cand.did)
+        cand.remaining = _remaining_calc(fields)
+        cand.last_used = _parse_iso(fields.get("Last Used")) or cand.last_used
+
+    def pick(self, market: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        self._load()
+        if not self._candidates or not self.table:
+            return None, None
+
+        while True:
+            best_index: Optional[int] = None
+            best_key: Optional[Tuple[int, datetime, str]] = None
+            for idx, cand in enumerate(self._candidates):
+                if cand.remaining <= 0:
+                    continue
+                if not _market_match(cand.fields, market):
+                    continue
+                key = cand.sort_key()
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_index = idx
+
+            if best_index is None:
+                return None, None
+
+            cand = self._candidates[best_index]
+            self._refresh_candidate(cand)
+            if cand.remaining <= 0:
+                self._candidates.sort(key=lambda c: c.sort_key())
+                continue
+            break
+
+        _bump_number_counters(self.table, cand.record_id, cand.fields)
+
+        cand.last_used = utcnow()
+        cand.remaining = max(0, cand.remaining - 1)
+        cand.fields["Sent Today"] = int(cand.fields.get("Sent Today") or 0) + 1
+        if cand.fields.get("Remaining") is not None:
+            try:
+                cand.fields["Remaining"] = max(0, int(cand.fields.get("Remaining") or 0) - 1)
+            except Exception:
+                cand.fields["Remaining"] = cand.remaining
+
+        self._candidates.sort(key=lambda c: c.sort_key())
+        return cand.did, cand.record_id
+
+
 def pick_number_for_market(market: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    numbers_tbl = get_table(CONTROL_BASE_ENV, NUMBERS_TABLE_NAME)
-    if not numbers_tbl:
-        return None, None
-    try:
-        rows = numbers_tbl.all()
-    except Exception:
-        traceback.print_exc()
-        return None, None
-
-    elig: List[Tuple[int, datetime, dict, str]] = []
-    for r in rows:
-        f = r.get("fields", {})
-        if not f.get("Active", True):
-            continue
-        if _number_is_paused(f):
-            continue
-        if not _market_match(f, market):
-            continue
-        remaining = _remaining_calc(f)
-        if remaining <= 0:
-            continue
-        last_used = _parse_iso(f.get("Last Used")) or datetime(1970, 1, 1, tzinfo=timezone.utc)
-        elig.append((-remaining, last_used, f, r["id"]))
-
-    if not elig:
-        return None, None
-
-    elig.sort(key=lambda x: (x[0], x[1]))
-    _, _, f, rid = elig[0]
-    did = f.get("Number") or f.get("Friendly Name")
-    if not did:
-        return None, None
-
-    _bump_number_counters(numbers_tbl, rid, f)
-    return did, rid
+    picker = NumberPicker()
+    return picker.pick(market)
 
 
 # =========================
@@ -549,6 +629,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     due = due[:limit]
 
     limiter = build_limiter()
+    number_picker = NumberPicker()
     total_sent = 0
     total_failed = 0
     errors: List[str] = []
@@ -556,8 +637,26 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     for r in due:
         rid = r["id"]
         f = r.get("fields", {})
-        phone = f.get("phone") or f.get("Phone")
+        raw_phone = f.get("phone") or f.get("Phone")
+        phone = _digits_only(raw_phone) or raw_phone
         if not phone:
+            total_failed += 1
+            err_msg = "missing_phone"
+            errors.append(err_msg)
+            try:
+                drip.update(
+                    rid,
+                    _remap_existing_only(
+                        drip,
+                        {
+                            "status": "FAILED",
+                            "last_error": err_msg,
+                        },
+                    ),
+                )
+                _set_ui(drip, rid, "FAILED")
+            except Exception:
+                traceback.print_exc()
             continue
 
         did = f.get("from_number") or f.get("From Number")
@@ -565,7 +664,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
 
         # Backfill DID
         if not did and AUTO_BACKFILL_FROM_NUMBER:
-            did, _num_id = pick_number_for_market(market)
+            did, _num_id = number_picker.pick(market)
             if did:
                 try:
                     drip.update(rid, _remap_existing_only(drip, {"from_number": did, "From Number": did}))
