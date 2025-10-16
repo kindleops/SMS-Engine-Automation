@@ -1,9 +1,34 @@
 # sms/routes/jobs.py
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 import os, subprocess, sys
-from sms.auth import require_cron  # your existing bearer/x-cron-token guard
+
+CRON_TOKEN = os.getenv("CRON_TOKEN")
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+def _extract_token(request: Request, qp_token: str | None, h_cron: str | None) -> str:
+    if qp_token:
+        return qp_token
+    if h_cron:
+        return h_cron
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1]
+    return ""
+
+def require_cron(
+    request: Request,
+    token: str | None = Query(default=None),
+    x_cron_token: str | None = Header(default=None),
+) -> None:
+    """
+    Guard that enforces CRON_TOKEN when it is configured. Matches main app behaviour.
+    """
+    if not CRON_TOKEN:
+        return
+    provided = _extract_token(request, token, x_cron_token)
+    if provided != CRON_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 def _py(cmd: list[str]) -> dict:
     try:
