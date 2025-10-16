@@ -42,13 +42,31 @@ def _norm(s: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else str(s)
 
 
+_FIELD_MAP_CACHE: Dict[Any, Dict[str, str]] = {}
+
+
 def _auto_field_map(tbl: Any) -> Dict[str, str]:
+    """Best effort discovery of remote table fields.
+
+    The Airtable client does not expose field metadata, so we grab the first
+    record to infer the canonical casing.  This is an expensive API call, so we
+    cache the result per-table to avoid hammering Airtable when processing a
+    large batch of messages.
+    """
+
+    cache_key = getattr(tbl, "table_name", None) or id(tbl)
+    if cache_key in _FIELD_MAP_CACHE:
+        return _FIELD_MAP_CACHE[cache_key]
+
     try:
         probe = tbl.all(max_records=1)
         keys = list(probe[0].get("fields", {}).keys()) if probe else []
     except Exception:
         keys = []
-    return {_norm(k): k for k in keys}
+
+    amap = {_norm(k): k for k in keys}
+    _FIELD_MAP_CACHE[cache_key] = amap
+    return amap
 
 
 def _remap_existing_only(tbl: Any, payload: Dict) -> Dict:
@@ -128,7 +146,9 @@ class MessageProcessor:
 
         # ---- 1) Send via provider
         try:
-            send_result = send_message(phone, body, from_number=from_number)
+            send_result = send_message(phone, body, from_number=from_number) or {}
+            if not isinstance(send_result, dict):
+                send_result = {"raw": send_result}
         except Exception as e:
             print(f"❌ Transport error sending to {phone}: {e}")
             # We may still attempt to log a failed Conversations row for traceability
@@ -152,8 +172,13 @@ class MessageProcessor:
             return {"status": "failed", "phone": phone, "error": str(e), "convo_id": convo_id}
 
         # Normalize provider response
-        sid = send_result.get("sid") or send_result.get("message_sid") or send_result.get("MessageSid") or send_result.get("id")
-        provider_status = (send_result.get("status") or "sent").lower()
+        sid = (
+            send_result.get("sid")
+            or send_result.get("message_sid")
+            or send_result.get("MessageSid")
+            or send_result.get("id")
+        )
+        provider_status = str(send_result.get("status") or "sent").lower()
         ok = provider_status in {"sent", "queued", "accepted", "submitted", "enroute", "delivered"}
 
         # ---- 2) Log Conversations (safe field filter)
@@ -220,7 +245,7 @@ class MessageProcessor:
         metadata: Dict[str, Any] | None,
     ) -> Optional[str]:
         convos = get_convos()
-        payload = {
+        payload: Dict[str, Any] = {
             # core mapped fields
             FROM_FIELD: phone,
             TO_FIELD: from_number,
@@ -235,7 +260,10 @@ class MessageProcessor:
             "Drip Queue": [drip_queue_id] if drip_queue_id else None,  # will be ignored if field not present
         }
         if metadata:
-            payload.update(metadata)
+            if not isinstance(metadata, dict):
+                print("⚠️ metadata for conversation log is not a dict; ignoring")
+            else:
+                payload.update(metadata)
 
         if not convos:
             # mock (no Airtable)
