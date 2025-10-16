@@ -1,7 +1,7 @@
 # sms/followup_flow.py
 from __future__ import annotations
 
-import os, re, random, traceback
+import os, re, random, time, traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple, List
 
@@ -80,6 +80,10 @@ PHONE_FIELDS = [
     "Phone 2 (from Linked Owner)",
     "Phone 3 (from Linked Owner)",
 ]
+
+# Lightweight cache for template lookups
+_TEMPLATE_CACHE: Dict[str, Tuple[str, Optional[str], float]] = {}
+_TEMPLATE_CACHE_TTL = 5 * 60  # seconds
 
 
 # =========================
@@ -175,6 +179,37 @@ def _safe_update(tbl: Any, rec_id: str, patch: Dict) -> Optional[Dict]:
         return None
 
 
+def _fetch_lead_fields(leads: Any, lead_id: Optional[str]) -> Dict[str, Any]:
+    if not (leads and lead_id):
+        return {}
+    try:
+        row = leads.get(lead_id)
+        if isinstance(row, dict):
+            return row.get("fields", {}) or {}
+    except Exception:
+        traceback.print_exc()
+    return {}
+
+
+def _fetch_drip_snapshot(drip: Any) -> List[Dict[str, Any]]:
+    if not drip:
+        return []
+    try:
+        return drip.all(
+            fields=[
+                "phone",
+                "Phone",
+                "status",
+                "Status",
+                "next_send_date",
+                "Next Send Date",
+            ]
+        )
+    except Exception:
+        traceback.print_exc()
+        return []
+
+
 def _safe_create(tbl: Any, payload: Dict) -> Optional[Dict]:
     try:
         data = _remap_existing_only(tbl, payload)
@@ -200,6 +235,14 @@ def _personalize(msg: str, row_fields: Dict[str, Any]) -> str:
 def _template_by_key(key: Optional[str], row_fields: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     if not key:
         return "", None
+
+    cache_key = key.strip().lower()
+    now = time.monotonic()
+    cached = _TEMPLATE_CACHE.get(cache_key)
+    if cached and now - cached[2] < _TEMPLATE_CACHE_TTL:
+        msg, template_id, _ = cached
+        return _personalize(msg, row_fields), template_id
+
     templates = _table(TEMPLATES_TABLE_NAME)
     if templates:
         try:
@@ -208,23 +251,27 @@ def _template_by_key(key: Optional[str], row_fields: Dict[str, Any]) -> Tuple[st
             for r in rows:
                 f = r.get("fields", {})
                 internal = (f.get("Internal ID") or f.get("intent") or "").strip().lower()
-                if internal == key.strip().lower():
+                if internal == cache_key:
                     cands.append(r)
             if cands:
                 chosen = random.choice(cands)
                 msg = (chosen.get("fields", {}) or {}).get("Message") or ""
-                return _personalize(msg, row_fields), chosen["id"]
+                result = _personalize(msg, row_fields), chosen["id"]
+                _TEMPLATE_CACHE[cache_key] = (msg, chosen["id"], now)
+                return result
         except Exception:
             traceback.print_exc()
+
     # fallback
     raw = FALLBACK_TEMPLATES.get(key, "Just checking back on {Address}, {First}.")
+    _TEMPLATE_CACHE[cache_key] = (raw, None, now)
     return _personalize(raw, row_fields), None
 
 
 # =========================
 # Dup guards
 # =========================
-def _already_queued_today(drip: Any, phone: str) -> bool:
+def _already_queued_today(drip: Any, phone: str, rows: Optional[List[Dict[str, Any]]] = None) -> bool:
     """Prevent multiple follow-ups same day for a phone."""
     try:
         today = datetime.now(timezone.utc)
@@ -232,7 +279,8 @@ def _already_queued_today(drip: Any, phone: str) -> bool:
             today = today.astimezone(QUIET_TZ)
         prefix = today.strftime("%Y-%m-%d")
         p10 = last10(phone)
-        for r in drip.all():
+        dataset = rows if rows is not None else drip.all()
+        for r in dataset:
             f = r.get("fields", {})
             ph = f.get("phone") or f.get("Phone")
             if last10(ph) != p10:
@@ -302,6 +350,10 @@ def schedule_from_response(
     if not drip:
         return {"ok": False, "error": "Drip Queue table not configured"}
 
+    phone_clean = _digits_only(phone) or (phone.strip() if isinstance(phone, str) else None)
+    if not phone_clean:
+        return {"ok": False, "error": "Phone number required"}
+
     plan = INTENT_PLAN.get((intent or "").strip().lower(), INTENT_PLAN["neutral"])
     next_stage = plan["stage"]
     delay_min = plan.get("delay_min")
@@ -328,15 +380,19 @@ def schedule_from_response(
 
     # Compose message text
     fields_for_pers = {"Owner Name": "there", "Property Address": "your property"}
+    lead_fields = _fetch_lead_fields(leads, lead_id)
+    if lead_fields:
+        fields_for_pers.update(lead_fields)
     msg, template_id = _template_by_key(template_key, fields_for_pers)
 
     # De-dupe same-day
-    if _already_queued_today(drip, phone):
+    drip_snapshot = _fetch_drip_snapshot(drip)
+    if _already_queued_today(drip, phone_clean, drip_snapshot):
         queued = 0
     else:
         payload = {
             "Leads": [lead_id] if lead_id else None,
-            "phone": phone,
+            "phone": phone_clean,
             "Market": market,
             "Property ID": property_id,
             "message_preview": msg,
@@ -348,6 +404,7 @@ def schedule_from_response(
         }
         payload = {k: v for k, v in payload.items() if v is not None}
         _safe_create(drip, payload)
+        drip_snapshot.append({"fields": {"phone": phone_clean, "status": "QUEUED", "next_send_date": send_at_local_str}})
         queued = 1
 
     # Update Lead planning fields
@@ -389,6 +446,8 @@ def run_followups(limit: int = 1000) -> Dict[str, Any]:
     queued = 0
     errs: List[str] = []
 
+    drip_snapshot = _fetch_drip_snapshot(drip)
+
     for lr in rows:
         lf = lr.get("fields", {})
         nfd = lf.get("Next Followup Date") or lf.get("next_followup_date") or lf.get("Followup Date")
@@ -408,7 +467,7 @@ def run_followups(limit: int = 1000) -> Dict[str, Any]:
         phone = _get_phone(lf)
         if not phone:
             continue
-        if _already_queued_today(drip, phone):
+        if _already_queued_today(drip, phone, drip_snapshot):
             continue
 
         stage = str(lf.get("drip_stage") or "").strip().upper() or STAGE_NURTURE_30
@@ -437,6 +496,7 @@ def run_followups(limit: int = 1000) -> Dict[str, Any]:
             "UI": STATUS_ICON["QUEUED"],
         }
         _safe_create(drip, dq_payload)
+        drip_snapshot.append({"fields": {"phone": phone, "status": "QUEUED", "next_send_date": now_ct}})
         queued += 1
 
         # Plan the next nurture step if in nurture chain
