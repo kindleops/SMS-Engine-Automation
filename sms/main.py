@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone, date
+import logging
+from datetime import datetime, timezone, date, timedelta
 from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -52,7 +53,9 @@ try:
     from sms.metrics_tracker import update_metrics, _notify  # type: ignore
 except Exception:
     def update_metrics(*_a, **_k): return {"ok": False, "error": "metrics tracker unavailable"}
-    def _notify(msg: str): print(f"[notify] {msg}")
+
+    def _notify(msg: str):
+        logger.debug("Notification shim: %s", msg)
 
 try:
     from sms.inbound_webhook import router as inbound_router
@@ -112,6 +115,20 @@ except Exception:
     def recalc_numbers_sent_today(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
     def reset_numbers_daily_counters(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
 
+logger = logging.getLogger("sms.main")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Return a boolean flag from environment variables."""
+
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ─────────────────────────── FastAPI app ────────────────────────────
 app = FastAPI(title="REI SMS Engine", version="1.4.0")
 if inbound_router:
@@ -119,15 +136,15 @@ if inbound_router:
 
 # ─────────────────────── ENV / runtime toggles ──────────────────────
 CRON_TOKEN = os.getenv("CRON_TOKEN")
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
-STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
+TEST_MODE = _env_flag("TEST_MODE")
+STRICT_MODE = _env_flag("STRICT_MODE")
 
 # Quiet hours (Central Time)
-QUIET_HOURS_ENFORCED = os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in ("1", "true", "yes")
+QUIET_HOURS_ENFORCED = _env_flag("QUIET_HOURS_ENFORCED", default=True)
 QUIET_START = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))   # 9p
 QUIET_END   = int(os.getenv("QUIET_END_HOUR_LOCAL",   "9"))    # 9a
-ALLOW_QUEUE_OUTSIDE_HOURS = os.getenv("ALLOW_QUEUE_OUTSIDE_HOURS", "true").lower() in ("1", "true", "yes")
-AUTORESPONDER_ALWAYS_ON   = os.getenv("AUTORESPONDER_ALWAYS_ON",   "true").lower() in ("1", "true", "yes")
+ALLOW_QUEUE_OUTSIDE_HOURS = _env_flag("ALLOW_QUEUE_OUTSIDE_HOURS", default=True)
+AUTORESPONDER_ALWAYS_ON   = _env_flag("AUTORESPONDER_ALWAYS_ON", default=True)
 
 # Base hints (for logs only)
 PERF_BASE = os.getenv("PERFORMANCE_BASE") or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
@@ -135,10 +152,14 @@ LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_
 
 # ─────────────────────────── Helpers ────────────────────────────────
 def log_error(context: str, err: Exception | str):
+    """Log an error and attempt to notify downstream subscribers."""
+
     msg = f"❌ {context}: {err}"
-    print(msg)
-    try: _notify(msg)
-    except Exception: pass
+    logger.error(msg)
+    try:
+        _notify(msg)
+    except Exception:
+        logger.debug("Notify handler unavailable", exc_info=True)
 
 def iso_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -146,13 +167,24 @@ def iso_timestamp() -> str:
 def get_perf_tables():
     return get_runs(), get_kpis()
 
-def log_run(runs_tbl, step: str, result: Dict[str, Any]):
-    if not runs_tbl: return None
+def log_run(runs_tbl, step: str, result: Dict[str, Any] | None):
+    if not runs_tbl:
+        return None
     try:
+        payload_data: Dict[str, Any]
+        if isinstance(result, dict):
+            payload_data = result
+        else:
+            payload_data = {"result": result}
         payload = {
             "Type": step,
-            "Processed": float(result.get("processed") or result.get("total_sent") or result.get("sent") or 0),
-            "Breakdown": str(result),
+            "Processed": float(
+                payload_data.get("processed")
+                or payload_data.get("total_sent")
+                or payload_data.get("sent")
+                or 0
+            ),
+            "Breakdown": str(payload_data),
             "Timestamp": iso_timestamp(),
         }
         return safe_create(runs_tbl, payload)
@@ -194,10 +226,27 @@ try:
 except Exception:
     ZoneInfo = None  # py>=3.9 should have this
 
-def central_now():
-    if ZoneInfo:
-        return datetime.now(ZoneInfo("America/Chicago"))
-    return datetime.now(timezone.utc)
+CENTRAL_TZ_NAME = "America/Chicago"
+if ZoneInfo:
+    CENTRAL_TZ = ZoneInfo(CENTRAL_TZ_NAME)
+else:
+    try:  # pragma: no cover - optional dependency
+        import pytz  # type: ignore
+
+        CENTRAL_TZ = pytz.timezone(CENTRAL_TZ_NAME)
+    except Exception:
+        CENTRAL_TZ = timezone(timedelta(hours=-6))
+
+
+def central_now() -> datetime:
+    """Return the current time in Central Time."""
+
+    now_utc = datetime.now(timezone.utc)
+    try:
+        return now_utc.astimezone(CENTRAL_TZ)  # type: ignore[arg-type]
+    except Exception:
+        logger.debug("Failed to convert time to Central timezone", exc_info=True)
+        return now_utc
 
 def is_quiet_hours_local() -> bool:
     if not QUIET_HOURS_ENFORCED: return False
@@ -212,7 +261,7 @@ def _parse_limit_param(raw: Optional[str]) -> Optional[int]:
         if s in ("", "ALL", "NONE", "UNLIMITED"): return None
         v = int(s); return max(v, 1)
     except Exception:
-        print(f"[warn] Invalid limit param: {raw!r} → treating as None")
+        logger.warning("Invalid limit param %r – treating as None", raw)
         return None
 
 def _runner_limit_arg(safe_limit: Optional[int]) -> int | str:
@@ -222,11 +271,16 @@ def _runner_limit_arg(safe_limit: Optional[int]) -> int | str:
 @app.on_event("startup")
 def startup_checks():
     try:
-        print("✅ Environment loaded:")
-        print(f"   LEADS_CONVOS_BASE: {LEADS_CONVOS_BASE}")
-        print(f"   PERFORMANCE_BASE:  {PERF_BASE}")
-        print(f"   STRICT_MODE={STRICT_MODE} TEST_MODE={TEST_MODE}")
-        print(f"   QUIET_HOURS_ENFORCED={QUIET_HOURS_ENFORCED} ({QUIET_START:02d}:00–{QUIET_END:02d}:00 CT)")
+        logger.info("✅ Environment loaded:")
+        logger.info("   LEADS_CONVOS_BASE: %s", LEADS_CONVOS_BASE)
+        logger.info("   PERFORMANCE_BASE:  %s", PERF_BASE)
+        logger.info("   STRICT_MODE=%s TEST_MODE=%s", STRICT_MODE, TEST_MODE)
+        logger.info(
+            "   QUIET_HOURS_ENFORCED=%s (%02d:00–%02d:00 CT)",
+            QUIET_HOURS_ENFORCED,
+            QUIET_START,
+            QUIET_END,
+        )
         missing = [
             k for k in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"]
             if not os.getenv(k) and not os.getenv(k.replace("BASE", "_BASE_ID"))
@@ -236,7 +290,7 @@ def startup_checks():
             log_error("Startup checks", msg)
             if STRICT_MODE: raise RuntimeError(msg)
         _ = get_templates(); _ = get_leads()  # smoke
-        print("✅ Startup checks passed")
+        logger.info("✅ Startup checks passed")
     except Exception as e:
         log_error("Startup exception", e)
         if STRICT_MODE: raise
@@ -265,7 +319,7 @@ def echo_token(
 def health():
     return {
         "ok": True,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": iso_timestamp(),
         "quiet_hours": is_quiet_hours_local(),
         "local_time_central": central_now().isoformat(),
         "version": "1.4.0",
@@ -605,7 +659,7 @@ def numbers_recalc_endpoint(
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
     try:
-        target = for_date or date.fromisoformat(central_now().date().isoformat()).isoformat()
+        target = for_date or central_now().date().isoformat()
         return recalc_numbers_sent_today(target)
     except Exception as e:
         log_error("numbers_recalc", e)
@@ -643,4 +697,8 @@ def trigger_engine(
     health = strict_health(mode)
     if not health.get("ok"):
         raise HTTPException(status_code=500, detail=f"Health check failed for {mode}")
-    return {"ok": True, "mode": mode, "result": run_engine(mode, limit=limit, retry_limit=retry_limit)}
+    return {
+        "ok": True,
+        "mode": mode,
+        "result": run_engine(mode, limit=limit, retry_limit=retry_limit),
+    }
