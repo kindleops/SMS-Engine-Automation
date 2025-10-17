@@ -3,37 +3,44 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Request, HTTPException
 from pyairtable import Table
 
+from sms.config import (
+    settings,
+    CONVERSATION_FIELDS as CF,
+    LEAD_FIELDS as LF,
+    PHONE_FIELDS,
+)
+
 router = APIRouter()
 
-# === ENV CONFIG ===
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-BASE_ID = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
-
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE         = os.getenv("LEADS_TABLE", "Leads")
-PROSPECTS_TABLE     = os.getenv("PROSPECTS_TABLE", "Prospects")
-CAMPAIGNS_TABLE     = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
-TEMPLATES_TABLE     = os.getenv("TEMPLATES_TABLE", "Templates")
+CFG = settings()
+AIRTABLE_API_KEY = CFG.AIRTABLE_API_KEY
+BASE_ID = CFG.LEADS_CONVOS_BASE
 
 if not AIRTABLE_API_KEY or not BASE_ID:
-    raise RuntimeError("Missing AIRTABLE_API_KEY or Base ID envs")
+    raise RuntimeError("Missing Airtable API key or base configuration")
+
+CONVERSATIONS_TABLE = CFG.CONVERSATIONS_TABLE
+LEADS_TABLE = CFG.LEADS_TABLE
+PROSPECTS_TABLE = CFG.PROSPECTS_TABLE
+CAMPAIGNS_TABLE = CFG.CAMPAIGNS_TABLE
+TEMPLATES_TABLE = CFG.TEMPLATES_TABLE
 
 # === Airtable Clients ===
-convos     = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE)
-leads      = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE)
-prospects  = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE)
-campaigns  = Table(AIRTABLE_API_KEY, BASE_ID, CAMPAIGNS_TABLE)
-templates  = Table(AIRTABLE_API_KEY, BASE_ID, TEMPLATES_TABLE)
+convos = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE)
+leads = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE)
+prospects = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE)
+campaigns = Table(AIRTABLE_API_KEY, BASE_ID, CAMPAIGNS_TABLE)
+templates = Table(AIRTABLE_API_KEY, BASE_ID, TEMPLATES_TABLE)
 
 # === FIELD MAPPINGS ===
-FROM_FIELD   = os.getenv("CONV_FROM_FIELD", "phone")
-TO_FIELD     = os.getenv("CONV_TO_FIELD", "to_number")
-MSG_FIELD    = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
-TG_ID_FIELD  = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-SENT_AT      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
+FROM_FIELD = CF.TEXTGRID_PHONE_NUMBER
+TO_FIELD = CF.SELLER_PHONE_NUMBER
+MSG_FIELD = CF.MESSAGE_LONG_TEXT
+STATUS_FIELD = CF.DELIVERY_STATUS
+DIR_FIELD = CF.DIRECTION
+TG_ID_FIELD = CF.TEXTGRID_ID
+SENT_AT_FIELD = CF.LAST_SENT_TIME
+PROCESSED_BY_FIELD = CF.PROCESSED_BY
 
 # === HELPERS ===
 def iso_timestamp():
@@ -74,7 +81,7 @@ def _find_by_phone_last10(tbl, phone):
     try:
         for r in tbl.all():
             f = r.get("fields", {})
-            for key in ("phone","Phone","Mobile","Cell","Primary Phone","Owner Phone"):
+            for key in PHONE_FIELDS:
                 if _last10(f.get(key)) == want:
                     return r
     except Exception:
@@ -144,24 +151,24 @@ async def outbound_handler(request: Request):
             TO_FIELD: to_number,
             MSG_FIELD: body[:10000],
             STATUS_FIELD: "SENT",
-            DIR_FIELD: "OUT",
+            DIR_FIELD: "OUTBOUND",
             TG_ID_FIELD: msg_id,
-            SENT_AT: iso_timestamp(),
-            PROCESSED_BY: "Outbound Webhook",
+            SENT_AT_FIELD: iso_timestamp(),
+            PROCESSED_BY_FIELD: "Outbound Webhook",
         }
 
         if lead_id:
-            payload["Lead"] = [lead_id]
-            payload["Lead Record ID"] = lead_id
+            payload[CF.LEAD_RECORD_ID] = lead_id
+            payload.setdefault(CF.LEAD_LINK, [lead_id])
         if prospect_id:
-            payload["Prospect"] = [prospect_id]
-            payload["Prospect Record ID"] = prospect_id
+            payload[CF.PROSPECT_RECORD_ID] = prospect_id
+            payload.setdefault(CF.PROSPECT_LINK, [prospect_id])
         if camp_rec:
-            payload["Campaign"] = [camp_rec["id"]]
-            payload["Campaign Record ID"] = camp_rec["id"]
+            payload[CF.CAMPAIGN_RECORD_ID] = camp_rec["id"]
+            payload.setdefault(CF.CAMPAIGN_LINK, [camp_rec["id"]])
         if tmpl_rec:
-            payload["Template"] = [tmpl_rec["id"]]
-            payload["Template Record ID"] = tmpl_rec["id"]
+            payload[CF.TEMPLATE_RECORD_ID] = tmpl_rec["id"]
+            payload.setdefault(CF.TEMPLATE_LINK, [tmpl_rec["id"]])
 
         # === UPSERT ===
         record = _upsert_conversation_by_msgid(msg_id, payload)
@@ -170,13 +177,13 @@ async def outbound_handler(request: Request):
         if lead_id:
             try:
                 lf = lead["fields"]
-                reply_count = lf.get("Reply Count", 0)
+                reply_count = lf.get(LF.REPLY_COUNT, 0)
                 updates = {
-                    "Last Activity": iso_timestamp(),
-                    "Last Outbound": iso_timestamp(),
-                    "Last Direction": "OUT",
-                    "Last Message": (body or "")[:500],
-                    "Reply Count": reply_count,  # no increment
+                    LF.LAST_ACTIVITY: iso_timestamp(),
+                    LF.LAST_OUTBOUND: iso_timestamp(),
+                    LF.LAST_DIRECTION: "OUTBOUND",
+                    LF.LAST_MESSAGE: (body or "")[:500],
+                    LF.REPLY_COUNT: reply_count,  # no increment
                 }
                 _safe_update(leads, lead_id, updates)
             except Exception as e:
