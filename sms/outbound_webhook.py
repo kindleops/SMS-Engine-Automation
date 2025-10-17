@@ -15,15 +15,12 @@ PROSPECTS_TABLE     = os.getenv("PROSPECTS_TABLE", "Prospects")
 CAMPAIGNS_TABLE     = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
 TEMPLATES_TABLE     = os.getenv("TEMPLATES_TABLE", "Templates")
 
-if not AIRTABLE_API_KEY or not BASE_ID:
-    raise RuntimeError("Missing AIRTABLE_API_KEY or Base ID envs")
-
 # === Airtable Clients ===
-convos     = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE)
-leads      = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE)
-prospects  = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE)
-campaigns  = Table(AIRTABLE_API_KEY, BASE_ID, CAMPAIGNS_TABLE)
-templates  = Table(AIRTABLE_API_KEY, BASE_ID, TEMPLATES_TABLE)
+convos     = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY and BASE_ID else None
+leads      = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE) if AIRTABLE_API_KEY and BASE_ID else None
+prospects  = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KEY and BASE_ID else None
+campaigns  = Table(AIRTABLE_API_KEY, BASE_ID, CAMPAIGNS_TABLE) if AIRTABLE_API_KEY and BASE_ID else None
+templates  = Table(AIRTABLE_API_KEY, BASE_ID, TEMPLATES_TABLE) if AIRTABLE_API_KEY and BASE_ID else None
 
 # === FIELD MAPPINGS ===
 FROM_FIELD   = os.getenv("CONV_FROM_FIELD", "phone")
@@ -47,6 +44,8 @@ def _last10(s):
     return d[-10:] if len(d) >= 10 else None
 
 def _safe_update(tbl, rec_id: str, payload: dict):
+    if not tbl or not rec_id:
+        return
     body = {k: v for k, v in (payload or {}).items() if v not in (None, "", [], {})}
     if not body:
         return
@@ -55,11 +54,15 @@ def _safe_update(tbl, rec_id: str, payload: dict):
     except Exception as e:
         print(f"⚠️ Update failed for {rec_id}: {e}")
 
+def _escape_formula_value(value: str) -> str:
+    return (value or "").replace("'", "\\'")
+
 def _find_one_by_field(tbl: Table, field: str, value: str):
     try:
-        if not value:
+        if not tbl or not value:
             return None
-        rows = tbl.all(formula=f"{{{field}}}='{value}'", max_records=1) or []
+        escaped = _escape_formula_value(str(value))
+        rows = tbl.all(formula=f"{{{field}}}='{escaped}'", max_records=1) or []
         return rows[0] if rows else None
     except Exception:
         return None
@@ -83,6 +86,8 @@ def _find_by_phone_last10(tbl, phone):
 
 def _upsert_conversation_by_msgid(msg_id: str, payload: dict):
     """Create/update Conversation idempotently using MessageSid or unique TextGrid ID."""
+    if not convos:
+        raise RuntimeError("Airtable Conversations table is not configured")
     if not msg_id:
         return convos.create(payload)
     existing = _find_one_by_field(convos, TG_ID_FIELD, msg_id)
@@ -108,7 +113,26 @@ async def outbound_handler(request: Request):
       }
     """
     try:
-        data = await request.form()
+        if not convos:
+            raise HTTPException(status_code=503, detail="Airtable credentials are not configured")
+
+        content_type = (request.headers.get("content-type", "") or "").lower()
+        data = {}
+        if "application/json" in content_type:
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+        else:
+            try:
+                form = await request.form()
+                data = {k: v for k, v in form.multi_items()} if hasattr(form, "multi_items") else dict(form)
+            except Exception:
+                try:
+                    data = await request.json()
+                except Exception:
+                    data = {}
+
         to_number   = data.get("To")
         from_number = data.get("From")
         body        = (data.get("Body") or "").strip()
