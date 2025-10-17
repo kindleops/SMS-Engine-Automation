@@ -9,6 +9,7 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     env:
+      PYTHONPATH: "${{ github.workspace }}"
       AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
       DEVOPS_BASE: ${{ secrets.DEVOPS_BASE }}
       HEALTHTARGETS_JSON: >
@@ -17,9 +18,27 @@ jobs:
           {"name": "webhooks", "url": "https://your-render-service.onrender.com/webhooks/health"}
         ]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
-      - run: pip install pyairtable httpx
-      - run: python ops/health_cron.py
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: "Sanity: show current working dir and files"
+        run: |
+          pwd
+          ls -la
+          ls -la ops || true
+
+      - name: Verify ops import
+        run: python -c "import sys; print(sys.path); import ops; print(getattr(ops,'__file__','no __file__'))"
+
+      - name: Run health cron (as module)
+        run: python -m ops.health_cron
