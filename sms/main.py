@@ -271,6 +271,17 @@ def health():
         "version": "1.4.0",
     }
 
+@app.get("/healthz")
+def healthz():
+    """Health check endpoint for Render.com and monitoring systems."""
+    return {
+        "ok": True,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "quiet_hours": is_quiet_hours_local(),
+        "local_time_central": central_now().isoformat(),
+        "version": "1.4.0",
+    }
+
 @app.get("/health/strict")
 def health_strict_endpoint(mode: str = Query("prospects", description="prospects | leads | inbounds")):
     return strict_health(mode=mode)
