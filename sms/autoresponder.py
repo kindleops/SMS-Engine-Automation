@@ -68,20 +68,20 @@ FIELD_MAP = {
 }
 
 STAGE_MAP = {
-    "intro": "Stage 1 - Owner Check",
-    "who_is_this": "Stage 1 - Identity",
-    "how_get_number": "Stage 1 - Compliance",
-    "neutral": "Stage 1 - Owner Check",
-    "followup_yes": "Stage 2 - Offer Interest",
-    "followup_no": "Stage 2 - Offer Declined",
-    "followup_wrong": "Stage 2 - Wrong Number",
-    "not_owner": "Stage 2 - Not Owner",
-    "interest": "Stage 2 - Offer Interest",
-    "price_response": "Stage 3 - Price Discussion",
-    "condition_response": "Stage 3 - Condition Discussion",
-    "optout": "Opt-Out",
-    "negative": "Stage 2 - Negative",
-    "delay": "Stage 2 - Follow Up Later",
+    "intro": "STAGE 1 - OWNERSHIP CONFIRMATION",
+    "who_is_this": "STAGE 1 - OWNERSHIP CONFIRMATION",
+    "how_get_number": "STAGE 1 - OWNERSHIP CONFIRMATION",
+    "neutral": "STAGE 1 - OWNERSHIP CONFIRMATION",
+    "followup_yes": "STAGE 2 - INTEREST FEELER",
+    "followup_no": "STAGE 2 - INTEREST FEELER",
+    "followup_wrong": "STAGE 2 - INTEREST FEELER",
+    "not_owner": "STAGE 2 - INTEREST FEELER",
+    "interest": "STAGE 2 - INTEREST FEELER",
+    "price_response": "STAGE 3 - PRICE QUALIFICATION",
+    "condition_response": "STAGE 4 - PROPERTY CONDITION",
+    "optout": "OPT OUT",
+    "negative": "STAGE 2 - INTEREST FEELER",
+    "delay": "STAGE 5 - MOTIVATION / TIMELINE",
 }
 
 # Words/phrases we’ll look for (all lowercased)
@@ -490,7 +490,7 @@ def run_autoresponder(limit: int = 50):
                 campaign_id = camp_link
 
             intent = classify_intent(body)
-            stage = STAGE_MAP.get(intent, "Stage 1 - Owner Check")
+            stage = STAGE_MAP.get(intent, "STAGE 1 - OWNERSHIP CONFIRMATION")
 
             print(f"[{iso_timestamp()}] IN {from_num} | intent={intent} | body='{(body or '')[:160]}'")
 

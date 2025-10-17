@@ -3,8 +3,16 @@ import os, time, re
 from datetime import datetime, timezone
 from sms.tables import get_table
 
-STAGE_OK = {"Stage 2 - Offer Interest","Stage 3 - Price/Condition","Stage 4 - Run Comps/Numbers","Stage 5 - Make Offer",
-            "Stage 6 - Send Contract","Stage 7 - Dispositions","Stage 8 - Close Escrow"}
+STAGE_OK = {
+    "STAGE 2 - INTEREST FEELER",
+    "STAGE 3 - PRICE QUALIFICATION",
+    "STAGE 4 - PROPERTY CONDITION",
+    "STAGE 5 - MOTIVATION / TIMELINE",
+    "STAGE 6 - OFFER FOLLOW UP",
+    "STAGE 7 - CONTRACT READY",
+    "STAGE 8 - CONTRACT SENT",
+    "STAGE 9 - CONTRACT FOLLOW UP",
+}
 
 def iso_now(): return datetime.now(timezone.utc).isoformat()
 def last10(s): return re.sub(r"[^0-9]","",str(s or ""))[-10:]
