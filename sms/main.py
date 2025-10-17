@@ -60,6 +60,16 @@ except Exception:
     inbound_router = None
 
 try:
+    from sms.outbound_webhook import router as outbound_router
+except Exception:
+    outbound_router = None
+
+try:
+    from sms.delivery_webhook import router as delivery_router
+except Exception:
+    delivery_router = None
+
+try:
     from sms.campaign_runner import run_campaigns, get_campaigns_table
 except Exception:
     def run_campaigns(*_a, **_k): return {"ok": False, "error": "campaign runner unavailable"}
@@ -116,6 +126,10 @@ except Exception:
 app = FastAPI(title="REI SMS Engine", version="1.4.0")
 if inbound_router:
     app.include_router(inbound_router)
+if outbound_router:
+    app.include_router(outbound_router)
+if delivery_router:
+    app.include_router(delivery_router)
 
 # ─────────────────────── ENV / runtime toggles ──────────────────────
 CRON_TOKEN = os.getenv("CRON_TOKEN")
