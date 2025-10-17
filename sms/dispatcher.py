@@ -1,6 +1,7 @@
 # sms/dispatcher.py
 from __future__ import annotations
 
+import logging
 import os
 import traceback
 import time
@@ -9,8 +10,11 @@ from datetime import datetime
 
 try:
     from zoneinfo import ZoneInfo
-except Exception:
+except Exception:  # pragma: no cover - fallback for very old Python
     ZoneInfo = None
+
+
+LOGGER = logging.getLogger(__name__)
 
 # Runners
 from sms.campaign_runner import run_campaigns
@@ -28,7 +32,20 @@ except Exception:
 # -----------------------
 # Quiet hours (Outbound)
 # -----------------------
-QUIET_TZ = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago")) if ZoneInfo else None
+def _load_quiet_timezone() -> Optional[ZoneInfo]:
+    """Attempt to load the quiet-hour timezone safely."""
+    if not ZoneInfo:
+        return None
+
+    tz_name = os.getenv("QUIET_TZ", "America/Chicago")
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:  # pragma: no cover - depends on system tz database
+        LOGGER.warning("Unable to load timezone '%s'; quiet hours disabled.", tz_name)
+        return None
+
+
+QUIET_TZ = _load_quiet_timezone()
 QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", "21"))  # 9pm local
 QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", "9"))  # 9am local
 
@@ -72,19 +89,25 @@ def _summarize_prospect_result(res: Dict[str, Any]) -> Dict[str, int]:
     return totals
 
 
-def _std_envelope(ok: bool, typ: str, payload: Dict[str, Any], started_at: float) -> Dict[str, Any]:
-    payload = payload or {}
+def _std_envelope(ok: bool, typ: str, payload: Any, started_at: float) -> Dict[str, Any]:
+    if isinstance(payload, dict):
+        payload_dict = dict(payload)
+    else:
+        payload_dict = {"payload": payload}
     return {
         "ok": ok,
         "type": typ,
         "duration_ms": int((time.time() - started_at) * 1000),
-        **payload,
+        **payload_dict,
     }
 
 
 # -----------------------
 # Dispatcher
 # -----------------------
+SUPPORTED_MODES = ("prospects", "leads", "inbounds")
+
+
 def run_engine(mode: str, **kwargs) -> dict:
     """
     Unified dispatcher for all SMS engines.
@@ -105,12 +128,13 @@ def run_engine(mode: str, **kwargs) -> dict:
         - view: str                     (Airtable view for Conversations)
     """
     started = time.time()
-    mode = (mode or "").lower().strip()
+    normalized_mode = str(mode or "").lower().strip()
     try:
-        if mode == "prospects":
+        if normalized_mode == "prospects":
             # Respect quiet hours for outbound
             send_after_queue: Optional[bool] = kwargs.get("send_after_queue")
-            if _is_quiet_hours_outbound():
+            quiet_hours = _is_quiet_hours_outbound()
+            if quiet_hours:
                 send_after_queue = False  # hard block immediate sends during quiet hours
 
             # Pass through limit; default to processing all
@@ -124,12 +148,12 @@ def run_engine(mode: str, **kwargs) -> dict:
                 {
                     "result": result,
                     "totals": sums,
-                    "quiet_hours": _is_quiet_hours_outbound(),
+                    "quiet_hours": quiet_hours,
                 },
                 started,
             )
 
-        elif mode == "leads":
+        elif normalized_mode == "leads":
             retry_limit = _safe_int(kwargs.get("retry_limit", 100), 100)
             retry_result = run_retry(limit=retry_limit)
 
@@ -140,7 +164,7 @@ def run_engine(mode: str, **kwargs) -> dict:
                     followups = run_followups()
                 except Exception:
                     # keep going even if followups fails
-                    traceback.print_exc()
+                    LOGGER.exception("Follow-up flow failed")
                     followups = {"ok": False, "error": "followups_failed"}
 
             payload = {
@@ -150,7 +174,7 @@ def run_engine(mode: str, **kwargs) -> dict:
             }
             return _std_envelope(True, "Lead", payload, started)
 
-        elif mode == "inbounds":
+        elif normalized_mode == "inbounds":
             limit = _safe_int(kwargs.get("limit", 50), 50)
             view = kwargs.get("view", "Unprocessed Inbounds")
             result = run_autoresponder(limit=limit, view=view)
@@ -163,22 +187,22 @@ def run_engine(mode: str, **kwargs) -> dict:
             return _std_envelope(True, "Inbound", payload, started)
 
         else:
+            mode_desc = normalized_mode or "<missing>"
             return _std_envelope(
                 False,
                 "Unknown",
                 {
-                    "error": f"Unknown mode: {mode}",
-                    "supported_modes": ["prospects", "leads", "inbounds"],
+                    "error": f"Unknown mode: {mode_desc}",
+                    "supported_modes": list(SUPPORTED_MODES),
                 },
                 started,
             )
 
     except Exception as e:
-        print(f"❌ Dispatcher error in mode={mode}: {e}")
-        traceback.print_exc()
+        LOGGER.exception("Dispatcher error in mode=%s", normalized_mode or "unknown")
         return _std_envelope(
             False,
-            mode or "unknown",
+            normalized_mode or "unknown",
             {
                 "error": str(e),
                 "stack": traceback.format_exc(),
