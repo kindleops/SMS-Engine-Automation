@@ -1,270 +1,224 @@
-import os, re, traceback
-from datetime import datetime, timezone
-from fastapi import APIRouter, Request, HTTPException
-from pyairtable import Table
+"""Inbound webhook that enforces the README2.md contracts."""
 
-from sms.number_pools import increment_delivered, increment_failed, increment_opt_out
+from __future__ import annotations
 
-router = APIRouter()
+import re
+from typing import Dict, Optional
 
-# === ENV CONFIG ===
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-BASE_ID = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+from fastapi import APIRouter, HTTPException, Request
 
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
-PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
+from sms.airtable_schema import CONVERSATIONS, PROMOTION_STAGE
+from sms.conversation_store import (
+    base_conversation_payload,
+    normalize_phone,
+    promote_to_lead,
+    resolve_contact_links,
+    update_conversation_links,
+    update_lead_activity,
+    upsert_conversation,
+)
+from sms.number_pools import increment_opt_out
 
-# === FIELD MAPPINGS ===
-FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
-TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")
-MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
-TG_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-RECEIVED_AT = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
-SENT_AT = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
-LEAD_LINK_FIELD = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")
 
-# === AIRTABLE CLIENTS ===
-convos = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
-leads = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE) if AIRTABLE_API_KEY else None
-prospects = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KEY else None
+router = APIRouter(prefix="", tags=["Inbound"])
 
-# === HELPERS ===
-PHONE_CANDIDATES = [
-    "phone", "Phone", "Mobile", "Cell", "Phone Number", "Primary Phone",
-    "Phone 1", "Phone 2", "Phone 3",
-    "Owner Phone", "Owner Phone 1", "Owner Phone 2",
-    "Phone 1 (from Linked Owner)", "Phone 2 (from Linked Owner)", "Phone 3 (from Linked Owner)"
-]
 
-def iso_timestamp():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+STOP_RE = re.compile(r"\b(stop|unsubscribe|remove|opt\s*out)\b", re.I)
 
-def _digits(s):
-    return "".join(re.findall(r"\d+", s or "")) if isinstance(s, str) else ""
+POSITIVE_WORDS = {
+    "yes",
+    "yeah",
+    "interested",
+    "offer",
+    "talk",
+    "price",
+    "sure",
+    "okay",
+    "ok",
+    "let's",
+    "lets",
+}
 
-def _last10(s):
-    d = _digits(s)
-    return d[-10:] if len(d) >= 10 else None
+PRICE_WORDS = {"price", "number", "cost", "offer", "dollar", "$"}
+CONDITION_WORDS = {"condition", "repairs", "fix", "renovate", "update"}
+MOTIVATION_WORDS = {"timeline", "when", "ready", "soon", "move", "motivation", "close"}
+DELAY_WORDS = {"later", "busy", "follow up", "next week", "tomorrow", "call me", "text me"}
+REJECT_WORDS = {"no", "not interested", "stop", "wrong", "dnc", "remove"}
 
-def _first_existing_fields(tbl, candidates):
-    try:
-        probe = tbl.all(max_records=1) or []
-        keys = list((probe[0] or {}).get("fields", {}).keys()) if probe else []
-    except Exception:
-        keys = []
-    return [c for c in candidates if c in keys]
 
-def _find_by_phone_last10(tbl, phone):
-    """Return first record whose phone-like field matches last10 digits."""
-    if not tbl or not phone:
-        return None
-    want = _last10(phone)
-    if not want:
-        return None
-    fields = _first_existing_fields(tbl, PHONE_CANDIDATES)
-    try:
-        for r in tbl.all():
-            f = r.get("fields", {})
-            for col in fields:
-                if _last10(f.get(col)) == want:
-                    return r
-    except Exception:
-        traceback.print_exc()
-    return None
-
-# === PROMOTE PROSPECT → LEAD ===
-def promote_prospect_to_lead(phone_number: str, source="Inbound"):
-    if not phone_number or not leads:
-        return None, None
-    try:
-        existing = _find_by_phone_last10(leads, phone_number)
-        if existing:
-            return existing["id"], existing["fields"].get("Property ID")
-
-        fields, property_id = {}, None
-        prospect = _find_by_phone_last10(prospects, phone_number)
-        if prospect:
-            p_fields = prospect["fields"]
-            for p_col, l_col in {
-                "phone": "phone",
-                "Property ID": "Property ID",
-                "Owner Name": "Owner Name",
-                "Address": "Address",
-                "Market": "Market",
-                "Sync Source": "Synced From",
-                "List": "Source List",
-                "Property Type": "Property Type",
-            }.items():
-                if p_col in p_fields:
-                    fields[l_col] = p_fields[p_col]
-            property_id = p_fields.get("Property ID")
-
-        new_lead = leads.create({
-            **fields,
-            "phone": phone_number,
-            "Lead Status": "New",
-            "Source": source,
-            "Reply Count": 0,
-            "Last Inbound": iso_timestamp(),
-        })
-        print(f"✨ Promoted {phone_number} → Lead")
-        return new_lead["id"], property_id
-
-    except Exception as e:
-        print(f"⚠️ Prospect promotion failed for {phone_number}: {e}")
-        return None, None
-
-# === ACTIVITY UPDATES ===
-def update_lead_activity(lead_id: str, body: str, direction: str, reply_increment: bool = False):
-    if not leads or not lead_id:
-        return
-    try:
-        lead = leads.get(lead_id)
-        reply_count = lead["fields"].get("Reply Count", 0)
-        updates = {
-            "Last Activity": iso_timestamp(),
-            "Last Direction": direction,
-            "Last Message": (body or "")[:500],
+def classify_intent(body: str) -> Dict[str, Optional[str]]:
+    text = (body or "").strip().lower()
+    if not text:
+        return {
+            "intent_detected": "Neutral",
+            "ai_intent": "neutral",
+            "stage": CONVERSATIONS.allowed_stages[0],
+            "promote": False,
         }
-        if reply_increment:
-            updates["Reply Count"] = reply_count + 1
-            updates["Last Inbound"] = iso_timestamp()
-        if direction == "OUT":
-            updates["Last Outbound"] = iso_timestamp()
-        leads.update(lead_id, updates)
-    except Exception as e:
-        print(f"⚠️ Failed to update lead activity: {e}")
 
-def log_conversation(payload: dict):
-    if not convos:
-        return
-    try:
-        convos.create(payload)
-    except Exception as e:
-        print(f"⚠️ Failed to log to Conversations: {e}")
+    if STOP_RE.search(text):
+        return {
+            "intent_detected": "DNC",
+            "ai_intent": "not_interested",
+            "stage": "OPT OUT",
+            "promote": False,
+        }
 
-# === TESTABLE HANDLER (used by CI) ===
-def handle_inbound(payload: dict):
-    """Non-async inbound handler used by tests."""
-    from_number = payload.get("From")
-    to_number = payload.get("To")
-    body = payload.get("Body")
-    msg_id = payload.get("MessageSid")
+    if any(word in text for word in PRICE_WORDS):
+        return {
+            "intent_detected": "Positive",
+            "ai_intent": "ask_price",
+            "stage": PROMOTION_STAGE,
+            "promote": True,
+        }
 
-    if not from_number or not body:
-        raise HTTPException(status_code=400, detail="Missing From or Body")
+    if any(word in text for word in CONDITION_WORDS):
+        return {
+            "intent_detected": "Positive",
+            "ai_intent": "condition_question",
+            "stage": "STAGE 4 - PROPERTY CONDITION",
+            "promote": True,
+        }
 
-    print(f"📥 [TEST] Inbound SMS from {from_number}: {body}")
+    if any(word in text for word in MOTIVATION_WORDS):
+        return {
+            "intent_detected": "Positive",
+            "ai_intent": "motivation_detected",
+            "stage": "STAGE 5 - MOTIVATION / TIMELINE",
+            "promote": True,
+        }
 
-    lead_id, property_id = promote_prospect_to_lead(from_number)
-    record = {
-        FROM_FIELD: from_number,
-        TO_FIELD: to_number,
-        MSG_FIELD: body,
-        STATUS_FIELD: "UNPROCESSED",
-        DIR_FIELD: "IN",
-        TG_ID_FIELD: msg_id,
-        RECEIVED_AT: iso_timestamp(),
+    if any(word in text for word in POSITIVE_WORDS):
+        return {
+            "intent_detected": "Positive",
+            "ai_intent": "interest_detected",
+            "stage": PROMOTION_STAGE,
+            "promote": True,
+        }
+
+    if any(word in text for word in DELAY_WORDS):
+        return {
+            "intent_detected": "Delay",
+            "ai_intent": "delay",
+            "stage": "STAGE 5 - MOTIVATION / TIMELINE",
+            "promote": False,
+        }
+
+    if any(word in text for word in REJECT_WORDS):
+        return {
+            "intent_detected": "Reject",
+            "ai_intent": "not_interested",
+            "stage": "STAGE 2 - INTEREST FEELER",
+            "promote": False,
+        }
+
+    return {
+        "intent_detected": "Neutral",
+        "ai_intent": "neutral",
+        "stage": "STAGE 1 - OWNERSHIP CONFIRMATION",
+        "promote": False,
     }
-    if lead_id and LEAD_LINK_FIELD:
-        record[LEAD_LINK_FIELD] = [lead_id]
-    if property_id:
-        record["Property ID"] = property_id
 
-    log_conversation(record)
-    if lead_id:
-        update_lead_activity(lead_id, body, "IN", reply_increment=True)
 
-    return {"status": "ok"}
+def _validate_payload(payload: Dict[str, str]) -> None:
+    if not payload.get("From") or not payload.get("Body"):
+        raise HTTPException(status_code=422, detail="Missing From or Body")
 
-# === TESTABLE OPTOUT HANDLER ===
-def process_optout(payload: dict):
-    """Handles STOP/unsubscribe messages for tests + webhook."""
-    from_number = payload.get("From")
-    raw_body = payload.get("Body")
-    if raw_body is None:
-        raw_body = ""
-    body = str(raw_body)
 
-    if not from_number or not body:
-        raise HTTPException(status_code=400, detail="Missing From or Body")
+def handle_inbound(payload: Dict[str, str]) -> Dict[str, object]:
+    _validate_payload(payload)
 
-    body_lower = body.lower()
+    seller_phone = normalize_phone(payload.get("From"))
+    to_number = normalize_phone(payload.get("To"))
+    body = (payload.get("Body") or "").strip()
+    textgrid_id = payload.get("MessageSid") or payload.get("TextGridId")
 
-    if "stop" in body_lower or "unsubscribe" in body_lower or "quit" in body_lower:
-        print(f"🚫 [TEST] Opt-out from {from_number}")
-        increment_opt_out(from_number)
-        lead_id, property_id = promote_prospect_to_lead(from_number, source="Opt-Out")
-        if lead_id:
-            update_lead_activity(lead_id, body, "IN")
+    intent = classify_intent(body)
 
-        record = {
-            FROM_FIELD: from_number,
-            MSG_FIELD: body,
-            STATUS_FIELD: "OPTOUT",
-            DIR_FIELD: "IN",
-            RECEIVED_AT: iso_timestamp(),
-            PROCESSED_BY: "OptOut Handler",
-        }
-        if lead_id and LEAD_LINK_FIELD:
-            record[LEAD_LINK_FIELD] = [lead_id]
-        if property_id:
-            record["Property ID"] = property_id
+    lead_record, prospect_record = resolve_contact_links(seller_phone)
 
-        log_conversation(record)
-        return {"status": "optout"}
+    delivery_status = "DELIVERED" if intent["stage"] != "OPT OUT" else "OPT OUT"
 
-    return {"status": "ignored"}
+    conversation_payload = base_conversation_payload(
+        seller_phone=seller_phone,
+        textgrid_phone=to_number,
+        body=body,
+        direction="INBOUND",
+        delivery_status=delivery_status,
+        processed_by="Manual / Human",
+        stage=intent["stage"],
+        intent_detected=intent["intent_detected"],
+        ai_intent=intent["ai_intent"],
+        textgrid_id=textgrid_id,
+    )
 
-# === TESTABLE STATUS HANDLER ===
-def process_status(payload: dict):
-    """Testable delivery status handler used by CI and webhook."""
-    msg_id = payload.get("MessageSid")
-    status = (payload.get("MessageStatus") or "").lower()
-    to = payload.get("To")
-    from_num = payload.get("From")
+    if lead_record:
+        conversation_payload[CONVERSATIONS.lead_record_id] = lead_record["id"]
+        conversation_payload[CONVERSATIONS.link_lead] = [lead_record["id"]]
+    elif prospect_record:
+        conversation_payload[CONVERSATIONS.prospect_record_id] = prospect_record["id"]
+        conversation_payload[CONVERSATIONS.link_prospect] = [prospect_record["id"]]
 
-    print(f"📡 [TEST] Delivery receipt for {to} [{status}]")
+    conversation_id = upsert_conversation(conversation_payload, textgrid_id)
 
-    if status == "delivered":
-        increment_delivered(from_num)
-    elif status in ("failed", "undelivered"):
-        increment_failed(from_num)
+    if not lead_record and intent["promote"]:
+        lead_record = promote_to_lead(seller_phone or "", source="Inbound")
+        if lead_record:
+            update_conversation_links(
+                conversation_id,
+                lead=lead_record,
+                textgrid_id=textgrid_id,
+            )
+            prospect_record = None
 
-    # Match the test's expectation: include ok=True
-    return {"ok": True, "status": status or "unknown"}
+    if intent["stage"] == "OPT OUT":
+        increment_opt_out(seller_phone or "")
 
-# === FASTAPI ROUTES ===
+    update_lead_activity(
+        lead_record,
+        body=body,
+        direction="INBOUND",
+        delivery_status=delivery_status,
+        reply_increment=True,
+    )
+
+    status = "optout" if intent["stage"] == "OPT OUT" else "ok"
+
+    return {
+        "status": status,
+        "conversation_id": conversation_id,
+        "linked_to": "lead" if lead_record else "prospect",
+        "stage": intent["stage"],
+        "intent": intent["intent_detected"],
+    }
+
+
+def process_optout(payload: Dict[str, str]) -> Dict[str, object]:
+    payload = dict(payload)
+    payload["Body"] = payload.get("Body") or "STOP"
+    return handle_inbound(payload)
+
+
+def process_status(payload: Dict[str, str]) -> Dict[str, object]:
+    status = (payload.get("MessageStatus") or payload.get("status") or "").lower()
+    normalized = "delivered" if status == "delivered" else "failed" if status in {"failed", "undelivered"} else "sent"
+    return {"ok": True, "status": normalized}
+
+
 @router.post("/inbound")
-async def inbound_handler(request: Request):
-    try:
-        data = await request.form()
-        return handle_inbound(data)
-    except Exception as e:
-        print("❌ Inbound webhook error:")
-        traceback.print_exc()
-        return {"ok": False, "error": str(e)}
+async def inbound_handler(request: Request) -> Dict[str, object]:
+    form = await request.form()
+    return handle_inbound(dict(form))
+
 
 @router.post("/optout")
-async def optout_handler(request: Request):
-    try:
-        data = await request.form()
-        return process_optout(data)
-    except Exception as e:
-        print("❌ Opt-out webhook error:")
-        traceback.print_exc()
-        return {"ok": False, "error": str(e)}
+async def optout_handler(request: Request) -> Dict[str, object]:
+    form = await request.form()
+    return process_optout(dict(form))
+
 
 @router.post("/status")
-async def status_handler(request: Request):
-    try:
-        data = await request.form()
-        return process_status(data)
-    except Exception as e:
-        print("❌ Status webhook error:")
-        traceback.print_exc()
-        return {"ok": False, "error": str(e)}
+async def status_handler(request: Request) -> Dict[str, object]:
+    form = await request.form()
+    return process_status(dict(form))
+
