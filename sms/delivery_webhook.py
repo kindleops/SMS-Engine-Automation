@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import os, re, json, traceback
+from urllib.parse import parse_qs
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from fastapi import APIRouter, Request, Header
 
@@ -367,6 +368,72 @@ def _update_conversation_by_sid(sid: str, status: str, error: Optional[str]):
 # =========================
 # Provider-agnostic parser
 # =========================
+def _ensure_str(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    if isinstance(v, (bytes, bytearray)):
+        try:
+            return v.decode()
+        except Exception:
+            return None
+    return str(v)
+
+
+def _coerce_single_values(items: Mapping[str, Any]) -> Dict[str, Any]:
+    """Collapse mappings that may contain iterable/list values from form parsing."""
+
+    result: Dict[str, Any] = {}
+    for key, value in items.items():
+        if isinstance(value, (list, tuple, set)):
+            # Form parsing often yields lists; prefer the first non-empty element.
+            for candidate in value:
+                if candidate not in (None, ""):
+                    result[key] = candidate
+                    break
+            else:
+                # all empty – keep the original sequence for transparency
+                result[key] = value
+        else:
+            result[key] = value
+    return result
+
+
+def _parse_request_payload(raw_body: bytes, content_type: Optional[str]) -> Dict[str, Any]:
+    """Return a dict for the webhook body supporting JSON or form payloads."""
+
+    if not raw_body:
+        return {}
+
+    lowered_ct = (content_type or "").lower()
+
+    try:
+        text_body = raw_body.decode()
+    except Exception:
+        try:
+            text_body = raw_body.decode(errors="ignore")
+        except Exception:
+            text_body = ""
+
+    # Prefer JSON when the header explicitly indicates JSON.
+    if "json" in lowered_ct or not lowered_ct:
+        try:
+            parsed = json.loads(text_body)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    # Fallback to application/x-www-form-urlencoded parsing.
+    try:
+        parsed_form = parse_qs(text_body)
+        if parsed_form:
+            return _coerce_single_values(parsed_form)
+    except Exception:
+        pass
+
+    return {}
+
+
 def _extract_payload(req_body: Any, headers: Dict[str, str]) -> Dict[str, Any]:
     """
     Accepts JSON or x-www-form-urlencoded and normalizes:
@@ -386,28 +453,61 @@ def _extract_payload(req_body: Any, headers: Dict[str, str]) -> Dict[str, Any]:
     data = {}
     if isinstance(req_body, dict):
         data = {**req_body}
-    elif isinstance(req_body, str):
+    elif isinstance(req_body, (str, bytes, bytearray)):
         try:
             data = json.loads(req_body)
         except Exception:
-            data = {}
+            try:
+                # Attempt to parse query-string style payloads
+                parsed_form = parse_qs(_ensure_str(req_body) or "")
+                data = _coerce_single_values(parsed_form)
+            except Exception:
+                data = {}
     ld = lowerize(data)
 
-    msg_sid = pick(ld, "message_sid", "messagesid", "sid", "messageid", "id")
-    status = (pick(ld, "message_status", "messagestatus", "status", "delivery_status", "eventtype") or "").lower()
-    from_n = pick(ld, "from", "sender", "source")
-    to_n = pick(ld, "to", "destination", "recipient")
-    err = pick(ld, "error_message", "errormessage", "error", "reason")
+    msg_sid = _ensure_str(pick(ld, "message_sid", "messagesid", "sid", "messageid", "id"))
+    status = (_ensure_str(pick(ld, "message_status", "messagestatus", "status", "delivery_status", "eventtype")) or "").lower()
+    from_n = _ensure_str(pick(ld, "from", "sender", "source"))
+    to_n = _ensure_str(pick(ld, "to", "destination", "recipient"))
+    err = _ensure_str(pick(ld, "error_message", "errormessage", "error", "reason"))
 
     # normalize status
-    if status in {"delivered", "success", "delivrd"}:
+    delivered_statuses = {"delivered", "success", "delivrd", "completed"}
+    failed_statuses = {
+        "failed",
+        "undelivered",
+        "undeliverable",
+        "rejected",
+        "blocked",
+        "expired",
+        "error",
+        "failed_attempt",
+        "permanentfailure",
+    }
+    sent_statuses = {
+        "accepted",
+        "queued",
+        "sent",
+        "sending",
+        "enroute",
+        "out_for_delivery",
+        "dispatch",
+        "dispatched",
+        "submitted",
+        "buffered",
+        "acknowledged",
+    }
+
+    if status in delivered_statuses:
         norm = "delivered"
-    elif status in {"failed", "undelivered", "undeliverable", "rejected", "blocked", "expired", "error"}:
+    elif status in failed_statuses:
         norm = "failed"
+    elif status in sent_statuses:
+        norm = "sent"
     else:
         norm = "sent"
 
-    provider = headers.get("x-provider") or headers.get("user-agent") or "unknown"
+    provider = headers.get("x-provider") or headers.get("user-agent") or _ensure_str(pick(ld, "provider")) or "unknown"
 
     return {"sid": msg_sid, "status": norm, "from": from_n, "to": to_n, "error": err, "provider": provider}
 
@@ -429,21 +529,38 @@ async def delivery_webhook(
     - Updates Drip Queue + Conversations status/UI
     """
     # 1) Auth (optional but recommended)
-    if WEBHOOK_TOKEN and x_webhook_token and x_webhook_token != WEBHOOK_TOKEN:
+    auth_header = _ensure_str(request.headers.get("authorization"))
+    bearer_token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        bearer_token = auth_header.split(" ", 1)[1].strip() or None
+
+    provided_token = (
+        _ensure_str(x_webhook_token)
+        or bearer_token
+        or _ensure_str(request.query_params.get("token"))
+        or _ensure_str(request.query_params.get("webhook_token"))
+    )
+    if WEBHOOK_TOKEN and provided_token != WEBHOOK_TOKEN:
         return {"ok": False, "error": "unauthorized"}
 
     # 2) Parse body (json or form)
     try:
-        body: Dict[str, Any] = {}
-        if content_type and "application/x-www-form-urlencoded" in content_type.lower():
+        raw_body = await request.body()
+    except Exception:
+        traceback.print_exc()
+        return {"ok": False, "error": "invalid payload"}
+
+    body: Dict[str, Any] = {}
+    try:
+        body = _parse_request_payload(raw_body, content_type)
+        if not body and content_type and "multipart/form-data" in content_type.lower():
             form = await request.form()
-            body = dict(form)
-        else:
-            try:
-                body = await request.json()
-            except Exception:
-                form = await request.form()
-                body = dict(form)
+            if form:
+                if hasattr(form, "multi_items"):
+                    items = dict(form.multi_items())
+                else:
+                    items = dict(form)
+                body = _coerce_single_values(items)
     except Exception:
         traceback.print_exc()
         return {"ok": False, "error": "invalid payload"}
