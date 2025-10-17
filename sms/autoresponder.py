@@ -146,6 +146,24 @@ def _get_setting(name: str, default=None):
     except Exception:
         return default
 
+
+def _followup_flow_enabled() -> bool:
+    """Return True if we should attempt to call the follow-up scheduler."""
+
+    if not callable(schedule_from_response):
+        return False
+
+    # Allow explicit disablement from env. Accept common truthy/falsey variants.
+    flag = os.getenv("AR_DISABLE_FOLLOWUP_FLOW", "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return False
+
+    # Avoid slow HTTP attempts while running unit tests or in TEST_MODE.
+    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("TEST_MODE"):
+        return False
+
+    return True
+
 def _retry(fn: Callable[[], Any], retries: int = 3, delay: float = 0.6) -> Any:
     """
     Tiny retry wrapper for flaky network calls to Airtable.
@@ -514,6 +532,8 @@ def run_autoresponder(limit: int = 50):
                 breakdown[intent] = breakdown.get(intent, 0) + 1
                 continue
 
+            followup_allowed = _followup_flow_enabled()
+
             # Stage 3 → optional AI handoff
             if intent in ("price_response", "condition_response"):
                 try:
@@ -525,13 +545,14 @@ def run_autoresponder(limit: int = 50):
                         ai_result = {"ok": False, "note": "ai_closer unavailable"}
 
                     # Optional schedule
-                    try:
-                        schedule_from_response(
-                            phone=from_num, intent=intent, lead_id=None,
-                            market=market, property_id=None, current_stage=None
-                        )
-                    except Exception as e:
-                        errors.append({"phone": from_num, "error": f"followup schedule failed: {e}"})
+                    if followup_allowed:
+                        try:
+                            schedule_from_response(
+                                phone=from_num, intent=intent, lead_id=None,
+                                market=market, property_id=None, current_stage=None
+                            )
+                        except Exception as e:
+                            errors.append({"phone": from_num, "error": f"followup schedule failed: {e}"})
 
                     _safe_update(convos, msg_id, {
                         (CONV_FIELDS.get("STATUS", "status")): _pick_safe_status("AI_HANDOFF"),
@@ -615,13 +636,14 @@ def run_autoresponder(limit: int = 50):
             if lead_id:
                 update_lead_activity(lead_id, body, "IN", intent=intent)
 
-            try:
-                schedule_from_response(
-                    phone=from_num, intent=intent, lead_id=lead_id,
-                    market=market, property_id=property_id, current_stage=None,
-                )
-            except Exception as e:
-                errors.append({"phone": from_num, "error": f"followup schedule failed: {e}"})
+            if followup_allowed:
+                try:
+                    schedule_from_response(
+                        phone=from_num, intent=intent, lead_id=lead_id,
+                        market=market, property_id=property_id, current_stage=None,
+                    )
+                except Exception as e:
+                    errors.append({"phone": from_num, "error": f"followup schedule failed: {e}"})
 
             processed += 1
             breakdown[intent] = breakdown.get(intent, 0) + 1
