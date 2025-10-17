@@ -228,6 +228,9 @@ def process_status(payload: dict):
     to = payload.get("To")
     from_num = payload.get("From")
 
+    if not to or not from_num:
+        raise HTTPException(status_code=400, detail="Missing To or From")
+
     print(f"📡 [TEST] Delivery receipt for {to} [{status}]")
 
     if status == "delivered":
