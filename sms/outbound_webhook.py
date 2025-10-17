@@ -1,7 +1,13 @@
-import os, re, traceback
+import os
+import re
+import traceback
 from datetime import datetime, timezone
+from typing import Any, Dict
+
 from fastapi import APIRouter, Request, HTTPException
 from pyairtable import Table
+
+from sms.inbound_webhook import normalize_e164, sanitize_body
 
 router = APIRouter()
 
@@ -94,6 +100,17 @@ def _upsert_conversation_by_msgid(msg_id: str, payload: dict):
 
 # === MAIN OUTBOUND HANDLER ===
 @router.post("/outbound")
+async def _extract_payload(request: Request) -> Dict[str, Any]:
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            return body
+    except Exception:
+        pass
+    form = await request.form()
+    return dict(form)
+
+
 async def outbound_handler(request: Request):
     """
     Logs outbound SMS sends → Conversations.
@@ -108,16 +125,17 @@ async def outbound_handler(request: Request):
       }
     """
     try:
-        data = await request.form()
-        to_number   = data.get("To")
-        from_number = data.get("From")
-        body        = (data.get("Body") or "").strip()
-        msg_id      = data.get("MessageSid") or data.get("TextGridId")
+        data = await _extract_payload(request)
+        to_number = normalize_e164(data.get("To"), field="To")
+        from_number = normalize_e164(data.get("From"), field="From")
+        body = sanitize_body(data.get("Body"))
+        msg_id = (data.get("MessageSid") or data.get("TextGridId") or "").strip()
         campaign_id = data.get("Campaign ID") or data.get("campaign_id")
         template_id = data.get("Template ID") or data.get("template_id")
+        processed_by = data.get("ProcessedBy") or data.get("processed_by") or "Outbound Webhook"
 
-        if not to_number or not body:
-            raise HTTPException(status_code=400, detail="Missing To or Body")
+        if not msg_id:
+            raise HTTPException(status_code=422, detail="Missing required field: MessageSid")
 
         print(f"📤 Outbound SMS to {to_number}: {body[:60]}...")
 
@@ -144,10 +162,10 @@ async def outbound_handler(request: Request):
             TO_FIELD: to_number,
             MSG_FIELD: body[:10000],
             STATUS_FIELD: "SENT",
-            DIR_FIELD: "OUT",
+            DIR_FIELD: "OUTBOUND",
             TG_ID_FIELD: msg_id,
             SENT_AT: iso_timestamp(),
-            PROCESSED_BY: "Outbound Webhook",
+            PROCESSED_BY: processed_by,
         }
 
         if lead_id:
@@ -182,7 +200,11 @@ async def outbound_handler(request: Request):
             except Exception as e:
                 print(f"⚠️ Failed to update Lead {lead_id}: {e}")
 
-        return {"ok": True, "record_id": record.get("id") if record else None}
+        return {
+            "status": "ok",
+            "conversation_id": record.get("id") if record else None,
+            "message_sid": msg_id,
+        }
 
     except HTTPException:
         raise

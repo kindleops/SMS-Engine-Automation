@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from typing import Optional, Dict, Any, List
 
+from sms.dispatcher import get_policy
+
 # ------------- optional send backends -------------
 try:
     from sms.message_processor import MessageProcessor as _MP
@@ -62,7 +64,8 @@ LAST_ERROR_FIELD = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
 PERM_FAIL_REASON = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
 
 # ------------- Retry tuning -------------
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+_POLICY = get_policy()
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", str(_POLICY.retry_limit)))
 BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
 
 FAILED_STATES = {"FAILED", "DELIVERY_FAILED", "UNDELIVERED", "UNDELIVERABLE", "THROTTLED"}

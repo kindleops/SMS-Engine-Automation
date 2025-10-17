@@ -40,6 +40,33 @@ PHONE_CANDIDATES = [
     "Phone 1 (from Linked Owner)", "Phone 2 (from Linked Owner)", "Phone 3 (from Linked Owner)"
 ]
 
+STOP_TERMS = {"stop", "unsubscribe", "remove", "opt out", "opt-out", "optout", "quit"}
+
+
+def normalize_e164(value: str, *, field: str) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if not digits:
+        raise HTTPException(status_code=422, detail=f"Missing required field: {field}")
+    if len(digits) == 10:
+        digits = "1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    raise HTTPException(status_code=422, detail=f"Invalid phone number for {field}")
+
+
+def sanitize_body(value: str, *, field: str = "Body") -> str:
+    if value is None:
+        raise HTTPException(status_code=422, detail=f"Missing required field: {field}")
+    text = str(value).strip()
+    if not text:
+        raise HTTPException(status_code=422, detail=f"Missing required field: {field}")
+    return text
+
+
+def is_stop_message(body: str) -> bool:
+    folded = " ".join(body.lower().split())
+    return any(term in folded for term in STOP_TERMS)
+
 def iso_timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -141,84 +168,65 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
 
 def log_conversation(payload: dict):
     if not convos:
-        return
+        return None
     try:
-        convos.create(payload)
+        return convos.create(payload)
     except Exception as e:
         print(f"⚠️ Failed to log to Conversations: {e}")
+    return None
 
 # === TESTABLE HANDLER (used by CI) ===
 def handle_inbound(payload: dict):
     """Non-async inbound handler used by tests."""
-    from_number = payload.get("From")
-    to_number = payload.get("To")
-    body = payload.get("Body")
-    msg_id = payload.get("MessageSid")
-
-    if not from_number or not body:
-        raise HTTPException(status_code=400, detail="Missing From or Body")
+    from_number = normalize_e164(payload.get("From"), field="From")
+    to_number_raw = payload.get("To")
+    to_number = normalize_e164(to_number_raw, field="To") if to_number_raw else None
+    body = sanitize_body(payload.get("Body"))
+    msg_id = str(payload.get("MessageSid") or payload.get("TextGridId") or "").strip() or None
 
     print(f"📥 [TEST] Inbound SMS from {from_number}: {body}")
 
     lead_id, property_id = promote_prospect_to_lead(from_number)
+    linked_to = "lead" if lead_id else "prospect"
+
     record = {
         FROM_FIELD: from_number,
-        TO_FIELD: to_number,
         MSG_FIELD: body,
-        STATUS_FIELD: "UNPROCESSED",
-        DIR_FIELD: "IN",
+        DIR_FIELD: "INBOUND",
         TG_ID_FIELD: msg_id,
         RECEIVED_AT: iso_timestamp(),
     }
-    if lead_id and LEAD_LINK_FIELD:
-        record[LEAD_LINK_FIELD] = [lead_id]
+    if to_number:
+        record[TO_FIELD] = to_number
     if property_id:
         record["Property ID"] = property_id
+    if lead_id and LEAD_LINK_FIELD:
+        record[LEAD_LINK_FIELD] = [lead_id]
 
-    log_conversation(record)
+    is_stop = is_stop_message(body)
+    if is_stop:
+        record[STATUS_FIELD] = "OPT OUT"
+        increment_opt_out(from_number)
+
+    logged = log_conversation(record) or {}
     if lead_id:
-        update_lead_activity(lead_id, body, "IN", reply_increment=True)
+        update_lead_activity(lead_id, body, "INBOUND", reply_increment=True)
 
-    return {"status": "ok"}
+    status = "optout" if is_stop else "ok"
+    return {
+        "status": status,
+        "conversation_id": logged.get("id"),
+        "linked_to": linked_to,
+        "message_sid": msg_id,
+    }
 
 # === TESTABLE OPTOUT HANDLER ===
 def process_optout(payload: dict):
     """Handles STOP/unsubscribe messages for tests + webhook."""
-    from_number = payload.get("From")
-    raw_body = payload.get("Body")
-    if raw_body is None:
-        raw_body = ""
-    body = str(raw_body)
-
-    if not from_number or not body:
-        raise HTTPException(status_code=400, detail="Missing From or Body")
-
-    body_lower = body.lower()
-
-    if "stop" in body_lower or "unsubscribe" in body_lower or "quit" in body_lower:
-        print(f"🚫 [TEST] Opt-out from {from_number}")
-        increment_opt_out(from_number)
-        lead_id, property_id = promote_prospect_to_lead(from_number, source="Opt-Out")
-        if lead_id:
-            update_lead_activity(lead_id, body, "IN")
-
-        record = {
-            FROM_FIELD: from_number,
-            MSG_FIELD: body,
-            STATUS_FIELD: "OPTOUT",
-            DIR_FIELD: "IN",
-            RECEIVED_AT: iso_timestamp(),
-            PROCESSED_BY: "OptOut Handler",
-        }
-        if lead_id and LEAD_LINK_FIELD:
-            record[LEAD_LINK_FIELD] = [lead_id]
-        if property_id:
-            record["Property ID"] = property_id
-
-        log_conversation(record)
-        return {"status": "optout"}
-
-    return {"status": "ignored"}
+    result = handle_inbound(payload)
+    if result.get("status") != "optout":
+        raise HTTPException(status_code=422, detail="Payload is not an opt-out message")
+    return result
 
 # === TESTABLE STATUS HANDLER ===
 def process_status(payload: dict):
