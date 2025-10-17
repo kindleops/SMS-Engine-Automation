@@ -5,7 +5,7 @@ import os, re, json, traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Request, Header
+from fastapi import APIRouter, Request, Header, HTTPException
 
 # ----- Optional Redis backends -----
 try:
@@ -459,6 +459,9 @@ async def delivery_webhook(
 
     ts = utcnow_iso()
     print(f"📡 Delivery receipt | {ts} | from={from_d} → {status} | SID={sid} | provider={parsed.get('provider')}")
+
+    if not from_d or not to_p:
+        raise HTTPException(status_code=422, detail="Missing To or From")
 
     # 3) Idempotency: ignore duplicate SIDs
     if sid and IDEM.seen(sid):
