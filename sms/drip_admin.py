@@ -1,6 +1,8 @@
 # sms/drip_admin.py
 from __future__ import annotations
-import os, re, random, traceback
+import os
+import re
+import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple, List
 from zoneinfo import ZoneInfo
@@ -34,13 +36,22 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
 def _norm(s: Any) -> Any:
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
 
-def _auto_map(tbl) -> Dict[str,str]:
+def _auto_map(tbl) -> Dict[str, str]:
+    cache_attr = "__sms_field_map"
+    cached = getattr(tbl, cache_attr, None)
+    if isinstance(cached, dict):
+        return cached
     try:
         rows = tbl.all(max_records=1)  # type: ignore[attr-defined]
         keys = list(rows[0].get("fields", {}).keys()) if rows else []
     except Exception:
         keys = []
-    return {_norm(k): k for k in keys}
+    amap = {_norm(k): k for k in keys}
+    try:
+        setattr(tbl, cache_attr, amap)
+    except Exception:
+        pass
+    return amap
 
 def _sf(tbl, payload: Dict) -> Dict:
     amap = _auto_map(tbl)
@@ -62,8 +73,14 @@ def _safe_update(tbl, rid: str, payload: Dict):
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-def _to_ct_local_naive(dt_utc: datetime) -> str:
-    return dt_utc.astimezone(QUIET_TZ).replace(tzinfo=None).isoformat(timespec="seconds")
+def _strip_microseconds(dt: datetime) -> datetime:
+    return dt.replace(microsecond=0)
+
+def _format_utc(dt_utc: datetime) -> str:
+    return _strip_microseconds(dt_utc.astimezone(timezone.utc)).isoformat()
+
+def _format_ct_local_naive(dt_utc: datetime) -> str:
+    return _strip_microseconds(dt_utc.astimezone(QUIET_TZ)).replace(tzinfo=None).isoformat()
 
 def _parse_send_time(fields: Dict[str, Any]) -> Tuple[Optional[datetime], str]:
     """
@@ -96,9 +113,9 @@ def normalize_next_send_dates(dry_run: bool = True, force_now: bool = False, lim
     """
     Fixes queued/ready rows:
       - Ensure a real UTC timestamp in Next Send At / next_send_at_utc
-      - If time is in the past (or force_now), bump to now + small jitter
+      - If time is missing or in the past (or force_now), bump to the current moment
       - Mark status READY
-      - Keep Next Send Date (CT) in sync for UI
+      - Keep Next Send Date (CT) in sync for UI consumers
     """
     drip = _make_table(AIRTABLE_KEY, LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)
     if not drip:
@@ -106,7 +123,8 @@ def normalize_next_send_dates(dry_run: bool = True, force_now: bool = False, lim
 
     updated = 0
     examined = 0
-    errors: List[str] = []
+    skipped = 0
+    would_update = 0
 
     try:
         rows = drip.all()  # type: ignore[attr-defined]
@@ -115,6 +133,7 @@ def normalize_next_send_dates(dry_run: bool = True, force_now: bool = False, lim
         return {"ok": False, "error": str(e)}
 
     now = _utcnow()
+    tolerance = timedelta(seconds=1)
     for r in rows:
         if updated >= limit: break
         f = r.get("fields", {}) or {}
@@ -123,32 +142,56 @@ def normalize_next_send_dates(dry_run: bool = True, force_now: bool = False, lim
             continue
 
         examined += 1
-        send_at_utc, src = _parse_send_time(f)
+        send_at_utc, _ = _parse_send_time(f)
 
         # decide new time
-        needs_bump = force_now or (send_at_utc is None) or (send_at_utc < now - timedelta(seconds=5))
-        new_send_utc = (now + timedelta(seconds=random.randint(2, 12))) if needs_bump else send_at_utc
+        if force_now or send_at_utc is None or send_at_utc + tolerance < now:
+            new_send_utc = now
+        else:
+            new_send_utc = send_at_utc
 
-        if not new_send_utc:
-            # last resort: set to now
-            new_send_utc = now + timedelta(seconds=random.randint(2, 12))
+        if new_send_utc is None:
+            new_send_utc = now
+
+        new_send_utc = _strip_microseconds(new_send_utc.astimezone(timezone.utc))
+
+        next_send_at_iso = _format_utc(new_send_utc)
+        next_send_date_iso = _format_ct_local_naive(new_send_utc)
 
         payload = {
-            "Next Send At": new_send_utc.isoformat(),     # human+API
-            "next_send_at_utc": new_send_utc.isoformat(), # programmatic
-            "Next Send Date": _to_ct_local_naive(new_send_utc),
-            "next_send_date": _to_ct_local_naive(new_send_utc),
+            "Next Send At": next_send_at_iso,
+            "next_send_at_utc": next_send_at_iso,
+            "Next Send Date": next_send_date_iso,
+            "next_send_date": next_send_date_iso,
             "status": "READY",
         }
 
-        if not dry_run:
-            if _safe_update(drip, r["id"], payload):
-                updated += 1
+        current_values = {
+            "Next Send At": f.get("Next Send At"),
+            "next_send_at_utc": f.get("next_send_at_utc"),
+            "Next Send Date": f.get("Next Send Date"),
+            "next_send_date": f.get("next_send_date"),
+            "status": f.get("status") or f.get("Status"),
+        }
+
+        if all(payload[k] == current_values.get(k) for k in payload):
+            skipped += 1
+            continue
+
+        if dry_run:
+            would_update += 1
+            continue
+
+        would_update += 1
+        if _safe_update(drip, r["id"], payload):
+            updated += 1
 
     return {
         "ok": True,
         "examined": examined,
         "updated": updated if not dry_run else 0,
+        "skipped": skipped,
+        "would_update": would_update,
         "dry_run": dry_run,
         "force_now": force_now,
         "limit": limit,
