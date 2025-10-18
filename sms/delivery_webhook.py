@@ -482,6 +482,9 @@ async def delivery_webhook(
     ts = utcnow_iso()
     print(f"📡 Delivery receipt | {ts} | from={from_norm} → {status} | SID={sid} | provider={parsed.get('provider')}")
 
+    if not from_d or not to_p:
+        raise HTTPException(status_code=422, detail="Missing To or From")
+
     # 3) Idempotency: ignore duplicate SIDs
     if sid and IDEM.seen(sid):
         return {"status": "ok", "normalized": status, "sid": sid, "note": "duplicate"}
