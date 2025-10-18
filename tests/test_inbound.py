@@ -14,6 +14,7 @@ def test_inbound_valid(monkeypatch):
 
     def fake_log(payload):
         called["logged"] = payload
+        return {"id": "rec123"}
 
     def fake_update(lead_id, body, direction, reply_increment=False):
         called["updated"] = (lead_id, body, direction, reply_increment)
@@ -32,6 +33,8 @@ def test_inbound_valid(monkeypatch):
     result = inbound_webhook.handle_inbound(payload)
 
     assert result["status"] == "ok"
+    assert result["linked_to"] == "lead"
+    assert result["conversation_id"] == "rec123"
     assert "promoted" in called
     assert "logged" in called
     assert "updated" in called
@@ -51,6 +54,7 @@ def test_inbound_optout(monkeypatch):
 
     def fake_log(payload):
         called["logged"] = payload
+        return {"id": "rec123"}
 
     def fake_update(lead_id, body, direction, reply_increment=False):
         called["updated"] = (lead_id, body, direction, reply_increment)
@@ -68,6 +72,7 @@ def test_inbound_optout(monkeypatch):
     result = inbound_webhook.process_optout(payload)
 
     assert result["status"] == "optout"
+    assert result["conversation_id"] == "rec123"
     assert "optout" in called
     assert "promoted" in called
     assert "logged" in called

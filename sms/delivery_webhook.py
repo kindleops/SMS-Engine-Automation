@@ -5,7 +5,7 @@ import os, re, json, traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Request, Header
+from fastapi import APIRouter, Request, Header, HTTPException
 
 # ----- Optional Redis backends -----
 try:
@@ -31,6 +31,8 @@ try:
 except Exception:
     increment_delivered = None
     increment_failed = None
+
+from sms.inbound_webhook import normalize_e164
 
 router = APIRouter(prefix="/delivery", tags=["Delivery"])
 
@@ -400,9 +402,21 @@ def _extract_payload(req_body: Any, headers: Dict[str, str]) -> Dict[str, Any]:
     err = pick(ld, "error_message", "errormessage", "error", "reason")
 
     # normalize status
-    if status in {"delivered", "success", "delivrd"}:
+    delivered = {"delivered", "success", "delivrd"}
+    failed = {"failed"}
+    undelivered = {"undelivered", "undeliverable", "rejected", "blocked", "expired", "error", "failed-permanent"}
+    queued = {"queued", "accepted", "pending", "receiving"}
+    optout = {"optout", "opt-out", "user opted out"}
+
+    if status in delivered:
         norm = "delivered"
-    elif status in {"failed", "undelivered", "undeliverable", "rejected", "blocked", "expired", "error"}:
+    elif status in optout:
+        norm = "optout"
+    elif status in queued:
+        norm = "queued"
+    elif status in undelivered:
+        norm = "undelivered"
+    elif status in failed:
         norm = "failed"
     else:
         norm = "sent"
@@ -430,7 +444,7 @@ async def delivery_webhook(
     """
     # 1) Auth (optional but recommended)
     if WEBHOOK_TOKEN and x_webhook_token and x_webhook_token != WEBHOOK_TOKEN:
-        return {"ok": False, "error": "unauthorized"}
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     # 2) Parse body (json or form)
     try:
@@ -446,38 +460,46 @@ async def delivery_webhook(
                 body = dict(form)
     except Exception:
         traceback.print_exc()
-        return {"ok": False, "error": "invalid payload"}
+        raise HTTPException(status_code=422, detail="Invalid payload")
 
     parsed = _extract_payload(body, dict(request.headers))
-    sid, status, from_d, to_p, err = (
-        parsed.get("sid"),
-        parsed.get("status") or "sent",
-        parsed.get("from"),
-        parsed.get("to"),
-        parsed.get("error"),
-    )
+    sid = parsed.get("sid")
+    status = parsed.get("status")
+    from_d = parsed.get("from")
+    to_p = parsed.get("to")
+    err = parsed.get("error")
+
+    if not sid:
+        raise HTTPException(status_code=422, detail="Missing required field: MessageSid")
+    if not status:
+        raise HTTPException(status_code=422, detail="Missing required field: MessageStatus")
+    if not from_d or not to_p:
+        raise HTTPException(status_code=422, detail="Missing required field: To/From")
+
+    from_norm = normalize_e164(from_d, field="From")
+    to_norm = normalize_e164(to_p, field="To")
 
     ts = utcnow_iso()
-    print(f"📡 Delivery receipt | {ts} | from={from_d} → {status} | SID={sid} | provider={parsed.get('provider')}")
+    print(f"📡 Delivery receipt | {ts} | from={from_norm} → {status} | SID={sid} | provider={parsed.get('provider')}")
 
     # 3) Idempotency: ignore duplicate SIDs
     if sid and IDEM.seen(sid):
-        return {"ok": True, "status": status, "sid": sid, "note": "duplicate ignored"}
+        return {"status": "ok", "normalized": status, "sid": sid, "note": "duplicate"}
 
     # 4) Update Numbers counters
     try:
         if status == "delivered":
-            _bump_numbers_counters(from_d or "", delivered=True)
-        elif status == "failed":
-            _bump_numbers_counters(from_d or "", delivered=False)
+            _bump_numbers_counters(from_norm, delivered=True)
+        elif status in {"failed", "undelivered"}:
+            _bump_numbers_counters(from_norm, delivered=False)
     except Exception:
         traceback.print_exc()
 
     # 5) Update Drip Queue + Conversations
     try:
-        _update_drip_queue_by_sid(sid or "", status, err, from_d, to_p)
-        _update_conversation_by_sid(sid or "", status, err)
+        _update_drip_queue_by_sid(sid, status, err, from_norm, to_norm)
+        _update_conversation_by_sid(sid, status, err)
     except Exception:
         traceback.print_exc()
 
-    return {"ok": True, "status": status, "sid": sid}
+    return {"status": "ok", "normalized": status, "sid": sid}
