@@ -3,29 +3,33 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Request, HTTPException
 from pyairtable import Table
 
+from sms.config import (
+    settings,
+    CONVERSATION_FIELDS as CF,
+    LEAD_FIELDS as LF,
+    PHONE_FIELDS,
+)
 from sms.number_pools import increment_delivered, increment_failed, increment_opt_out
 
 router = APIRouter()
 
-# === ENV CONFIG ===
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-BASE_ID = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CFG = settings()
+AIRTABLE_API_KEY = CFG.AIRTABLE_API_KEY
+BASE_ID = CFG.LEADS_CONVOS_BASE
 
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
-PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
+CONVERSATIONS_TABLE = CFG.CONVERSATIONS_TABLE
+LEADS_TABLE = CFG.LEADS_TABLE
+PROSPECTS_TABLE = CFG.PROSPECTS_TABLE
 
-# === FIELD MAPPINGS ===
-FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
-TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")
-MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
-TG_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-RECEIVED_AT = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
-SENT_AT = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
-LEAD_LINK_FIELD = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")
+FROM_FIELD = CF.SELLER_PHONE_NUMBER
+TO_FIELD = CF.TEXTGRID_PHONE_NUMBER
+MSG_FIELD = CF.MESSAGE_LONG_TEXT
+DIR_FIELD = CF.DIRECTION
+TG_ID_FIELD = CF.TEXTGRID_ID
+RECEIVED_AT = CF.RECEIVED_TIME
+LEAD_LINK_FIELD = CF.LEAD_RECORD_ID
+STATUS_FIELD = CF.DELIVERY_STATUS
+PROCESSED_BY_FIELD = CF.PROCESSED_BY
 
 # === AIRTABLE CLIENTS ===
 convos = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
@@ -33,12 +37,7 @@ leads = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE) if AIRTABLE_API_KEY else N
 prospects = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KEY else None
 
 # === HELPERS ===
-PHONE_CANDIDATES = [
-    "phone", "Phone", "Mobile", "Cell", "Phone Number", "Primary Phone",
-    "Phone 1", "Phone 2", "Phone 3",
-    "Owner Phone", "Owner Phone 1", "Owner Phone 2",
-    "Phone 1 (from Linked Owner)", "Phone 2 (from Linked Owner)", "Phone 3 (from Linked Owner)"
-]
+PHONE_CANDIDATES = PHONE_FIELDS
 
 STOP_TERMS = {"stop", "unsubscribe", "remove", "opt out", "opt-out", "optout", "quit"}
 
@@ -132,11 +131,11 @@ def promote_prospect_to_lead(phone_number: str, source="Inbound"):
 
         new_lead = leads.create({
             **fields,
-            "phone": phone_number,
-            "Lead Status": "New",
+            LF.PHONE: phone_number,
+            LF.LEAD_STATUS: "ACTIVE COMMUNICATION",
             "Source": source,
-            "Reply Count": 0,
-            "Last Inbound": iso_timestamp(),
+            LF.REPLY_COUNT: 0,
+            LF.LAST_INBOUND: iso_timestamp(),
         })
         print(f"✨ Promoted {phone_number} → Lead")
         return new_lead["id"], property_id
@@ -151,17 +150,17 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
         return
     try:
         lead = leads.get(lead_id)
-        reply_count = lead["fields"].get("Reply Count", 0)
+        reply_count = lead["fields"].get(LF.REPLY_COUNT, 0)
         updates = {
-            "Last Activity": iso_timestamp(),
-            "Last Direction": direction,
-            "Last Message": (body or "")[:500],
+            LF.LAST_ACTIVITY: iso_timestamp(),
+            LF.LAST_DIRECTION: direction,
+            LF.LAST_MESSAGE: (body or "")[:500],
         }
         if reply_increment:
-            updates["Reply Count"] = reply_count + 1
-            updates["Last Inbound"] = iso_timestamp()
-        if direction == "OUT":
-            updates["Last Outbound"] = iso_timestamp()
+            updates[LF.REPLY_COUNT] = reply_count + 1
+            updates[LF.LAST_INBOUND] = iso_timestamp()
+        if direction == "OUTBOUND":
+            updates[LF.LAST_OUTBOUND] = iso_timestamp()
         leads.update(lead_id, updates)
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")
@@ -223,10 +222,48 @@ def handle_inbound(payload: dict):
 # === TESTABLE OPTOUT HANDLER ===
 def process_optout(payload: dict):
     """Handles STOP/unsubscribe messages for tests + webhook."""
+<<<<<<< HEAD
+    from_number = payload.get("From")
+    raw_body = payload.get("Body")
+    if raw_body is None:
+        raw_body = ""
+    body = str(raw_body)
+
+    if not from_number or not body:
+        raise HTTPException(status_code=400, detail="Missing From or Body")
+
+    body_lower = body.lower()
+
+    if "stop" in body_lower or "unsubscribe" in body_lower or "quit" in body_lower:
+        print(f"🚫 [TEST] Opt-out from {from_number}")
+        increment_opt_out(from_number)
+        lead_id, property_id = promote_prospect_to_lead(from_number, source="Opt-Out")
+        if lead_id:
+            update_lead_activity(lead_id, body, "INBOUND")
+
+        record = {
+            FROM_FIELD: from_number,
+            MSG_FIELD: body,
+            STATUS_FIELD: "OPT OUT",
+            DIR_FIELD: "INBOUND",
+            RECEIVED_AT: iso_timestamp(),
+            PROCESSED_BY_FIELD: "Opt-Out Processor",
+        }
+        if lead_id and LEAD_LINK_FIELD:
+            record[LEAD_LINK_FIELD] = [lead_id]
+        if property_id:
+            record["Property ID"] = property_id
+
+        log_conversation(record)
+        return {"status": "optout"}
+
+    return {"status": "ignored"}
+=======
     result = handle_inbound(payload)
     if result.get("status") != "optout":
         raise HTTPException(status_code=422, detail="Payload is not an opt-out message")
     return result
+>>>>>>> origin/main
 
 # === TESTABLE STATUS HANDLER ===
 def process_status(payload: dict):

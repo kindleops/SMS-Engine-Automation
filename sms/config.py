@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
 
 # .env loader (safe if missing)
@@ -25,17 +25,195 @@ except Exception:
 
 
 # -----------------------------
+# Contract constants (README2 authoritative)
+# -----------------------------
+
+
+class EnvVars:
+    """Authoritative environment variable names from README2."""
+
+    AIRTABLE_API_KEY = "AIRTABLE_API_KEY"
+    LEADS_CONVOS_BASE = "LEADS_CONVOS_BASE"
+    AIRTABLE_LEADS_CONVOS_BASE_ID = "AIRTABLE_LEADS_CONVOS_BASE_ID"
+    CONVERSATIONS_TABLE = "CONVERSATIONS_TABLE"
+    LEADS_TABLE = "LEADS_TABLE"
+    CAMPAIGNS_TABLE = "CAMPAIGNS_TABLE"
+    TEMPLATES_TABLE = "TEMPLATES_TABLE"
+    PROSPECTS_TABLE = "PROSPECTS_TABLE"
+    NUMBERS_TABLE = "NUMBERS_TABLE"
+    WEBHOOK_TOKEN = "WEBHOOK_TOKEN"
+    CRON_TOKEN = "CRON_TOKEN"
+    QUIET_HOURS_ENFORCED = "QUIET_HOURS_ENFORCED"
+    QUIET_START_HOUR_LOCAL = "QUIET_START_HOUR_LOCAL"
+    QUIET_END_HOUR_LOCAL = "QUIET_END_HOUR_LOCAL"
+    RATE_PER_NUMBER_PER_MIN = "RATE_PER_NUMBER_PER_MIN"
+    GLOBAL_RATE_PER_MIN = "GLOBAL_RATE_PER_MIN"
+    DAILY_LIMIT = "DAILY_LIMIT"
+    JITTER_SECONDS = "JITTER_SECONDS"
+    WORKER_INTERVAL_SEC = "WORKER_INTERVAL_SEC"
+    SEND_BATCH_LIMIT = "SEND_BATCH_LIMIT"
+    RETRY_LIMIT = "RETRY_LIMIT"
+    TEXTGRID_ACCOUNT_SID = "TEXTGRID_ACCOUNT_SID"
+    TEXTGRID_AUTH_TOKEN = "TEXTGRID_AUTH_TOKEN"
+    UPSTASH_REDIS_REST_URL = "UPSTASH_REDIS_REST_URL"
+    UPSTASH_REDIS_REST_TOKEN = "UPSTASH_REDIS_REST_TOKEN"
+    LOG_LEVEL = "LOG_LEVEL"
+    AIRTABLE_CAMPAIGN_CONTROL_BASE_ID = "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"
+    AIRTABLE_PERFORMANCE_BASE_ID = "AIRTABLE_PERFORMANCE_BASE_ID"
+    CAMPAIGN_CONTROL_BASE = "CAMPAIGN_CONTROL_BASE"
+    PERFORMANCE_BASE = "PERFORMANCE_BASE"
+    AIRTABLE_REPORTING_KEY = "AIRTABLE_REPORTING_KEY"
+    AIRTABLE_CAMPAIGN_CONTROL_KEY = "AIRTABLE_COMPLIANCE_KEY"
+    AIRTABLE_ACQUISITIONS_KEY = "AIRTABLE_ACQUISITIONS_KEY"
+    AIRTABLE_PERFORMANCE_KEY = "AIRTABLE_REPORTING_KEY"
+
+
+EXPECTED_ENV_VARS: Tuple[str, ...] = (
+    EnvVars.AIRTABLE_API_KEY,
+    EnvVars.LEADS_CONVOS_BASE,
+    EnvVars.AIRTABLE_LEADS_CONVOS_BASE_ID,
+    EnvVars.CONVERSATIONS_TABLE,
+    EnvVars.LEADS_TABLE,
+    EnvVars.CAMPAIGNS_TABLE,
+    EnvVars.TEMPLATES_TABLE,
+    EnvVars.PROSPECTS_TABLE,
+    EnvVars.NUMBERS_TABLE,
+    EnvVars.WEBHOOK_TOKEN,
+    EnvVars.CRON_TOKEN,
+    EnvVars.QUIET_HOURS_ENFORCED,
+    EnvVars.QUIET_START_HOUR_LOCAL,
+    EnvVars.QUIET_END_HOUR_LOCAL,
+    EnvVars.RATE_PER_NUMBER_PER_MIN,
+    EnvVars.GLOBAL_RATE_PER_MIN,
+    EnvVars.DAILY_LIMIT,
+    EnvVars.JITTER_SECONDS,
+    EnvVars.WORKER_INTERVAL_SEC,
+    EnvVars.SEND_BATCH_LIMIT,
+    EnvVars.RETRY_LIMIT,
+    EnvVars.TEXTGRID_ACCOUNT_SID,
+    EnvVars.TEXTGRID_AUTH_TOKEN,
+    EnvVars.UPSTASH_REDIS_REST_URL,
+    EnvVars.UPSTASH_REDIS_REST_TOKEN,
+    EnvVars.LOG_LEVEL,
+)
+
+
+LEGACY_ENV_VAR_SYNONYMS = {
+    "QUIET_START_HOUR": EnvVars.QUIET_START_HOUR_LOCAL,
+    "QUIET_END_HOUR": EnvVars.QUIET_END_HOUR_LOCAL,
+    "REDIS_URL": EnvVars.UPSTASH_REDIS_REST_URL,
+    "UPSTASH_REDIS_URL": EnvVars.UPSTASH_REDIS_REST_URL,
+}
+
+
+def _check_legacy_envs() -> None:
+    legacy_hits = [k for k in LEGACY_ENV_VAR_SYNONYMS if os.getenv(k)]
+    if legacy_hits:
+        mapped = ", ".join(
+            f"{key}→{LEGACY_ENV_VAR_SYNONYMS[key]}" for key in sorted(legacy_hits)
+        )
+        print(
+            "⚠️ Legacy environment variable names detected. Update deployment to use "
+            f"README2 contract: {mapped}."
+        )
+
+
+_check_legacy_envs()
+
+
+@dataclass(frozen=True)
+class ConversationFields:
+    STAGE: str = "Stage"
+    PROCESSED_BY: str = "Processed By"
+    INTENT_DETECTED: str = "Intent Detected"
+    DIRECTION: str = "Direction"
+    DELIVERY_STATUS: str = "Delivery Status"
+    AI_INTENT: str = "AI Intent"
+    TEXTGRID_PHONE_NUMBER: str = "TextGrid Phone Number"
+    TEXTGRID_ID: str = "TextGrid ID"
+    TEMPLATE_RECORD_ID: str = "Template Record ID"
+    SELLER_PHONE_NUMBER: str = "Seller Phone Number"
+    PROSPECT_RECORD_ID: str = "Prospect Record ID"
+    LEAD_LINK: str = "Lead"
+    LEAD_RECORD_ID: str = "Lead Record ID"
+    CAMPAIGN_RECORD_ID: str = "Campaign Record ID"
+    SENT_COUNT: str = "Sent Count"
+    REPLY_COUNT: str = "Reply Count"
+    MESSAGE_SUMMARY: str = "Message Summary (AI)"
+    MESSAGE_LONG_TEXT: str = "Message Long text"
+    TEMPLATE_LINK: str = "Template"
+    PROSPECTS_LINK: str = "Prospects"
+    PROSPECT_LINK: str = "Prospect"
+    LEAD_STATUS_LOOKUP: str = "Lead Status (from Lead)"
+    CAMPAIGN_LINK: str = "Campaign"
+    RESPONSE_TIME_MINUTES: str = "Response Time (Minutes)"
+    RECORD_ID: str = "Record ID"
+    RECEIVED_TIME: str = "Received Time"
+    PROCESSED_TIME: str = "Processed Time"
+    LAST_SENT_TIME: str = "Last Sent Time"
+    LAST_RETRY_TIME: str = "Last Retry Time"
+    AI_RESPONSE_TRIGGER: str = "AI Response Trigger"
+
+
+@dataclass(frozen=True)
+class LeadFields:
+    LEAD_STATUS: str = "Lead Status"
+    LAST_ACTIVITY: str = "Last Activity"
+    LAST_DIRECTION: str = "Last Direction"
+    LAST_MESSAGE: str = "Last Message"
+    LAST_INBOUND: str = "Last Inbound"
+    LAST_OUTBOUND: str = "Last Outbound"
+    REPLY_COUNT: str = "Reply Count"
+    SENT_COUNT: str = "Sent Count"
+    RESPONSE_TIME: str = "Response Time (Minutes)"
+    PHONE: str = "Phone"
+    CAMPAIGNS_LINK: str = "Campaigns"
+    CONVERSATIONS_LINK: str = "Conversations"
+    RECORD_ID: str = "Record ID"
+
+
+@dataclass(frozen=True)
+class NumbersFields:
+    NUMBER: str = "Number"
+    FRIENDLY_NAME: str = "Friendly Name"
+    MARKET: str = "Market"
+    MARKETS_MULTI: str = "Markets"
+    ACTIVE: str = "Active"
+    STATUS: str = "Status"
+    SENT_TODAY: str = "Sent Today"
+    DELIVERED_TODAY: str = "Delivered Today"
+    FAILED_TODAY: str = "Failed Today"
+    OPTOUT_TODAY: str = "Opt-Outs Today"
+    SENT_TOTAL: str = "Sent Total"
+    DELIVERED_TOTAL: str = "Delivered Total"
+    FAILED_TOTAL: str = "Failed Total"
+    OPTOUT_TOTAL: str = "Opt-Outs Total"
+    REMAINING: str = "Remaining"
+    DAILY_RESET: str = "Daily Reset"
+    LAST_USED: str = "Last Used"
+
+
+CONVERSATION_FIELDS = ConversationFields()
+LEAD_FIELDS = LeadFields()
+NUMBERS_FIELDS = NumbersFields()
+
+
+# -----------------------------
 # Env helpers
 # -----------------------------
+def _env_get(key: str) -> Optional[str]:
+    return os.getenv(key)
+
+
 def env_bool(key: str, default: bool = False) -> bool:
-    v = os.getenv(key)
+    v = _env_get(key)
     if v is None:
         return default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
 def env_int(key: str, default: int) -> int:
-    v = os.getenv(key)
+    v = _env_get(key)
     try:
         return int(v) if v is not None else default
     except Exception:
@@ -43,7 +221,7 @@ def env_int(key: str, default: int) -> int:
 
 
 def env_float(key: str, default: float) -> float:
-    v = os.getenv(key)
+    v = _env_get(key)
     try:
         return float(v) if v is not None else default
     except Exception:
@@ -51,7 +229,7 @@ def env_float(key: str, default: float) -> float:
 
 
 def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
-    v = os.getenv(key)
+    v = _env_get(key)
     return v if (v is not None and str(v).strip() != "") else default
 
 
@@ -59,16 +237,16 @@ def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
 # Static field name maps
 # -----------------------------
 CONV_FIELDS = {
-    "FROM": env_str("CONV_FROM_FIELD", "phone"),
-    "TO": env_str("CONV_TO_FIELD", "to_number"),
-    "BODY": env_str("CONV_MESSAGE_FIELD", "message"),
-    "STATUS": env_str("CONV_STATUS_FIELD", "status"),
-    "DIRECTION": env_str("CONV_DIRECTION_FIELD", "direction"),
-    "TEXTGRID_ID": env_str("CONV_TEXTGRID_ID_FIELD", "TextGrid ID"),
-    "RECEIVED_AT": env_str("CONV_RECEIVED_AT_FIELD", "received_at"),
-    "INTENT": env_str("CONV_INTENT_FIELD", "intent_detected"),
-    "PROCESSED_BY": env_str("CONV_PROCESSED_BY_FIELD", "processed_by"),
-    "SENT_AT": env_str("CONV_SENT_AT_FIELD", "sent_at"),
+    "FROM": env_str("CONV_FROM_FIELD", CONVERSATION_FIELDS.SELLER_PHONE_NUMBER),
+    "TO": env_str("CONV_TO_FIELD", CONVERSATION_FIELDS.TEXTGRID_PHONE_NUMBER),
+    "BODY": env_str("CONV_MESSAGE_FIELD", CONVERSATION_FIELDS.MESSAGE_LONG_TEXT),
+    "STATUS": env_str("CONV_STATUS_FIELD", CONVERSATION_FIELDS.DELIVERY_STATUS),
+    "DIRECTION": env_str("CONV_DIRECTION_FIELD", CONVERSATION_FIELDS.DIRECTION),
+    "TEXTGRID_ID": env_str("CONV_TEXTGRID_ID_FIELD", CONVERSATION_FIELDS.TEXTGRID_ID),
+    "RECEIVED_AT": env_str("CONV_RECEIVED_AT_FIELD", CONVERSATION_FIELDS.RECEIVED_TIME),
+    "INTENT": env_str("CONV_INTENT_FIELD", CONVERSATION_FIELDS.INTENT_DETECTED),
+    "PROCESSED_BY": env_str("CONV_PROCESSED_BY_FIELD", CONVERSATION_FIELDS.PROCESSED_BY),
+    "SENT_AT": env_str("CONV_SENT_AT_FIELD", CONVERSATION_FIELDS.LAST_SENT_TIME),
 }
 
 PHONE_FIELDS = [
@@ -87,6 +265,7 @@ PHONE_FIELDS = [
     "Phone 1 (from Linked Owner)",
     "Phone 2 (from Linked Owner)",
     "Phone 3 (from Linked Owner)",
+    "Seller Phone Number",
 ]
 
 
@@ -123,8 +302,8 @@ class Settings:
 
     # Quiet hours (America/Chicago by default)
     QUIET_TZ: str
-    QUIET_START_HOUR: int
-    QUIET_END_HOUR: int
+    QUIET_START_HOUR_LOCAL: int
+    QUIET_END_HOUR_LOCAL: int
     QUIET_HOURS_ENFORCED: bool
 
     # Queue dedupe lookback
@@ -135,7 +314,8 @@ class Settings:
     QUEUE_JITTER_SECONDS: int
 
     # Redis
-    REDIS_URL: Optional[str]
+    REDIS_REST_URL: Optional[str]
+    REDIS_REST_TOKEN: Optional[str]
     REDIS_TLS: bool
 
     # Feature toggles
@@ -144,39 +324,47 @@ class Settings:
 
     # Security / API
     CRON_TOKEN: Optional[str]
+    WEBHOOK_TOKEN: Optional[str]
+    LOG_LEVEL: str
 
 
 @lru_cache(maxsize=1)
 def settings() -> Settings:
     return Settings(
-        AIRTABLE_API_KEY=env_str("AIRTABLE_API_KEY"),
-        AIRTABLE_REPORTING_KEY=env_str("AIRTABLE_REPORTING_KEY"),
-        LEADS_CONVOS_BASE=env_str("LEADS_CONVOS_BASE") or env_str("AIRTABLE_LEADS_CONVOS_BASE_ID"),
-        CAMPAIGN_CONTROL_BASE=env_str("CAMPAIGN_CONTROL_BASE") or env_str("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"),
-        PERFORMANCE_BASE=env_str("PERFORMANCE_BASE") or env_str("AIRTABLE_PERFORMANCE_BASE_ID"),
-        PROSPECTS_TABLE=env_str("PROSPECTS_TABLE", "Prospects"),
-        LEADS_TABLE=env_str("LEADS_TABLE", "Leads"),
-        CONVERSATIONS_TABLE=env_str("CONVERSATIONS_TABLE", "Conversations"),
-        TEMPLATES_TABLE=env_str("TEMPLATES_TABLE", "Templates"),
+        AIRTABLE_API_KEY=env_str(EnvVars.AIRTABLE_API_KEY),
+        AIRTABLE_REPORTING_KEY=env_str(EnvVars.AIRTABLE_REPORTING_KEY),
+        LEADS_CONVOS_BASE=env_str(EnvVars.LEADS_CONVOS_BASE)
+        or env_str(EnvVars.AIRTABLE_LEADS_CONVOS_BASE_ID),
+        CAMPAIGN_CONTROL_BASE=env_str(EnvVars.CAMPAIGN_CONTROL_BASE)
+        or env_str(EnvVars.AIRTABLE_CAMPAIGN_CONTROL_BASE_ID),
+        PERFORMANCE_BASE=env_str(EnvVars.PERFORMANCE_BASE)
+        or env_str(EnvVars.AIRTABLE_PERFORMANCE_BASE_ID),
+        PROSPECTS_TABLE=env_str(EnvVars.PROSPECTS_TABLE, "Prospects"),
+        LEADS_TABLE=env_str(EnvVars.LEADS_TABLE, "Leads"),
+        CONVERSATIONS_TABLE=env_str(EnvVars.CONVERSATIONS_TABLE, "Conversations"),
+        TEMPLATES_TABLE=env_str(EnvVars.TEMPLATES_TABLE, "Templates"),
         DRIP_QUEUE_TABLE=env_str("DRIP_QUEUE_TABLE", "Drip Queue"),
-        CAMPAIGNS_TABLE=env_str("CAMPAIGNS_TABLE", "Campaigns"),
-        NUMBERS_TABLE=env_str("NUMBERS_TABLE", "Numbers"),
-        DAILY_LIMIT_DEFAULT=env_int("DAILY_LIMIT", 750),
-        RATE_PER_NUMBER_PER_MIN=env_int("RATE_PER_NUMBER_PER_MIN", 20),
-        GLOBAL_RATE_PER_MIN=env_int("GLOBAL_RATE_PER_MIN", 5000),
+        CAMPAIGNS_TABLE=env_str(EnvVars.CAMPAIGNS_TABLE, "Campaigns"),
+        NUMBERS_TABLE=env_str(EnvVars.NUMBERS_TABLE, "Numbers"),
+        DAILY_LIMIT_DEFAULT=env_int(EnvVars.DAILY_LIMIT, 750),
+        RATE_PER_NUMBER_PER_MIN=env_int(EnvVars.RATE_PER_NUMBER_PER_MIN, 20),
+        GLOBAL_RATE_PER_MIN=env_int(EnvVars.GLOBAL_RATE_PER_MIN, 5000),
         SLEEP_BETWEEN_SENDS_SEC=env_float("SLEEP_BETWEEN_SENDS_SEC", 0.03),
         QUIET_TZ=env_str("QUIET_TZ", "America/Chicago") or "America/Chicago",
-        QUIET_START_HOUR=env_int("QUIET_START_HOUR", 21),
-        QUIET_END_HOUR=env_int("QUIET_END_HOUR", 9),
-        QUIET_HOURS_ENFORCED=env_bool("QUIET_HOURS_ENFORCED", True),
+        QUIET_START_HOUR_LOCAL=env_int(EnvVars.QUIET_START_HOUR_LOCAL, 21),
+        QUIET_END_HOUR_LOCAL=env_int(EnvVars.QUIET_END_HOUR_LOCAL, 9),
+        QUIET_HOURS_ENFORCED=env_bool(EnvVars.QUIET_HOURS_ENFORCED, True),
         DEDUPE_HOURS=env_int("DEDUPE_HOURS", 72),
         MESSAGES_PER_MIN=env_int("MESSAGES_PER_MIN", 20),
-        QUEUE_JITTER_SECONDS=env_int("JITTER_SECONDS", 2),
-        REDIS_URL=env_str("REDIS_URL") or env_str("UPSTASH_REDIS_URL") or env_str("UPSTASH_REDIS_REST_URL"),
+        QUEUE_JITTER_SECONDS=env_int(EnvVars.JITTER_SECONDS, 2),
+        REDIS_REST_URL=env_str(EnvVars.UPSTASH_REDIS_REST_URL),
+        REDIS_REST_TOKEN=env_str(EnvVars.UPSTASH_REDIS_REST_TOKEN),
         REDIS_TLS=env_bool("REDIS_TLS", True),
         RUNNER_SEND_AFTER_QUEUE_DEFAULT=env_bool("RUNNER_SEND_AFTER_QUEUE", False),
         AUTO_BACKFILL_FROM_NUMBER=env_bool("AUTO_BACKFILL_FROM_NUMBER", True),
-        CRON_TOKEN=env_str("CRON_TOKEN"),
+        CRON_TOKEN=env_str(EnvVars.CRON_TOKEN),
+        WEBHOOK_TOKEN=env_str(EnvVars.WEBHOOK_TOKEN),
+        LOG_LEVEL=env_str(EnvVars.LOG_LEVEL, "info") or "info",
     )
 
 
@@ -197,7 +385,7 @@ def in_quiet_hours() -> bool:
     if not s.QUIET_HOURS_ENFORCED:
         return False
     h = tz_now().hour
-    return (h >= s.QUIET_START_HOUR) or (h < s.QUIET_END_HOUR)
+    return (h >= s.QUIET_START_HOUR_LOCAL) or (h < s.QUIET_END_HOUR_LOCAL)
 
 
 # -----------------------------
@@ -333,6 +521,10 @@ CAMPAIGN_CONTROL_BASE: Optional[str] = S.CAMPAIGN_CONTROL_BASE
 PERFORMANCE_BASE: Optional[str] = S.PERFORMANCE_BASE
 
 __all__ = [
+    "EnvVars",
+    "CONVERSATION_FIELDS",
+    "LEAD_FIELDS",
+    "NUMBERS_FIELDS",
     "settings",
     # time helpers
     "utcnow",

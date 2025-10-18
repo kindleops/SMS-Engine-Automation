@@ -12,25 +12,28 @@ try:
 except ImportError:
     Table = None
 
+from sms.config import settings, CONVERSATION_FIELDS as CF, LEAD_FIELDS as LF
 from sms.textgrid_sender import send_message
 from sms.retry_handler import handle_retry
 
 
 # ---------- Field mappings (env-overridable) ----------
-FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")  # other party (seller) phone
-TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")  # our DID used to send
-MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
-SENT_AT_FIELD = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-TEXTGRID_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
+CFG = settings()
 
-CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
-LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
-PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
+FROM_FIELD = os.getenv("CONV_FROM_FIELD", CF.SELLER_PHONE_NUMBER)  # other party (seller) phone
+TO_FIELD = os.getenv("CONV_TO_FIELD", CF.TEXTGRID_PHONE_NUMBER)  # our DID used to send
+MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", CF.MESSAGE_LONG_TEXT)
+STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", CF.DELIVERY_STATUS)
+DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", CF.DIRECTION)
+SENT_AT_FIELD = os.getenv("CONV_SENT_AT_FIELD", CF.LAST_SENT_TIME)
+TEXTGRID_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", CF.TEXTGRID_ID)
 
-AIRTABLE_KEY = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", CFG.CONVERSATIONS_TABLE)
+LEADS_TABLE = os.getenv("LEADS_TABLE", CFG.LEADS_TABLE)
+PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", CFG.PROSPECTS_TABLE)
+
+AIRTABLE_KEY = CFG.AIRTABLE_API_KEY
+LEADS_CONVOS_BASE = CFG.LEADS_CONVOS_BASE
 
 
 # ---------- Small helpers ----------
@@ -103,7 +106,7 @@ class MessageProcessor:
         drip_queue_id: str | None = None,  # (optional) if you want to back-link
         lead_id: str | None = None,
         property_id: str | None = None,
-        direction: str = "OUT",
+        direction: str = "OUTBOUND",
         metadata: Dict[str, Any] | None = None,  # any extra fields to stash on Conversations
     ) -> dict:
         """
@@ -175,12 +178,12 @@ class MessageProcessor:
         if lead_id and leads:
             now_iso = utcnow_iso()
             patch = {
-                "Last Activity": now_iso,
-                "Last Message": body[:500],
+                LF.LAST_ACTIVITY: now_iso,
+                LF.LAST_MESSAGE: body[:500],
                 "Property ID": property_id,
             }
-            if direction == "OUT":
-                patch["Last Outbound"] = now_iso
+            if direction == "OUTBOUND":
+                patch[LF.LAST_OUTBOUND] = now_iso
             try:
                 leads.update(lead_id, _remap_existing_only(leads, patch))
             except Exception as e:
@@ -230,10 +233,11 @@ class MessageProcessor:
             SENT_AT_FIELD: utcnow_iso(),
             TEXTGRID_ID_FIELD: sid,
             # helpful links/trace
-            "Campaign": [campaign_id] if campaign_id else None,
-            "Template": [template_id] if template_id else None,
-            "Drip Queue": [drip_queue_id] if drip_queue_id else None,  # will be ignored if field not present
+            CF.CAMPAIGN_LINK: [campaign_id] if campaign_id else None,
+            CF.TEMPLATE_LINK: [template_id] if template_id else None,
         }
+        if drip_queue_id:
+            payload["Drip Queue"] = [drip_queue_id]
         if metadata:
             payload.update(metadata)
 
