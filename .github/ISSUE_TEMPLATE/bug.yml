@@ -1,0 +1,51 @@
+name: Bug report
+about: Create a report to help us fix a bug
+title: "[BUG] "
+labels:
+  - "type:bug"
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which area is affected
+      options:
+        - Engine
+        - Webhooks
+        - Autoresponder
+        - Airtable Schema
+        - Campaign Runner
+        - DevOps/Render
+        - Compliance
+        - KPIs
+        - Numbers Pool
+        - Tests/CI
+        - Docs
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Sev-1
+        - Sev-2
+        - Sev-3
+  - type: dropdown
+    id: env
+    attributes:
+      label: Env
+      options:
+        - Local
+        - Staging
+        - Prod
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Describe how to reproduce
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Error output
+      description: Paste relevant logs or stack traces
+
+---

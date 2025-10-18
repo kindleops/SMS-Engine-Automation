@@ -1,0 +1,6 @@
+# High risk areas — assign to @kindleops
+/sms/inbound_webhook.py @kindleops
+/sms/number_pools.py @kindleops
+/sms/worker.py @kindleops
+/sms/autoresponder.py @kindleops
+/render.yaml @kindleops

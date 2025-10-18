@@ -1,0 +1,29 @@
+name: Task
+about: New task or feature work
+title: "[TASK] "
+labels:
+  - "type:feature"
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Engine
+        - Webhooks
+        - Autoresponder
+        - Airtable Schema
+        - Campaign Runner
+        - DevOps/Render
+        - Compliance
+        - KPIs
+        - Numbers Pool
+        - Tests/CI
+        - Docs
+  - type: input
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What needs to be true for this to be done
+
+---
