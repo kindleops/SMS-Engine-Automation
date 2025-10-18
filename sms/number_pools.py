@@ -318,20 +318,47 @@ def _ensure_row(did: str) -> Dict:
     return row
 
 
+def _valid_did(did: Optional[str]) -> bool:
+    return bool(_digits_only(did))
+
+
+def _get_row_or_none(did: Optional[str]) -> Optional[Dict]:
+    if not _valid_did(did):
+        print(f"⚠️ NumberPools: invalid or missing DID: {did!r}")
+        return None
+    try:
+        return _ensure_row(did)  # raises if Airtable has no matching row
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
 def increment_sent(did: str):
-    _bump(_ensure_row(did), F_SENT_TODAY, F_SENT_TOTAL, delta=1, dec_remaining=True)
+    row = _get_row_or_none(did)
+    if not row:
+        return
+    _bump(row, F_SENT_TODAY, F_SENT_TOTAL, delta=1, dec_remaining=True)
 
 
 def increment_delivered(did: str):
-    _bump(_ensure_row(did), F_DELIV_TODAY, F_DELIV_TOTAL, delta=1, dec_remaining=False)
+    row = _get_row_or_none(did)
+    if not row:
+        return
+    _bump(row, F_DELIV_TODAY, F_DELIV_TOTAL, delta=1, dec_remaining=False)
 
 
 def increment_failed(did: str):
-    _bump(_ensure_row(did), F_FAILED_TODAY, F_FAILED_TOTAL, delta=1, dec_remaining=False)
+    row = _get_row_or_none(did)
+    if not row:
+        return
+    _bump(row, F_FAILED_TODAY, F_FAILED_TOTAL, delta=1, dec_remaining=False)
 
 
 def increment_opt_out(did: str):
-    _bump(_ensure_row(did), F_OPTOUT_TODAY, F_OPTOUT_TOTAL, delta=1, dec_remaining=False)
+    row = _get_row_or_none(did)
+    if not row:
+        return
+    _bump(row, F_OPTOUT_TODAY, F_OPTOUT_TOTAL, delta=1, dec_remaining=False)
 
 
 # =========================

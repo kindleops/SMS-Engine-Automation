@@ -301,9 +301,9 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
 
 def log_conversation(payload: dict):
     if not convos:
-        return
+        return None
     try:
-        convos.create(payload)
+        return convos.create(payload)
     except Exception as e:
         print(f"⚠️ Failed to log to Conversations: {e}")
 
@@ -354,10 +354,8 @@ def handle_inbound(payload: dict):
 
     record = {
         FROM_FIELD: from_number,
-        TO_FIELD: to_number,
         MSG_FIELD: body,
-        STATUS_FIELD: "UNPROCESSED",
-        DIR_FIELD: "IN",
+        DIR_FIELD: "INBOUND",
         TG_ID_FIELD: msg_id,
         RECEIVED_AT: iso_timestamp(),
     }
@@ -373,9 +371,9 @@ def handle_inbound(payload: dict):
     if property_id:
         record["Property ID"] = property_id
 
-    log_conversation(record)
+    logged = log_conversation(record) or {}
     if lead_id:
-        update_lead_activity(lead_id, body, "IN", reply_increment=True)
+        update_lead_activity(lead_id, body, "INBOUND", reply_increment=True)
 
     return {"status": "ok", "stage": stage, "intent": intent, "promoted": promoted}
 
@@ -438,6 +436,9 @@ def process_status(payload: dict):
     status = (payload.get("MessageStatus") or "").lower()
     to = payload.get("To")
     from_num = payload.get("From")
+
+    if not to or not from_num:
+        raise HTTPException(status_code=400, detail="Missing To or From")
 
     print(f"📡 [TEST] Delivery receipt for {to} [{status}]")
 
