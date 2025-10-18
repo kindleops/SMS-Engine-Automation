@@ -59,16 +59,9 @@ NUMBERS_TABLE = NUMBERS_TABLE_NAME
 CAMPAIGNS_TABLE = CAMPAIGNS_TABLE_NAME
 
 # Rate limits (enforced with Redis across all workers)
-RATE_PER_NUMBER_PER_MIN = int(os.getenv("RATE_PER_NUMBER_PER_MIN", "20"))
-GLOBAL_RATE_PER_MIN = int(os.getenv("GLOBAL_RATE_PER_MIN", "5000"))
 SLEEP_BETWEEN_SENDS_SEC = float(os.getenv("SLEEP_BETWEEN_SENDS_SEC", "0.03"))
 RATE_LIMIT_REQUEUE_SECONDS = float(os.getenv("RATE_LIMIT_REQUEUE_SECONDS", "5"))
 NO_NUMBER_REQUEUE_SECONDS = float(os.getenv("NO_NUMBER_REQUEUE_SECONDS", "60"))
-
-# Quiet hours (America/Chicago): block actual sending 9pm–9am CT
-QUIET_HOURS_ENFORCED = os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in ("1", "true", "yes")
-QUIET_START_HOUR_LOCAL = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))
-QUIET_END_HOUR_LOCAL = int(os.getenv("QUIET_END_HOUR_LOCAL", "9"))
 
 # Backfill missing from_number with a market DID from Numbers table
 AUTO_BACKFILL_FROM_NUMBER = os.getenv("AUTO_BACKFILL_FROM_NUMBER", "true").lower() in ("1", "true", "yes")
@@ -94,6 +87,28 @@ try:
 except Exception:
     MessageProcessor = None
 
+from sms.dispatcher import get_policy
+
+
+def _policy():
+    return get_policy()
+
+
+def rate_per_number_per_min() -> int:
+    return _policy().rate_per_number_per_min
+
+
+def global_rate_per_min() -> int:
+    return _policy().global_rate_per_min
+
+
+def daily_limit_default() -> int:
+    return _policy().daily_limit
+
+
+def send_jitter_seconds() -> int:
+    return _policy().jitter()
+
 
 # =========================
 # Time helpers
@@ -102,25 +117,24 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-try:
-    from zoneinfo import ZoneInfo
-except Exception:
-    ZoneInfo = None
-
-
 def _ct_tz():
-    return ZoneInfo("America/Chicago") if ZoneInfo else timezone.utc
+    policy = get_policy()
+    if policy.quiet_tz:
+        return policy.quiet_tz
+    try:
+        from zoneinfo import ZoneInfo  # type: ignore
+
+        return ZoneInfo("America/Chicago")
+    except Exception:
+        return timezone.utc
 
 
 def central_now() -> datetime:
-    return datetime.now(_ct_tz())
+    return get_policy().now_local()
 
 
 def is_quiet_hours_local() -> bool:
-    if not QUIET_HOURS_ENFORCED:
-        return False
-    h = central_now().hour
-    return (h >= QUIET_START_HOUR_LOCAL) or (h < QUIET_END_HOUR_LOCAL)
+    return get_policy().is_quiet()
 
 
 def _parse_iso_maybe_ct(s: Any) -> Optional[datetime]:
@@ -143,7 +157,8 @@ def _parse_iso_maybe_ct(s: Any) -> Optional[datetime]:
             return dt
         # date-only
         d = date.fromisoformat(text)
-        local_dt = datetime(d.year, d.month, d.day, max(9, QUIET_END_HOUR_LOCAL), 0, 0, tzinfo=_ct_tz())
+        end_hour = max(9, get_policy().quiet_end_hour)
+        local_dt = datetime(d.year, d.month, d.day, end_hour, 0, 0, tzinfo=_ct_tz())
         return local_dt.astimezone(timezone.utc)
     except Exception:
         return None
@@ -242,7 +257,7 @@ def _remaining_calc(f: dict) -> int:
     if isinstance(f.get("Remaining"), (int, float)):
         return int(f["Remaining"])
     sent = int(f.get("Sent Today") or 0)
-    daily_cap = int(f.get("Daily Reset") or os.getenv("DAILY_LIMIT", "750"))
+    daily_cap = int(f.get("Daily Reset") or daily_limit_default())
     return max(0, daily_cap - sent)
 
 
@@ -490,10 +505,15 @@ class LocalLimiter:
 
 def build_limiter() -> object:
     if REDIS_URL and redis:
-        return RedisLimiter(REDIS_URL, RATE_PER_NUMBER_PER_MIN, GLOBAL_RATE_PER_MIN)
+        return RedisLimiter(REDIS_URL, rate_per_number_per_min(), global_rate_per_min())
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and requests:
-        return UpstashRestLimiter(UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, RATE_PER_NUMBER_PER_MIN, GLOBAL_RATE_PER_MIN)
-    return LocalLimiter(RATE_PER_NUMBER_PER_MIN, GLOBAL_RATE_PER_MIN)
+        return UpstashRestLimiter(
+            UPSTASH_REDIS_REST_URL,
+            UPSTASH_REDIS_REST_TOKEN,
+            rate_per_number_per_min(),
+            global_rate_per_min(),
+        )
+    return LocalLimiter(rate_per_number_per_min(), global_rate_per_min())
 
 
 # =========================

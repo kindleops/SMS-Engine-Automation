@@ -10,6 +10,11 @@ import traceback
 from typing import Any, Dict, Optional, Tuple, Iterable, Callable
 from datetime import datetime, timezone, timedelta
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - Python <3.9
+    ZoneInfo = None  # type: ignore
+
 # --- Project config / tables ---
 from sms.config import (
     settings,
@@ -38,6 +43,8 @@ try:
     from sms import templates as local_templates
 except Exception:
     local_templates = None  # type: ignore
+
+from sms.dispatcher import get_policy
 
 
 # =========================
@@ -186,43 +193,51 @@ def _safe_update(table, rec_id: str, payload: Dict) -> Optional[Dict]:
 # =========================
 
 def _is_quiet_hours(now_utc: datetime) -> tuple[bool, Optional[datetime]]:
+    """Determine whether autoresponder should defer due to quiet hours.
+
+    The dispatcher policy is the source of truth.  Settings overrides are still
+    honoured for backwards compatibility, but the defaults come from
+    :func:`sms.dispatcher.get_policy`.
     """
-    Reads any of these from settings():
-      QUIET_ENABLED: bool
-      QUIET_START_HOUR: int (0..23)  local hour
-      QUIET_END_HOUR:   int (0..23)  local hour
-      QUIET_TZ_OFFSET:  int (minutes offset from UTC), e.g. -300 for US Central
-    If disabled or incomplete, returns (False, None).
-    """
-    enabled = bool(_get_setting("QUIET_ENABLED", False))
+
+    policy = get_policy()
+    enabled = bool(_get_setting("QUIET_ENABLED", policy.quiet_enforced))
     if not enabled:
         return False, None
 
-    start_h = _get_setting("QUIET_START_HOUR", None)
-    end_h   = _get_setting("QUIET_END_HOUR", None)
-    tz_off  = int(_get_setting("QUIET_TZ_OFFSET", 0))
+    start_h = int(_get_setting("QUIET_START_HOUR", policy.quiet_start_hour))
+    end_h = int(_get_setting("QUIET_END_HOUR", policy.quiet_end_hour))
 
-    if start_h is None or end_h is None:
-        return False, None
+    tz_name = _get_setting("QUIET_TZ", None)
+    tz_offset = _get_setting("QUIET_TZ_OFFSET", None)
+    tz = None
+    if tz_name and ZoneInfo:
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = None
+    if tz is None and policy.quiet_tz:
+        tz = policy.quiet_tz
+    if tz is None and tz_offset is not None:
+        try:
+            tz = timezone(timedelta(minutes=int(tz_offset)))
+        except Exception:
+            tz = None
+    if tz is None:
+        tz = timezone.utc
 
-    # Convert UTC now → local
-    local_now = now_utc + timedelta(minutes=tz_off)
-    start = local_now.replace(hour=int(start_h), minute=0, second=0, microsecond=0)
-    end   = local_now.replace(hour=int(end_h), minute=0, second=0, microsecond=0)
+    local_now = now_utc.astimezone(tz)
+    start = local_now.replace(hour=start_h, minute=0, second=0, microsecond=0)
+    end = local_now.replace(hour=end_h, minute=0, second=0, microsecond=0)
 
-    def _to_utc(dt_local: datetime) -> datetime:
-        return dt_local - timedelta(minutes=tz_off)
-
-    # Quiet window can cross midnight
     if start <= end:
         in_quiet = start <= local_now < end
-        next_allowed = end if in_quiet else local_now
+        next_allowed_local = end if in_quiet else local_now
     else:
-        # e.g. 21:00 → 08:00
         in_quiet = not (end <= local_now < start)
-        next_allowed = (end if local_now < end else end + timedelta(days=1)) if in_quiet else local_now
+        next_allowed_local = (end if local_now < end else end + timedelta(days=1)) if in_quiet else local_now
 
-    next_allowed_utc = _to_utc(next_allowed)
+    next_allowed_utc = next_allowed_local.astimezone(timezone.utc)
     return in_quiet, next_allowed_utc
 
 

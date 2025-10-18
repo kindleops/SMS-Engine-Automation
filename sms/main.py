@@ -8,6 +8,8 @@ from typing import Optional, Dict, Any
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from dotenv import load_dotenv
 
+from sms.dispatcher import get_policy
+
 # ───────────────────────────── Load .env ─────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
@@ -123,9 +125,10 @@ TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
 STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
 
 # Quiet hours (Central Time)
-QUIET_HOURS_ENFORCED = os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in ("1", "true", "yes")
-QUIET_START = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))   # 9p
-QUIET_END   = int(os.getenv("QUIET_END_HOUR_LOCAL",   "9"))    # 9a
+_POLICY = get_policy()
+QUIET_HOURS_ENFORCED = os.getenv("QUIET_HOURS_ENFORCED", "true" if _POLICY.quiet_enforced else "false").lower() in ("1", "true", "yes")
+QUIET_START = int(os.getenv("QUIET_START_HOUR_LOCAL", str(_POLICY.quiet_start_hour)))   # 9p
+QUIET_END   = int(os.getenv("QUIET_END_HOUR_LOCAL",   str(_POLICY.quiet_end_hour)))    # 9a
 ALLOW_QUEUE_OUTSIDE_HOURS = os.getenv("ALLOW_QUEUE_OUTSIDE_HOURS", "true").lower() in ("1", "true", "yes")
 AUTORESPONDER_ALWAYS_ON   = os.getenv("AUTORESPONDER_ALWAYS_ON",   "true").lower() in ("1", "true", "yes")
 
@@ -195,6 +198,8 @@ except Exception:
     ZoneInfo = None  # py>=3.9 should have this
 
 def central_now():
+    if _POLICY.quiet_tz:
+        return datetime.now(_POLICY.quiet_tz)
     if ZoneInfo:
         return datetime.now(ZoneInfo("America/Chicago"))
     return datetime.now(timezone.utc)

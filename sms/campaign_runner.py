@@ -51,6 +51,12 @@ try:
 except Exception:
     def update_metrics(*args, **kwargs): return {"ok": True}
 
+from sms.dispatcher import get_policy
+
+
+def _policy():
+    return get_policy()
+
 # ─────────────────────────────────────────────────────────────
 # ENV / CONFIG
 # ─────────────────────────────────────────────────────────────
@@ -67,16 +73,27 @@ DRIP_QUEUE_TABLE = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 NUMBERS_TABLE    = os.getenv("NUMBERS_TABLE", "Numbers")
 
 # rate & pacing
-MESSAGES_PER_MIN = max(1, int(os.getenv("MESSAGES_PER_MIN", "20")))
+_policy_defaults = _policy()
+MESSAGES_PER_MIN = max(1, int(os.getenv("MESSAGES_PER_MIN", str(_policy_defaults.global_rate_per_min))))
 SECONDS_PER_MSG  = max(1, int(math.ceil(60.0 / MESSAGES_PER_MIN)))
-JITTER_SECONDS   = max(0, int(os.getenv("JITTER_SECONDS", "2")))
+JITTER_SECONDS   = max(0, int(os.getenv("JITTER_SECONDS", str(_policy_defaults.jitter_seconds))))
 
-RATE_PER_NUMBER_PER_MIN = max(1, int(os.getenv("RATE_PER_NUMBER_PER_MIN", os.getenv("RATE_MAX_PER_NUMBER_PER_MIN", "20"))))
+RATE_PER_NUMBER_PER_MIN = max(1, int(os.getenv("RATE_PER_NUMBER_PER_MIN", str(_policy_defaults.rate_per_number_per_min))))
 SECONDS_PER_NUMBER_MSG  = max(1, int(math.ceil(60.0 / RATE_PER_NUMBER_PER_MIN)))
 
-QUIET_TZ          = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago"))
-QUIET_START_HOUR  = int(os.getenv("QUIET_START_HOUR", os.getenv("QUIET_START_HOUR_LOCAL", "21")))
-QUIET_END_HOUR    = int(os.getenv("QUIET_END_HOUR",   os.getenv("QUIET_END_HOUR_LOCAL",   "9")))
+QUIET_TZ          = _policy_defaults.quiet_tz or ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago"))
+QUIET_START_HOUR  = int(
+    os.getenv(
+        "QUIET_START_HOUR",
+        os.getenv("QUIET_START_HOUR_LOCAL", str(_policy_defaults.quiet_start_hour)),
+    )
+)
+QUIET_END_HOUR    = int(
+    os.getenv(
+        "QUIET_END_HOUR",
+        os.getenv("QUIET_END_HOUR_LOCAL", str(_policy_defaults.quiet_end_hour)),
+    )
+)
 
 RUNNER_SEND_AFTER_QUEUE   = os.getenv("RUNNER_SEND_AFTER_QUEUE", "true").lower() in ("1","true","yes")
 ALLOW_QUEUE_OUTSIDE_HOURS = os.getenv("ALLOW_QUEUE_OUTSIDE_HOURS", "true").lower() in ("1","true","yes")
@@ -84,7 +101,7 @@ PREQUEUE_MINUTES_DEFAULT  = int(os.getenv("PREQUEUE_MINUTES_DEFAULT", "30"))
 PREQUEUE_BEFORE_START     = True   # always allow prequeue window when we’re inside it
 STRICT_CAMPAIGN_ELIGIBILITY = os.getenv("STRICT_CAMPAIGN_ELIGIBILITY", "true").lower() in ("1","true","yes")
 DEDUPE_HOURS              = int(os.getenv("DEDUPE_HOURS", "72"))
-DAILY_LIMIT_FALLBACK      = int(os.getenv("DAILY_LIMIT", "750"))
+DAILY_LIMIT_FALLBACK      = int(os.getenv("DAILY_LIMIT", str(_policy_defaults.daily_limit)))
 DEBUG_CAMPAIGNS           = os.getenv("DEBUG_CAMPAIGNS", "false").lower() in ("1","true","yes")
 
 # manual control field names

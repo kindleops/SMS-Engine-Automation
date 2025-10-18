@@ -5,17 +5,13 @@ import os
 import traceback
 import time
 from typing import Any, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 
 try:
     from zoneinfo import ZoneInfo
 except Exception:
     ZoneInfo = None
-
-# Runners
-from sms.campaign_runner import run_campaigns
-from sms.autoresponder import run_autoresponder
-from sms.retry_runner import run_retry
 
 # Optional: followups (if present)
 try:
@@ -26,22 +22,108 @@ except Exception:
     _HAS_FOLLOWUPS = False
 
 # -----------------------
-# Quiet hours (Outbound)
+# Policy configuration
 # -----------------------
-QUIET_TZ = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago")) if ZoneInfo else None
-QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", "21"))  # 9pm local
-QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", "9"))  # 9am local
 
 
-def _central_now() -> datetime:
-    if QUIET_TZ:
-        return datetime.now(QUIET_TZ)
-    return datetime.utcnow()
+@dataclass(frozen=True)
+class DispatchPolicy:
+    """Authoritative policy for quiet hours, rate limits, retries, and jitter.
+
+    README2.md establishes these as canonical across the project.  Modules should
+    fetch configuration from this policy instead of re-reading environment
+    variables so that adjustments can be made in one place.
+    """
+
+    quiet_tz: Optional[ZoneInfo]
+    quiet_start_hour: int
+    quiet_end_hour: int
+    quiet_enforced: bool
+    rate_per_number_per_min: int
+    global_rate_per_min: int
+    daily_limit: int
+    jitter_seconds: int
+    send_batch_limit: int
+    retry_limit: int
+
+    @classmethod
+    def load_from_env(cls) -> "DispatchPolicy":
+        tz = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago")) if ZoneInfo else None
+        return cls(
+            quiet_tz=tz,
+            quiet_start_hour=int(os.getenv("QUIET_START_HOUR_LOCAL", os.getenv("QUIET_START_HOUR", "21"))),
+            quiet_end_hour=int(os.getenv("QUIET_END_HOUR_LOCAL", os.getenv("QUIET_END_HOUR", "9"))),
+            quiet_enforced=os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in ("1", "true", "yes"),
+            rate_per_number_per_min=int(os.getenv("RATE_PER_NUMBER_PER_MIN", "20")),
+            global_rate_per_min=int(os.getenv("GLOBAL_RATE_PER_MIN", "5000")),
+            daily_limit=int(os.getenv("DAILY_LIMIT", "750")),
+            jitter_seconds=int(os.getenv("JITTER_SECONDS", os.getenv("SEND_JITTER_SECONDS", "2"))),
+            send_batch_limit=int(os.getenv("SEND_BATCH_LIMIT", "500")),
+            retry_limit=int(os.getenv("RETRY_LIMIT", os.getenv("MAX_RETRIES", "3"))),
+        )
+
+    # ---- Quiet hours -------------------------------------------------
+    def now_local(self) -> datetime:
+        if self.quiet_tz:
+            return datetime.now(self.quiet_tz)
+        return datetime.now(timezone.utc)
+
+    def is_quiet(self, when: Optional[datetime] = None) -> bool:
+        if not self.quiet_enforced:
+            return False
+        ref = when or self.now_local()
+        hour = ref.hour
+        return (hour >= self.quiet_start_hour) or (hour < self.quiet_end_hour)
+
+    def next_quiet_end(self, when: Optional[datetime] = None) -> Optional[datetime]:
+        if not self.quiet_enforced:
+            return None
+        ref = when or self.now_local()
+        if not self.is_quiet(ref):
+            return ref
+        end_hour = self.quiet_end_hour
+        local = ref.replace(minute=0, second=0, microsecond=0)
+        if ref.hour < end_hour:
+            local = local.replace(hour=end_hour)
+        else:
+            local = (local + timedelta(days=1)).replace(hour=end_hour)
+        return local
+
+    # ---- Rate limit helpers -----------------------------------------
+    def rate_limits(self) -> Dict[str, int]:
+        return {
+            "per_number_per_min": self.rate_per_number_per_min,
+            "global_per_min": self.global_rate_per_min,
+            "daily_limit": self.daily_limit,
+        }
+
+    def jitter(self) -> int:
+        return self.jitter_seconds
+
+    def retry_budget(self) -> int:
+        return self.retry_limit
+
+
+_POLICY = DispatchPolicy.load_from_env()
+
+
+def refresh_policy() -> DispatchPolicy:
+    """Reload the dispatch policy from environment.
+
+    Useful for tests that patch environment variables.
+    """
+
+    global _POLICY
+    _POLICY = DispatchPolicy.load_from_env()
+    return _POLICY
+
+
+def get_policy() -> DispatchPolicy:
+    return _POLICY
 
 
 def _is_quiet_hours_outbound() -> bool:
-    h = _central_now().hour
-    return (h >= QUIET_START_HOUR) or (h < QUIET_END_HOUR)
+    return get_policy().is_quiet()
 
 
 # -----------------------
@@ -115,7 +197,7 @@ def run_engine(mode: str, **kwargs) -> dict:
 
             # Pass through limit; default to processing all
             limit = kwargs.get("limit", "ALL")
-            result = run_campaigns(limit=limit, send_after_queue=send_after_queue)
+            result = _get_run_campaigns()(limit=limit, send_after_queue=send_after_queue)
 
             sums = _summarize_prospect_result(result)
             return _std_envelope(
@@ -131,7 +213,7 @@ def run_engine(mode: str, **kwargs) -> dict:
 
         elif mode == "leads":
             retry_limit = _safe_int(kwargs.get("retry_limit", 100), 100)
-            retry_result = run_retry(limit=retry_limit)
+            retry_result = _get_run_retry()(limit=retry_limit)
 
             # Optionally run follow-ups if available
             followups: Dict[str, Any] = {}
@@ -153,7 +235,7 @@ def run_engine(mode: str, **kwargs) -> dict:
         elif mode == "inbounds":
             limit = _safe_int(kwargs.get("limit", 50), 50)
             view = kwargs.get("view", "Unprocessed Inbounds")
-            result = run_autoresponder(limit=limit, view=view)
+            result = _get_run_autoresponder()(limit=limit, view=view)
 
             payload = {
                 "result": result,
@@ -192,3 +274,19 @@ if __name__ == "__main__":
     print(run_engine("prospects", limit=10))
     print(run_engine("leads", retry_limit=50))
     print(run_engine("inbounds", limit=10))
+def _get_run_campaigns():
+    from sms.campaign_runner import run_campaigns as _run_campaigns
+
+    return _run_campaigns
+
+
+def _get_run_autoresponder():
+    from sms.autoresponder import run_autoresponder as _run_autoresponder
+
+    return _run_autoresponder
+
+
+def _get_run_retry():
+    from sms.retry_runner import run_retry as _run_retry
+
+    return _run_retry
