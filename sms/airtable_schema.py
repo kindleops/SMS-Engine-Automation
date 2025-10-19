@@ -2693,3 +2693,272 @@ def kpi_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
         definition = KPIS_TABLE_DEF.fields[key]
         results[key] = definition.candidates()
     return results
+
+
+# ---------------------------------------------------------------------------
+# DevOps — Services table (DevOps Command base)
+# ---------------------------------------------------------------------------
+
+
+class ServiceStatus(str, Enum):
+    HEALTHY = "Healthy"
+    WARNING = "Warning"
+    DOWN = "Down"
+    DEPLOYING = "Deploying"
+
+
+class ServiceCategory(str, Enum):
+    BACKEND = "Backend"
+    INFRASTRUCTURE = "Infrastructure"
+    FRONTEND = "Frontend"
+    MONITORING = "Monitoring"
+    DATABASE = "Database"
+    AUTOMATION = "Automation"
+
+
+DEVOPS_SERVICES_TABLE = TableDefinition(
+    default="Services",
+    env_vars=("DEVOPS_SERVICES_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Service Name",
+            env_vars=("DEVOPS_SERVICE_PRIMARY_FIELD",),
+            fallbacks=("Service Name", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("DEVOPS_SERVICE_NAME_FIELD",),
+            fallbacks=("name",),
+        ),
+        "STATUS": FieldDefinition(
+            default="Status",
+            env_vars=("DEVOPS_SERVICE_STATUS_FIELD",),
+            options=tuple(status.value for status in ServiceStatus),
+            fallbacks=("status",),
+        ),
+        "CATEGORY": FieldDefinition(
+            default="Category",
+            env_vars=("DEVOPS_SERVICE_CATEGORY_FIELD",),
+            options=tuple(cat.value for cat in ServiceCategory),
+            fallbacks=("category",),
+        ),
+        "RENDER_SERVICE_ID": FieldDefinition(
+            default="Render Service ID",
+            env_vars=("DEVOPS_RENDER_SERVICE_ID_FIELD",),
+            fallbacks=("render_service_id",),
+        ),
+        "DEPLOYED_VERSION": FieldDefinition(
+            default="Deployed Version",
+            env_vars=("DEVOPS_DEPLOYED_VERSION_FIELD",),
+            fallbacks=("deployed_version",),
+        ),
+        "API_HOST": FieldDefinition(
+            default="API URL / Host",
+            env_vars=("DEVOPS_API_HOST_FIELD",),
+            fallbacks=("api_url", "host"),
+        ),
+        "TOTAL_DEPLOYS": FieldDefinition(
+            default="Total Deployments (30d)",
+            env_vars=("DEVOPS_TOTAL_DEPLOYS_FIELD",),
+            fallbacks=("total_deployments_30d",),
+        ),
+        "RECENT_LOG_SEVERITY": FieldDefinition(
+            default="Recent Log Severity",
+            env_vars=("DEVOPS_RECENT_LOG_SEVERITY_FIELD",),
+            fallbacks=("recent_log_severity",),
+        ),
+        "LAST_DEPLOYMENT": FieldDefinition(
+            default="Last Deployment Date",
+            env_vars=("DEVOPS_LAST_DEPLOYMENT_FIELD",),
+            fallbacks=("last_deployment_date",),
+        ),
+        "FAILED_DEPLOYS": FieldDefinition(
+            default="Failed Deployments (30d)",
+            env_vars=("DEVOPS_FAILED_DEPLOYS_FIELD",),
+            fallbacks=("failed_deployments_30d",),
+        ),
+        "AVG_DEPLOY_DURATION": FieldDefinition(
+            default="Avg Deployment Duration (sec, 30d)",
+            env_vars=("DEVOPS_DEPLOY_DURATION_FIELD",),
+            fallbacks=("avg_deployment_duration_30d",),
+        ),
+        "UPTIME": FieldDefinition(
+            default="Uptime % (30d)",
+            env_vars=("DEVOPS_UPTIME_FIELD",),
+            fallbacks=("uptime_30d",),
+        ),
+        "SERVICE_HEALTH_SUMMARY": FieldDefinition(
+            default="Service Health Summary (AI)",
+            env_vars=("DEVOPS_SERVICE_HEALTH_FIELD",),
+            fallbacks=("service_health_summary",),
+        ),
+        "DOCUMENTATION": FieldDefinition(
+            default="Documentation QA Bot (AI)",
+            env_vars=("DEVOPS_DOCUMENTATION_BOT_FIELD",),
+            fallbacks=("documentation_ai",),
+        ),
+        "DESCRIPTION": FieldDefinition(
+            default="Description",
+            env_vars=("DEVOPS_SERVICE_DESCRIPTION_FIELD",),
+            fallbacks=("description",),
+        ),
+        "LAST_PING": FieldDefinition(
+            default="Last Ping",
+            env_vars=("DEVOPS_LAST_PING_FIELD",),
+            fallbacks=("last_ping",),
+        ),
+        "DOCUMENTATION_NOTE": FieldDefinition(
+            default="Documentation Note",
+            env_vars=("DEVOPS_DOCUMENTATION_NOTE_FIELD",),
+            fallbacks=("documentation_note",),
+        ),
+    },
+)
+
+
+def devops_services_field_map() -> Dict[str, str]:
+    fields = DEVOPS_SERVICES_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def devops_services_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = DEVOPS_SERVICES_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# DevOps — Deployments table
+# ---------------------------------------------------------------------------
+
+
+class DeploymentEnvironment(str, Enum):
+    DEV = "Dev"
+    STAGING = "Staging"
+    PROD = "Prod"
+
+
+class DeploymentStatus(str, Enum):
+    SUCCESS = "Success"
+    FAILED = "Failed"
+    PENDING = "Pending"
+
+
+DEVOPS_DEPLOYMENTS_TABLE = TableDefinition(
+    default="Deployments",
+    env_vars=("DEVOPS_DEPLOYMENTS_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Git Commit Hash",
+            env_vars=("DEVOPS_DEPLOY_PRIMARY_FIELD",),
+            fallbacks=("Git Commit Hash", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("DEVOPS_DEPLOY_NAME_FIELD",),
+            fallbacks=("name",),
+        ),
+        "ENVIRONMENT": FieldDefinition(
+            default="Environment",
+            env_vars=("DEVOPS_DEPLOY_ENV_FIELD",),
+            options=tuple(env.value for env in DeploymentEnvironment),
+            fallbacks=("environment",),
+        ),
+        "STATUS": FieldDefinition(
+            default="Deployment Status",
+            env_vars=("DEVOPS_DEPLOY_STATUS_FIELD",),
+            options=tuple(status.value for status in DeploymentStatus),
+            fallbacks=("deployment_status",),
+        ),
+        "TRIGGERED_BY": FieldDefinition(
+            default="Triggered By",
+            env_vars=("DEVOPS_DEPLOY_TRIGGER_FIELD",),
+            fallbacks=("triggered_by",),
+        ),
+        "LOG_URL": FieldDefinition(
+            default="Deployment Log URL",
+            env_vars=("DEVOPS_DEPLOY_LOG_URL_FIELD",),
+            fallbacks=("deployment_log_url",),
+        ),
+        "COMMIT_MESSAGE": FieldDefinition(
+            default="Commit Message",
+            env_vars=("DEVOPS_DEPLOY_COMMIT_MESSAGE_FIELD",),
+            fallbacks=("commit_message",),
+        ),
+        "GITHUB_CHECK": FieldDefinition(
+            default="Git Commit Health",
+            env_vars=("DEVOPS_DEPLOY_GITHUB_HEALTH_FIELD",),
+            fallbacks=("git_commit_health",),
+        ),
+        "DURATION_SEC": FieldDefinition(
+            default="Deployment Duration (sec)",
+            env_vars=("DEVOPS_DEPLOY_DURATION_FIELD",),
+            fallbacks=("deployment_duration_sec",),
+        ),
+        "SERVICE_STATUS": FieldDefinition(
+            default="Service Status at Deployment",
+            env_vars=("DEVOPS_DEPLOY_SERVICE_STATUS_FIELD",),
+            fallbacks=("service_status_deployment",),
+        ),
+        "SERVICE_CATEGORY": FieldDefinition(
+            default="Service Category",
+            env_vars=("DEVOPS_DEPLOY_SERVICE_CATEGORY_FIELD",),
+            fallbacks=("service_category",),
+        ),
+        "ERROR_MESSAGE": FieldDefinition(
+            default="Error Message",
+            env_vars=("DEVOPS_DEPLOY_ERROR_MESSAGE_FIELD",),
+            fallbacks=("error_message",),
+        ),
+        "SUMMARY_AI": FieldDefinition(
+            default="Deployment Summary (AI)",
+            env_vars=("DEVOPS_DEPLOY_SUMMARY_FIELD",),
+            fallbacks=("deployment_summary_ai",),
+        ),
+        "INCIDENT_AI": FieldDefinition(
+            default="Deployment Incident Analysis (AI)",
+            env_vars=("DEVOPS_DEPLOY_INCIDENT_FIELD",),
+            fallbacks=("deployment_incident_analysis",),
+        ),
+        "SERVICE_LINK": FieldDefinition(
+            default="Service",
+            env_vars=("DEVOPS_DEPLOY_SERVICE_LINK_FIELD",),
+            fallbacks=("Service",),
+        ),
+        "DURATION_MIN": FieldDefinition(
+            default="Deployment Duration (min)",
+            env_vars=("DEVOPS_DEPLOY_DURATION_MIN_FIELD",),
+            fallbacks=("deployment_duration_min",),
+        ),
+        "DAYS_SINCE": FieldDefinition(
+            default="Days Since Deployment",
+            env_vars=("DEVOPS_DEPLOY_DAYS_SINCE_FIELD",),
+            fallbacks=("days_since_deployment",),
+        ),
+        "DEPLOYMENT_DATE": FieldDefinition(
+            default="Deployment Date",
+            env_vars=("DEVOPS_DEPLOY_DATE_FIELD",),
+            fallbacks=("deployment_date",),
+        ),
+        "AUTO_ROLLBACK": FieldDefinition(
+            default="Auto Rollback Enabled",
+            env_vars=("DEVOPS_DEPLOY_ROLLBACK_FIELD",),
+            fallbacks=("auto_rollback_enabled",),
+        ),
+    },
+)
+
+
+def devops_deployments_field_map() -> Dict[str, str]:
+    fields = DEVOPS_DEPLOYMENTS_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def devops_deployments_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = DEVOPS_DEPLOYMENTS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
