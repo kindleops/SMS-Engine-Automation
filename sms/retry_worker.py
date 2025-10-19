@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from typing import Optional, Dict, Any, List
 
+from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS
+
 # ----------------- optional send backends -----------------
 try:
     from sms.message_processor import MessageProcessor as _MP  # preferred (logs, DRY)
@@ -58,16 +60,16 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
 
 # Field mapping (safe defaults, all env-driven)
-PHONE_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
-MESSAGE_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIRECTION_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
+PHONE_FIELD = CONV_FIELDS["FROM"]
+MESSAGE_FIELD = CONV_FIELDS["BODY"]
+STATUS_FIELD = CONV_FIELDS["STATUS"]
+DIRECTION_FIELD = CONV_FIELDS["DIRECTION"]
 
-RETRY_COUNT_FIELD = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
-RETRY_AFTER_FIELD = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
-RETRIED_AT_FIELD = os.getenv("CONV_RETRIED_AT_FIELD", "retried_at")
-LAST_ERROR_FIELD = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
-PERMANENT_FAIL_FIELD = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
+RETRY_COUNT_FIELD = CONVERSATIONS_FIELDS.get("RETRY_COUNT", "retry_count")
+RETRY_AFTER_FIELD = CONVERSATIONS_FIELDS.get("RETRY_AFTER", "retry_after")
+RETRIED_AT_FIELD = CONVERSATIONS_FIELDS.get("LAST_RETRY_AT", "retried_at")
+LAST_ERROR_FIELD = CONVERSATIONS_FIELDS.get("LAST_ERROR", "last_retry_error")
+PERMANENT_FAIL_FIELD = CONVERSATIONS_FIELDS.get("PERMANENT_FAIL", "permanent_fail_reason")
 
 FAILED_STATES = {"FAILED", "DELIVERY_FAILED", "UNDELIVERED", "UNDELIVERABLE", "THROTTLED", "NEEDS_RETRY"}
 
@@ -129,7 +131,7 @@ def _remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
 def _is_retryable(f: Dict[str, Any]) -> bool:
     # OUT direction
     direction = str(f.get(DIRECTION_FIELD) or f.get("Direction") or "").strip().upper()
-    if direction != "OUT":
+    if direction not in ("OUT", "OUTBOUND"):
         return False
     # Status must be one of failed/retryable
     status = str(f.get(STATUS_FIELD) or f.get("Status") or "").strip().upper()

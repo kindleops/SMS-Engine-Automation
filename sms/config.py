@@ -7,6 +7,25 @@ from functools import lru_cache
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 
+from sms.airtable_schema import (
+    CONVERSATIONS_TABLE,
+    LEADS_TABLE,
+    CAMPAIGNS_TABLE,
+    DRIP_QUEUE_TABLE,
+    TEMPLATES_TABLE,
+    PROSPECTS_TABLE,
+    DEALS_TABLE,
+    CAMPAIGN_MANAGER_TABLE,
+    conversations_field_map,
+    leads_field_map,
+    campaign_field_map,
+    drip_field_map,
+    template_field_map,
+    prospects_field_map,
+    deals_field_map,
+    campaign_manager_field_map,
+)
+
 # .env loader (safe if missing)
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -58,19 +77,37 @@ def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
 # -----------------------------
 # Static field name maps
 # -----------------------------
-CONV_FIELDS = {
-    "FROM": env_str("CONV_FROM_FIELD", "phone"),
-    "TO": env_str("CONV_TO_FIELD", "to_number"),
-    "BODY": env_str("CONV_MESSAGE_FIELD", "message"),
-    "STATUS": env_str("CONV_STATUS_FIELD", "status"),
-    "DIRECTION": env_str("CONV_DIRECTION_FIELD", "direction"),
-    "TEXTGRID_ID": env_str("CONV_TEXTGRID_ID_FIELD", "TextGrid ID"),
-    "RECEIVED_AT": env_str("CONV_RECEIVED_AT_FIELD", "received_at"),
-    "INTENT": env_str("CONV_INTENT_FIELD", "intent_detected"),
-    "PROCESSED_BY": env_str("CONV_PROCESSED_BY_FIELD", "processed_by"),
-    "SENT_AT": env_str("CONV_SENT_AT_FIELD", "sent_at"),
-}
+CONVERSATIONS_FIELDS = CONVERSATIONS_TABLE.field_names()
+CONVERSATIONS_FIELD_CANDIDATES = CONVERSATIONS_TABLE.field_candidates()
+CONV_FIELDS = conversations_field_map()
 
+LEADS_FIELDS = LEADS_TABLE.field_names()
+LEADS_FIELD_CANDIDATES = LEADS_TABLE.field_candidates()
+LEAD_FIELDS = leads_field_map()
+
+CAMPAIGN_FIELDS = CAMPAIGNS_TABLE.field_names()
+CAMPAIGN_FIELD_CANDIDATES = CAMPAIGNS_TABLE.field_candidates()
+CAMPAIGN_FIELD_MAP = campaign_field_map()
+
+DRIP_FIELDS = DRIP_QUEUE_TABLE.field_names()
+DRIP_FIELD_CANDIDATES = DRIP_QUEUE_TABLE.field_candidates()
+DRIP_FIELD_MAP = drip_field_map()
+
+TEMPLATE_FIELDS = TEMPLATES_TABLE.field_names()
+TEMPLATE_FIELD_CANDIDATES = TEMPLATES_TABLE.field_candidates()
+TEMPLATE_FIELD_MAP = template_field_map()
+
+PROSPECT_FIELDS = PROSPECTS_TABLE.field_names()
+PROSPECT_FIELD_CANDIDATES = PROSPECTS_TABLE.field_candidates()
+PROSPECT_FIELD_MAP = prospects_field_map()
+
+DEALS_FIELDS = DEALS_TABLE.field_names()
+DEALS_FIELD_CANDIDATES = DEALS_TABLE.field_candidates()
+DEALS_FIELD_MAP = deals_field_map()
+
+CAMPAIGN_MANAGER_FIELDS = CAMPAIGN_MANAGER_TABLE.field_names()
+CAMPAIGN_MANAGER_FIELD_CANDIDATES = CAMPAIGN_MANAGER_TABLE.field_candidates()
+CAMPAIGN_MANAGER_FIELD_MAP = campaign_manager_field_map()
 PHONE_FIELDS = [
     "phone",
     "Phone",
@@ -111,6 +148,8 @@ class Settings:
     TEMPLATES_TABLE: str
     DRIP_QUEUE_TABLE: str
     CAMPAIGNS_TABLE: str
+    CAMPAIGN_MANAGER_TABLE: str
+    DEALS_TABLE: str
 
     # Tables (control base)
     NUMBERS_TABLE: str
@@ -160,6 +199,8 @@ def settings() -> Settings:
         TEMPLATES_TABLE=env_str("TEMPLATES_TABLE", "Templates"),
         DRIP_QUEUE_TABLE=env_str("DRIP_QUEUE_TABLE", "Drip Queue"),
         CAMPAIGNS_TABLE=env_str("CAMPAIGNS_TABLE", "Campaigns"),
+        CAMPAIGN_MANAGER_TABLE=env_str("CAMPAIGN_MANAGER_TABLE", "Campaigns Manager"),
+        DEALS_TABLE=env_str("DEALS_TABLE", "Deals"),
         NUMBERS_TABLE=env_str("NUMBERS_TABLE", "Numbers"),
         DAILY_LIMIT_DEFAULT=env_int("DAILY_LIMIT", 750),
         RATE_PER_NUMBER_PER_MIN=env_int("RATE_PER_NUMBER_PER_MIN", 20),

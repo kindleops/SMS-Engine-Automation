@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 # Only executed if we actually call it (disabled in tests below)
 from sms.followup_flow import schedule_from_response
+from sms.airtable_schema import ConversationDirection, LeadStatus
 
 # --- Core project config (one source of truth) ---
 from sms.config import (
@@ -21,8 +22,35 @@ from sms.config import (
     drip_queue as drip_tbl,
     remap_existing_only,
     CONV_FIELDS,
+    LEAD_FIELDS,
+    LEADS_FIELDS,
+    TEMPLATE_FIELD_MAP as TEMPLATE_FIELDS,
+    PROSPECT_FIELD_MAP as PROSPECT_FIELDS,
     PHONE_FIELDS,
 )
+
+LEAD_STATUS_FIELD = LEAD_FIELDS["STATUS"]
+LEAD_LAST_ACTIVITY_FIELD = LEAD_FIELDS["LAST_ACTIVITY"]
+LEAD_LAST_DIRECTION_FIELD = LEAD_FIELDS["LAST_DIRECTION"]
+LEAD_LAST_MESSAGE_FIELD = LEAD_FIELDS["LAST_MESSAGE"]
+LEAD_SOURCE_FIELD = LEAD_FIELDS.get("SOURCE", "Source")
+LEAD_PHONE_FIELD = LEAD_FIELDS["PHONE"]
+TEMPLATE_INTERNAL_ID_FIELD = TEMPLATE_FIELDS["INTERNAL_ID"]
+TEMPLATE_MESSAGE_FIELD = TEMPLATE_FIELDS["MESSAGE"]
+PROSPECT_OWNER_NAME_FIELD = PROSPECT_FIELDS["OWNER_NAME"]
+PROSPECT_OWNER_FIRST_NAME_FIELD = PROSPECT_FIELDS["OWNER_FIRST_NAME"]
+PROSPECT_OWNER_LAST_NAME_FIELD = PROSPECT_FIELDS["OWNER_LAST_NAME"]
+PROSPECT_PROPERTY_ADDRESS_FIELD = PROSPECT_FIELDS["PROPERTY_ADDRESS"]
+PROSPECT_PHONE_PRIMARY_FIELD = PROSPECT_FIELDS["PHONE_PRIMARY"]
+PROSPECT_PHONE_PRIMARY_LINKED_FIELD = PROSPECT_FIELDS["PHONE_PRIMARY_LINKED"]
+PROSPECT_PHONE_PRIMARY_VERIFIED_FIELD = PROSPECT_FIELDS["PHONE_PRIMARY_VERIFIED"]
+PROSPECT_PHONE_SECONDARY_FIELD = PROSPECT_FIELDS["PHONE_SECONDARY"]
+PROSPECT_PHONE_SECONDARY_LINKED_FIELD = PROSPECT_FIELDS["PHONE_SECONDARY_LINKED"]
+PROSPECT_PHONE_SECONDARY_VERIFIED_FIELD = PROSPECT_FIELDS["PHONE_SECONDARY_VERIFIED"]
+PROSPECT_MARKET_FIELD = PROSPECT_FIELDS["MARKET"]
+PROSPECT_SYNC_SOURCE_FIELD = PROSPECT_FIELDS["SYNC_SOURCE"]
+PROSPECT_SOURCE_LIST_FIELD = PROSPECT_FIELDS["SOURCE_LIST"]
+PROSPECT_PROPERTY_TYPE_FIELD = PROSPECT_FIELDS["PROPERTY_TYPE"]
 
 # Local fallbacks / modules
 try:
@@ -77,16 +105,16 @@ def get_drip_queue():
 # Constants / Maps
 # -----------------
 FIELD_MAP = {
-    "phone": "phone",
-    "Property ID": "Property ID",
-    "Owner Name": "Owner Name",
-    "Owner First Name": "Owner First Name",
-    "Owner Last Name": "Owner Last Name",
-    "Property Address": "Address",
-    "Market": "Market",
-    "Synced From": "Sync Source",
-    "Source List": "List",
-    "Property Type": "Property Type",
+    PROSPECT_PHONE_PRIMARY_FIELD: LEAD_FIELDS["PHONE"],
+    PROSPECT_PROPERTY_ID_FIELD: LEAD_FIELDS["PROPERTY_ID"],
+    PROSPECT_OWNER_NAME_FIELD: LEADS_FIELDS.get("OWNER_NAME", "Owner Name"),
+    PROSPECT_OWNER_FIRST_NAME_FIELD: LEADS_FIELDS.get("OWNER_FIRST_NAME", "Owner First Name"),
+    PROSPECT_OWNER_LAST_NAME_FIELD: LEADS_FIELDS.get("OWNER_LAST_NAME", "Owner Last Name"),
+    PROSPECT_PROPERTY_ADDRESS_FIELD: LEADS_FIELDS.get("ADDRESS", "Address"),
+    PROSPECT_MARKET_FIELD: LEADS_FIELDS.get("MARKET", "Market"),
+    PROSPECT_SYNC_SOURCE_FIELD: LEADS_FIELDS.get("SYNC_SOURCE", "Sync Source"),
+    PROSPECT_SOURCE_LIST_FIELD: LEADS_FIELDS.get("LIST", "Source List"),
+    PROSPECT_PROPERTY_TYPE_FIELD: LEADS_FIELDS.get("PROPERTY_TYPE", "Property Type"),
 }
 
 STAGE_MAP = {
@@ -172,9 +200,17 @@ def _safe_update(table, rec_id: str, payload: Dict) -> Optional[Dict]:
 
 
 def _compose_personalization(pf: Dict[str, Any]) -> Dict[str, Any]:
-    full = pf.get("Owner Name") or f"{pf.get('Owner First Name', '') or ''} {pf.get('Owner Last Name', '') or ''}".strip()
+    full = (
+        pf.get(PROSPECT_OWNER_NAME_FIELD)
+        or f"{pf.get(PROSPECT_OWNER_FIRST_NAME_FIELD, '') or ''} {pf.get(PROSPECT_OWNER_LAST_NAME_FIELD, '') or ''}".strip()
+    )
     first = (full or "").split(" ")[0] if full else "there"
-    address = pf.get("Property Address") or pf.get("Address") or "your property"
+    address = (
+        pf.get(PROSPECT_PROPERTY_ADDRESS_FIELD)
+        or pf.get("Address")
+        or pf.get("Property Address")
+        or "your property"
+    )
     return {"First": first, "Address": address}
 
 
@@ -196,7 +232,14 @@ def _find_prospect_by_phone(phone: str) -> Optional[Dict]:
 
 
 def _first_from_fields(f: Dict[str, Any]) -> Optional[str]:
-    for k in ["Owner First Name", "First Name", "First", "Name", "Owner Name"]:
+    candidates = [
+        PROSPECT_OWNER_FIRST_NAME_FIELD,
+        "First Name",
+        "First",
+        PROSPECT_OWNER_NAME_FIELD,
+        "Name",
+    ]
+    for k in candidates:
         v = f.get(k)
         if isinstance(v, str) and v.strip():
             return v.split()[0]
@@ -204,14 +247,14 @@ def _first_from_fields(f: Dict[str, Any]) -> Optional[str]:
 
 
 def _pref_phone_from_fields(f: Dict[str, Any]) -> Optional[str]:
-    p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
-    p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
+    p1 = f.get(PROSPECT_PHONE_PRIMARY_FIELD) or f.get(PROSPECT_PHONE_PRIMARY_LINKED_FIELD)
+    p2 = f.get(PROSPECT_PHONE_SECONDARY_FIELD) or f.get(PROSPECT_PHONE_SECONDARY_LINKED_FIELD)
 
-    if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
+    if f.get(PROSPECT_PHONE_PRIMARY_VERIFIED_FIELD):
         d = _digits(p1)
         if d:
             return d
-    if f.get("Phone 2 Verified") or f.get("Phone 2 Ownership Verified"):
+    if f.get(PROSPECT_PHONE_SECONDARY_VERIFIED_FIELD):
         d = _digits(p2)
         if d:
             return d
@@ -273,13 +316,13 @@ def _choose_template(intent: str, fields: Dict[str, Any]) -> Tuple[str, Optional
             pool = []
             for r in rows:
                 tf = r.get("fields", {})
-                internal = (tf.get("Internal ID") or tf.get("intent") or "").strip().lower()
+                internal = (tf.get(TEMPLATE_INTERNAL_ID_FIELD) or tf.get("intent") or "").strip().lower()
                 if internal == intent:
                     pool.append(r)
             if pool:
                 chosen = random.choice(pool)
                 tid = chosen["id"]
-                raw = chosen["fields"].get("Message") or ""
+                raw = (chosen.get("fields", {}) or {}).get(TEMPLATE_MESSAGE_FIELD) or ""
                 first = fields.get("First") or _first_from_fields(fields) or "there"
                 addr = fields.get("Address") or fields.get("Property Address") or fields.get("Address") or "your property"
                 try:
@@ -324,9 +367,9 @@ def promote_to_lead(phone_number: str, source: str = "Autoresponder") -> Tuple[O
 
         new_row = {
             **fields,
-            "phone": phone_number,
-            "Lead Status": "New",
-            "Source": source,
+            LEAD_PHONE_FIELD: phone_number,
+            LEAD_STATUS_FIELD: LeadStatus.NEW.value,
+            LEAD_SOURCE_FIELD: source,
         }
         created = _safe_create(ltbl, new_row)
         if created:
@@ -343,15 +386,23 @@ def update_lead_activity(lead_id: str, body: str, direction: str, intent: Option
     if not (ltbl and lead_id):
         return
     try:
+        dir_key = (direction or "").replace("_", " ").strip().upper()
+        if dir_key in ("OUT", ConversationDirection.OUTBOUND.value):
+            canonical_direction = ConversationDirection.OUTBOUND.value
+        elif dir_key in ("IN", ConversationDirection.INBOUND.value):
+            canonical_direction = ConversationDirection.INBOUND.value
+        else:
+            canonical_direction = direction or ConversationDirection.OUTBOUND.value
+
         patch: Dict[str, Any] = {
-            "Last Activity": iso_timestamp(),
-            "Last Direction": direction,
-            "Last Message": (body or "")[:500],
+            LEAD_LAST_ACTIVITY_FIELD: iso_timestamp(),
+            LEAD_LAST_DIRECTION_FIELD: canonical_direction,
+            LEAD_LAST_MESSAGE_FIELD: (body or "")[:500],
         }
         if intent == "followup_yes":
-            patch["Lead Status"] = "Interested"
+            patch[LEAD_STATUS_FIELD] = "Interested"
         if intent == "optout":
-            patch["Lead Status"] = "DNC"
+            patch[LEAD_STATUS_FIELD] = "DNC"
         _safe_update(ltbl, lead_id, patch)
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")

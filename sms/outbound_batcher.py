@@ -9,6 +9,8 @@ import traceback
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
+from sms.airtable_schema import DripStatus
 # -------------------------------
 # pyairtable compatibility layer
 # -------------------------------
@@ -57,6 +59,26 @@ CAMPAIGNS_TABLE_NAME = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
 DRIP_QUEUE_TABLE = DRIP_TABLE_NAME
 NUMBERS_TABLE = NUMBERS_TABLE_NAME
 CAMPAIGNS_TABLE = CAMPAIGNS_TABLE_NAME
+
+DRIP_STATUS_FIELD = DRIP_FIELDS["STATUS"]
+DRIP_CAMPAIGN_FIELD = DRIP_FIELDS["CAMPAIGN_LINK"]
+DRIP_TEMPLATE_FIELD = DRIP_FIELDS["TEMPLATE_LINK"]
+DRIP_PROSPECT_FIELD = DRIP_FIELDS["PROSPECT_LINK"]
+DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS["SELLER_PHONE"]
+DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS["FROM_NUMBER"]
+DRIP_MARKET_FIELD = DRIP_FIELDS["MARKET"]
+DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS["MESSAGE_PREVIEW"]
+DRIP_PROPERTY_ID_FIELD = DRIP_FIELDS["PROPERTY_ID"]
+DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS["NEXT_SEND_DATE"]
+DRIP_NEXT_SEND_AT_FIELD = DRIP_FIELDS["NEXT_SEND_AT"]
+DRIP_NEXT_SEND_AT_UTC_FIELD = DRIP_FIELDS["NEXT_SEND_AT_UTC"]
+DRIP_UI_FIELD = DRIP_FIELDS["UI"]
+DRIP_LAST_SENT_FIELD = DRIP_FIELDS["LAST_SENT"]
+DRIP_SENT_AT_FIELD = DRIP_FIELDS["SENT_AT"]
+DRIP_SENT_FLAG_FIELD = DRIP_FIELDS["SENT_FLAG"]
+DRIP_FAILED_FLAG_FIELD = DRIP_FIELDS["FAILED_FLAG"]
+DRIP_DECLINED_FLAG_FIELD = DRIP_FIELDS["DECLINED_FLAG"]
+DRIP_LAST_ERROR_FIELD = DRIP_FIELDS["LAST_ERROR"]
 
 # Rate limits (enforced with Redis across all workers)
 RATE_PER_NUMBER_PER_MIN = int(os.getenv("RATE_PER_NUMBER_PER_MIN", "20"))
@@ -324,19 +346,21 @@ def _digits_only(s: Any) -> Optional[str]:
 
 
 STATUS_ICON = {
-    "QUEUED": "⏳",
-    "READY": "⏳",
-    "SENDING": "⏳",
-    "SENT": "✅",
-    "DELIVERED": "✅",
-    "FAILED": "❌",
-    "CANCELLED": "❌",
+    DripStatus.QUEUED.value: "⏳",
+    DripStatus.READY.value: "⏳",
+    DripStatus.SENDING.value: "⏳",
+    DripStatus.SENT.value: "✅",
+    DripStatus.DELIVERED.value: "✅",
+    DripStatus.FAILED.value: "❌",
+    DripStatus.RETRY.value: "🔄",
+    DripStatus.THROTTLED.value: "⏸",
+    DripStatus.DNC.value: "🚫",
 }
 
 
 def _set_ui(drip_tbl: Any, rec_id: str, status: str):
     try:
-        drip_tbl.update(rec_id, _remap_existing_only(drip_tbl, {"UI": STATUS_ICON.get(status, "")}))
+        drip_tbl.update(rec_id, _remap_existing_only(drip_tbl, {DRIP_UI_FIELD: STATUS_ICON.get(status, "")}))
     except Exception:
         traceback.print_exc()
 
@@ -523,15 +547,17 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     for r in rows:
         f = r.get("fields", {})
         if campaign_id:
-            cids = f.get("Campaign") or []
+            cids = f.get(DRIP_CAMPAIGN_FIELD) or []
             if not isinstance(cids, list):
                 cids = [cids]
             if campaign_id not in cids:
                 continue
-        status = str(f.get("status") or f.get("Status") or "")
-        if status not in ("QUEUED", "READY", "SENDING"):
+        status = str(f.get(DRIP_STATUS_FIELD) or "")
+        if status not in (DripStatus.QUEUED.value, DripStatus.READY.value, DripStatus.SENDING.value):
             continue
-        when = _parse_iso_maybe_ct(f.get("next_send_date") or f.get("Next Send Date") or f.get("scheduled_at")) or now
+        when = _parse_iso_maybe_ct(
+            f.get(DRIP_NEXT_SEND_DATE_FIELD) or f.get("scheduled_at")
+        ) or now
         if when <= now:
             due.append(r)
 
@@ -540,8 +566,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
 
     due.sort(
         key=lambda r: _parse_iso_maybe_ct(
-            r.get("fields", {}).get("next_send_date")
-            or r.get("fields", {}).get("Next Send Date")
+            r.get("fields", {}).get(DRIP_NEXT_SEND_DATE_FIELD)
             or r.get("fields", {}).get("scheduled_at")
         )
         or now
@@ -556,12 +581,12 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     for r in due:
         rid = r["id"]
         f = r.get("fields", {})
-        phone = f.get("phone") or f.get("Phone")
+        phone = f.get(DRIP_SELLER_PHONE_FIELD)
         if not phone:
             continue
 
-        did = f.get("from_number") or f.get("From Number")
-        market = f.get("Market")
+        did = f.get(DRIP_FROM_NUMBER_FIELD)
+        market = f.get(DRIP_MARKET_FIELD)
 
         # Backfill DID
         if not did and AUTO_BACKFILL_FROM_NUMBER:
@@ -577,7 +602,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             # push out a bit so we don't spin on it every loop
             try:
                 new_time = (utcnow() + timedelta(seconds=NO_NUMBER_REQUEUE_SECONDS)).isoformat()
-                drip.update(rid, _remap_existing_only(drip, {"next_send_date": new_time}))
+                drip.update(rid, _remap_existing_only(drip, {DRIP_NEXT_SEND_DATE_FIELD: new_time}))
             except Exception:
                 traceback.print_exc()
             continue
@@ -586,21 +611,25 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         if not limiter.try_consume(did):
             try:
                 new_time = (utcnow() + timedelta(seconds=RATE_LIMIT_REQUEUE_SECONDS)).isoformat()
-                drip.update(rid, _remap_existing_only(drip, {"next_send_date": new_time}))
+                drip.update(rid, _remap_existing_only(drip, {DRIP_NEXT_SEND_DATE_FIELD: new_time}))
             except Exception:
                 traceback.print_exc()
             continue
 
         # Mark SENDING + UI
         try:
-            drip.update(rid, _remap_existing_only(drip, {"status": "SENDING"}))
-            _set_ui(drip, rid, "SENDING")
+            drip.update(rid, _remap_existing_only(drip, {DRIP_STATUS_FIELD: DripStatus.SENDING.value}))
+            _set_ui(drip, rid, DripStatus.SENDING.value)
         except Exception:
             traceback.print_exc()
 
         # Compose + send
-        body = f.get("message_preview") or f.get("Message Preview") or f.get("message") or ""
-        property_id = f.get("Property ID")
+        body = (
+            f.get(DRIP_MESSAGE_PREVIEW_FIELD)
+            or f.get("message")
+            or ""
+        )
+        property_id = f.get(DRIP_PROPERTY_ID_FIELD)
 
         ok = False
         err_msg = None
@@ -642,12 +671,12 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
                     _remap_existing_only(
                         drip,
                         {
-                            "status": "SENT",
-                            "sent_at": utcnow().isoformat(),
+                            DRIP_STATUS_FIELD: DripStatus.SENT.value,
+                            DRIP_SENT_AT_FIELD: utcnow().isoformat(),
                         },
                     ),
                 )
-                _set_ui(drip, rid, "SENT")
+                _set_ui(drip, rid, DripStatus.SENT.value)
             except Exception:
                 traceback.print_exc()
         else:
@@ -660,12 +689,12 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
                     _remap_existing_only(
                         drip,
                         {
-                            "status": "FAILED",
-                            "last_error": (err_msg or "send_failed")[:500],
+                            DRIP_STATUS_FIELD: DripStatus.FAILED.value,
+                            DRIP_LAST_ERROR_FIELD: (err_msg or "send_failed")[:500],
                         },
                     ),
                 )
-                _set_ui(drip, rid, "FAILED")
+                _set_ui(drip, rid, DripStatus.FAILED.value)
             except Exception:
                 traceback.print_exc()
 

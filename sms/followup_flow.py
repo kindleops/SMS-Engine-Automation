@@ -15,6 +15,12 @@ try:
 except Exception:
     Table = None  # We’ll guard all usage
 
+from sms.config import (
+    DRIP_FIELD_MAP as DRIP_FIELDS,
+    TEMPLATE_FIELD_MAP as TEMPLATE_FIELDS,
+)
+from sms.airtable_schema import DripStatus
+
 # =========================
 # ENV / CONFIG
 # =========================
@@ -28,8 +34,27 @@ TEMPLATES_TABLE_NAME = os.getenv("TEMPLATES_TABLE", "Templates")
 # Local time zone for “naive CT” timestamps shown nicely in Airtable
 QUIET_TZ = ZoneInfo("America/Chicago") if ZoneInfo else None
 
+DRIP_STATUS_FIELD = DRIP_FIELDS["STATUS"]
+DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS["NEXT_SEND_DATE"]
+DRIP_UI_FIELD = DRIP_FIELDS["UI"]
+DRIP_STAGE_FIELD = DRIP_FIELDS["DRIP_STAGE"]
+DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS["MESSAGE_PREVIEW"]
+DRIP_TEMPLATE_FIELD = DRIP_FIELDS["TEMPLATE_LINK"]
+DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS["SELLER_PHONE"]
+DRIP_MARKET_FIELD = DRIP_FIELDS["MARKET"]
+DRIP_PROPERTY_ID_FIELD = DRIP_FIELDS["PROPERTY_ID"]
+TEMPLATE_INTERNAL_ID_FIELD = TEMPLATE_FIELDS["INTERNAL_ID"]
+TEMPLATE_MESSAGE_FIELD = TEMPLATE_FIELDS["MESSAGE"]
+
 # UI icons to match your app
-STATUS_ICON = {"QUEUED": "⏳", "READY": "⏳", "SENDING": "🔄", "SENT": "✅", "DELIVERED": "✅", "FAILED": "❌", "CANCELLED": "❌"}
+STATUS_ICON = {
+    DripStatus.QUEUED.value: "⏳",
+    DripStatus.READY.value: "⏳",
+    DripStatus.SENDING.value: "🔄",
+    DripStatus.SENT.value: "✅",
+    DripStatus.DELIVERED.value: "✅",
+    DripStatus.FAILED.value: "❌",
+}
 
 # -------- Stages (lightweight state machine) --------
 # We keep human-readable string stages on Leads (and optionally on Drip rows).
@@ -207,13 +232,14 @@ def _template_by_key(key: Optional[str], row_fields: Dict[str, Any]) -> Tuple[st
             cands = []
             for r in rows:
                 f = r.get("fields", {})
-                internal = (f.get("Internal ID") or f.get("intent") or "").strip().lower()
+                internal = (f.get(TEMPLATE_INTERNAL_ID_FIELD) or f.get("intent") or "").strip().lower()
                 if internal == key.strip().lower():
                     cands.append(r)
             if cands:
                 chosen = random.choice(cands)
                 msg = (chosen.get("fields", {}) or {}).get("Message") or ""
-                return _personalize(msg, row_fields), chosen["id"]
+                raw = (chosen.get("fields", {}) or {}).get(TEMPLATE_MESSAGE_FIELD) or msg
+                return _personalize(raw, row_fields), chosen["id"]
         except Exception:
             traceback.print_exc()
     # fallback
@@ -234,12 +260,17 @@ def _already_queued_today(drip: Any, phone: str) -> bool:
         p10 = last10(phone)
         for r in drip.all():
             f = r.get("fields", {})
-            ph = f.get("phone") or f.get("Phone")
+            ph = f.get(DRIP_SELLER_PHONE_FIELD)
             if last10(ph) != p10:
                 continue
-            st = str(f.get("status") or f.get("Status") or "")
-            when = f.get("next_send_date") or f.get("Next Send Date") or ""
-            if st in ("QUEUED", "SENDING", "SENT", "DELIVERED"):
+            st = str(f.get(DRIP_STATUS_FIELD) or "")
+            when = f.get(DRIP_NEXT_SEND_DATE_FIELD) or ""
+            if st in (
+                DripStatus.QUEUED.value,
+                DripStatus.SENDING.value,
+                DripStatus.SENT.value,
+                "DELIVERED",
+            ):
                 if isinstance(when, str) and when.startswith(prefix):
                     return True
         return False
@@ -336,15 +367,15 @@ def schedule_from_response(
     else:
         payload = {
             "Leads": [lead_id] if lead_id else None,
-            "phone": phone,
-            "Market": market,
-            "Property ID": property_id,
-            "message_preview": msg,
-            "Template": [template_id] if template_id else None,
-            "status": "QUEUED",
-            "next_send_date": send_at_local_str,  # local CT (naive)
-            "drip_stage": next_stage,
-            "UI": STATUS_ICON["QUEUED"],
+            DRIP_SELLER_PHONE_FIELD: phone,
+            DRIP_MARKET_FIELD: market,
+            DRIP_PROPERTY_ID_FIELD: property_id,
+            DRIP_MESSAGE_PREVIEW_FIELD: msg,
+            DRIP_TEMPLATE_FIELD: [template_id] if template_id else None,
+            DRIP_STATUS_FIELD: DripStatus.QUEUED.value,
+            DRIP_NEXT_SEND_DATE_FIELD: send_at_local_str,
+            DRIP_STAGE_FIELD: next_stage,
+            DRIP_UI_FIELD: STATUS_ICON.get(DripStatus.QUEUED.value, "⏳"),
         }
         payload = {k: v for k, v in payload.items() if v is not None}
         _safe_create(drip, payload)

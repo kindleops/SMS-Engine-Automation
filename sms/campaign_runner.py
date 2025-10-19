@@ -64,6 +64,13 @@ except Exception:
     def update_metrics(*args, **kwargs):
         return {"ok": True}
 
+from sms.config import (
+    CAMPAIGN_FIELD_MAP as CAMPAIGN_FIELDS,
+    DRIP_FIELD_MAP as DRIP_FIELDS,
+    PROSPECT_FIELD_MAP as PROSPECT_FIELDS,
+)
+from sms.airtable_schema import CampaignStatus, DripStatus
+
 
 # ─────────────────────────────────────────────────────────────
 # ENV / CONFIG
@@ -116,13 +123,15 @@ DNC_FIELDS = [
 ]
 
 STATUS_ICON = {
-    "QUEUED": "⏳",
-    "READY": "⏳",
-    "SENDING": "🔄",
-    "SENT": "✅",
-    "DELIVERED": "✅",
-    "FAILED": "❌",
-    "CANCELLED": "❌",
+    DripStatus.QUEUED.value: "⏳",
+    DripStatus.READY.value: "⏳",
+    DripStatus.SENDING.value: "🔄",
+    DripStatus.SENT.value: "✅",
+    DripStatus.DELIVERED.value: "✅",
+    DripStatus.FAILED.value: "❌",
+    DripStatus.RETRY.value: "🔄",
+    DripStatus.THROTTLED.value: "⏸",
+    DripStatus.DNC.value: "🚫",
 }
 
 # Normalize statuses to lowercase for comparison
@@ -132,8 +141,38 @@ BLOCKED_STATUSES_RAW = {
     "complete", "completed", "disabled", "draft", "cancelled", "canceled",
 }
 
+ALLOWED_STATUSES_RAW.update({CampaignStatus.SCHEDULED.value, CampaignStatus.RUNNING.value})
+BLOCKED_STATUSES_RAW.update({CampaignStatus.PAUSED.value, CampaignStatus.COMPLETED.value, CampaignStatus.DRAFT.value})
+
 ALLOWED_STATUSES = {s.lower() for s in ALLOWED_STATUSES_RAW}
 BLOCKED_STATUSES = {s.lower() for s in BLOCKED_STATUSES_RAW}
+
+# Canonical field names (resolved via schema)
+CAMPAIGN_NAME_FIELD = CAMPAIGN_FIELDS["NAME"]
+CAMPAIGN_PUBLIC_NAME_FIELD = CAMPAIGN_FIELDS["PUBLIC_NAME"]
+CAMPAIGN_STATUS_FIELD = CAMPAIGN_FIELDS["STATUS"]
+CAMPAIGN_MARKET_FIELD = CAMPAIGN_FIELDS["MARKET"]
+CAMPAIGN_VIEW_FIELD = CAMPAIGN_FIELDS["VIEW_SEGMENT"]
+CAMPAIGN_TEMPLATES_FIELD = CAMPAIGN_FIELDS["TEMPLATES_LINK"]
+CAMPAIGN_START_TIME_FIELD = CAMPAIGN_FIELDS["START_TIME"]
+CAMPAIGN_END_TIME_FIELD = CAMPAIGN_FIELDS["END_TIME"]
+CAMPAIGN_LAST_RUN_AT_FIELD = CAMPAIGN_FIELDS["LAST_RUN_AT"]
+CAMPAIGN_LAST_RUN_RESULT_FIELD = CAMPAIGN_FIELDS["LAST_RUN_RESULT"]
+
+DRIP_STATUS_FIELD = DRIP_FIELDS["STATUS"]
+DRIP_MARKET_FIELD = DRIP_FIELDS["MARKET"]
+DRIP_TEMPLATE_FIELD = DRIP_FIELDS["TEMPLATE_LINK"]
+DRIP_PROSPECT_FIELD = DRIP_FIELDS["PROSPECT_LINK"]
+DRIP_CAMPAIGN_FIELD = DRIP_FIELDS["CAMPAIGN_LINK"]
+DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS["SELLER_PHONE"]
+DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS["FROM_NUMBER"]
+DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS["MESSAGE_PREVIEW"]
+DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS["NEXT_SEND_DATE"]
+DRIP_PROPERTY_ID_FIELD = DRIP_FIELDS["PROPERTY_ID"]
+DRIP_NUMBER_RECORD_ID_FIELD = DRIP_FIELDS["NUMBER_RECORD_ID"]
+DRIP_UI_FIELD = DRIP_FIELDS["UI"]
+PROSPECT_MARKET_FIELD = PROSPECT_FIELDS["MARKET"]
+PROSPECT_PROPERTY_ID_FIELD = PROSPECT_FIELDS["PROPERTY_ID"]
 
 # ─────────────────────────────────────────────────────────────
 # Time / helpers
@@ -571,12 +610,12 @@ def _refresh_ui_icons_for_campaign(drip_tbl, campaign_id: str):
     try:
         for r in drip_tbl.all():  # type: ignore[attr-defined]
             f = r.get("fields", {})
-            cids = f.get("Campaign") or []
+            cids = f.get(DRIP_CAMPAIGN_FIELD) or []
             if campaign_id in (cids if isinstance(cids, list) else [cids]):
-                status = str(f.get("status") or f.get("Status") or "")
+                status = str(f.get(DRIP_STATUS_FIELD) or "")
                 icon = STATUS_ICON.get(status, "")
-                if icon and f.get("UI") != icon:
-                    _safe_update(drip_tbl, r["id"], {"UI": icon})
+                if icon and f.get(DRIP_UI_FIELD) != icon:
+                    _safe_update(drip_tbl, r["id"], {DRIP_UI_FIELD: icon})
     except Exception:
         traceback.print_exc()
 
@@ -593,15 +632,19 @@ def already_queued(drip_tbl, phone: str, campaign_id: str) -> bool:
         l10 = last10(phone)
         for r in drip_tbl.all():  # type: ignore[attr-defined]
             f = r.get("fields", {})
-            ph = f.get("phone") or f.get("Phone")
+            ph = f.get(DRIP_SELLER_PHONE_FIELD)
             if last10(ph) == l10:
-                cids = f.get("Campaign") or []
+                cids = f.get(DRIP_CAMPAIGN_FIELD) or []
                 cids = cids if isinstance(cids, list) else [cids]
                 if campaign_id in cids:
-                    status = str(f.get("status") or f.get("Status") or "")
-                    when_raw = f.get("next_send_date") or f.get("Next Send Date") or f.get("created_at") or ""
+                    status = str(f.get(DRIP_STATUS_FIELD) or "")
+                    when_raw = f.get(DRIP_NEXT_SEND_DATE_FIELD) or f.get("created_at") or ""
                     when_dt = _parse_time_maybe_ct(when_raw) or utcnow()
-                    if status in ("QUEUED", "SENDING", "READY") and when_dt >= cutoff_dt:
+                    if status in (
+                        DripStatus.QUEUED.value,
+                        DripStatus.SENDING.value,
+                        DripStatus.READY.value,
+                    ) and when_dt >= cutoff_dt:
                         return True
         return False
     except Exception:
@@ -630,7 +673,7 @@ def _normalize_limit(limit: Optional[int | str]) -> int:
 # ─────────────────────────────────────────────────────────────
 def _status_tuple(f: Dict[str, Any]) -> Tuple[str, str]:
     """Returns (normalized_status, original_status_str)"""
-    raw = _field(f, "status", "Status", default="")
+    raw = _field(f, CAMPAIGN_STATUS_FIELD, "status", "Status", default="")
     if isinstance(raw, list):  # extremely rare (multi-select)
         raw = raw[0] if raw else ""
     s = str(raw or "").strip()
@@ -702,7 +745,10 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
     # Decide eligibility once per campaign
     for c in all_campaigns:
         f = c.get("fields", {}) or {}
-        name = (f.get("Name") or f.get("name") or c.get("id"))
+        name = (
+            _field(f, CAMPAIGN_NAME_FIELD, CAMPAIGN_PUBLIC_NAME_FIELD, "Name", "name", default=c.get("id"))
+            or c.get("id")
+        )
         ok, why = _campaign_is_eligible(f)
 
         if not ok:
@@ -711,12 +757,37 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             continue
 
         # Time window
-        start_dt = _get_time_field(f, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
-        end_dt   = _get_time_field(f, "End Time", "End", "End At", "end_time", "End Date", "Schedule End")
+        start_dt = _get_time_field(
+            f,
+            CAMPAIGN_START_TIME_FIELD,
+            "Start Time",
+            "Start",
+            "Start At",
+            "start_time",
+            "Start Date",
+            "Schedule Start",
+        )
+        end_dt = _get_time_field(
+            f,
+            CAMPAIGN_END_TIME_FIELD,
+            "End Time",
+            "End",
+            "End At",
+            "end_time",
+            "End Date",
+            "Schedule End",
+        )
 
         # Completed if end passed
         if end_dt and now_utc >= end_dt:
-            _safe_update(campaigns, c["id"], {"status": "Completed", "last_run_at": iso_now()})
+            _safe_update(
+                campaigns,
+                c["id"],
+                {
+                    CAMPAIGN_STATUS_FIELD: CampaignStatus.COMPLETED.value,
+                    CAMPAIGN_LAST_RUN_AT_FIELD: iso_now(),
+                },
+            )
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] COMPLETE {name}: now>=end")
             continue
@@ -748,9 +819,9 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         cf = camp.get("fields", {}) or {}
         cid = camp["id"]
-        name = (cf.get("Name") or cf.get("name") or "Unnamed")
-        view = (_field(cf, "View/Segment", "View", default="") or "").strip() or None
-        market = _field(cf, "Market", "market", default=None)
+        name = (_field(cf, CAMPAIGN_NAME_FIELD, "Name", "name", default="Unnamed") or "Unnamed")
+        view = (_field(cf, CAMPAIGN_VIEW_FIELD, "View/Segment", "View", default="") or "").strip() or None
+        market = _field(cf, CAMPAIGN_MARKET_FIELD, "Market", "market", default=None)
 
         try:
             prospect_rows = prospects.all(view=view) if view else prospects.all()  # type: ignore[attr-defined]
@@ -758,15 +829,24 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             traceback.print_exc()
             continue
 
-        template_ids = cf.get("Templates") or cf.get("templates") or []
+        template_ids = cf.get(CAMPAIGN_TEMPLATES_FIELD) or cf.get("Templates") or cf.get("templates") or []
         if not template_ids:
             if DEBUG_CAMPAIGNS:
                 print(f"[campaign] SKIP {name}: no Templates linked")
             # still update last_run_at so you can see it attempted
-            _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
+            _safe_update(get_campaigns_table(), cid, {CAMPAIGN_LAST_RUN_AT_FIELD: iso_now()})
             continue
 
-        start_dt = _get_time_field(cf, "Start Time", "Start", "Start At", "start_time", "Start Date", "Schedule Start")
+        start_dt = _get_time_field(
+            cf,
+            CAMPAIGN_START_TIME_FIELD,
+            "Start Time",
+            "Start",
+            "Start At",
+            "start_time",
+            "Start Date",
+            "Schedule Start",
+        )
         prequeue = bool(start_dt and now_utc < start_dt and PREQUEUE_BEFORE_START)
         base_utc = start_dt if prequeue else (max(now_utc, start_dt) if start_dt else now_utc)
 
@@ -792,9 +872,16 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         # Only reflect "Running" if not prequeue
         if prequeue:
-            _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
+            _safe_update(get_campaigns_table(), cid, {CAMPAIGN_LAST_RUN_AT_FIELD: iso_now()})
         else:
-            _safe_update(get_campaigns_table(), cid, {"status": "Running", "last_run_at": iso_now()})
+            _safe_update(
+                get_campaigns_table(),
+                cid,
+                {
+                    CAMPAIGN_STATUS_FIELD: CampaignStatus.RUNNING.value,
+                    CAMPAIGN_LAST_RUN_AT_FIELD: iso_now(),
+                },
+            )
 
         queued = 0
         nums_tbl = get_numbers_table()
@@ -847,18 +934,18 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             scheduled_local = _local_naive_iso(scheduled)
 
             payload = {
-                "Prospect": [pr["id"]],
-                "Campaign": [cid],
-                "Template": [tid] if tid else None,
-                "Market": market or pf.get("Market"),
-                "phone": phone,
-                "message_preview": body,
-                "from_number": ns.e164,          # maps to "From Number" if schema differs
-                "status": "QUEUED",
-                "next_send_date": scheduled_local,  # CT-naive
-                "Property ID": pf.get("Property ID"),
-                "Number Record Id": ns.rec_id,
-                "UI": STATUS_ICON.get("QUEUED", "⏳"),
+                DRIP_PROSPECT_FIELD: [pr["id"]],
+                DRIP_CAMPAIGN_FIELD: [cid],
+                DRIP_TEMPLATE_FIELD: [tid] if tid else None,
+                DRIP_MARKET_FIELD: market or pf.get(PROSPECT_MARKET_FIELD),
+                DRIP_SELLER_PHONE_FIELD: phone,
+                DRIP_MESSAGE_PREVIEW_FIELD: body,
+                DRIP_FROM_NUMBER_FIELD: ns.e164,
+                DRIP_STATUS_FIELD: DripStatus.QUEUED.value,
+                DRIP_NEXT_SEND_DATE_FIELD: scheduled_local,
+                DRIP_PROPERTY_ID_FIELD: pf.get(PROSPECT_PROPERTY_ID_FIELD),
+                DRIP_NUMBER_RECORD_ID_FIELD: ns.rec_id,
+                DRIP_UI_FIELD: STATUS_ICON.get(DripStatus.QUEUED.value, "⏳"),
             }
             created = _safe_create(get_drip_table(), {k: v for k, v in payload.items() if v is not None})
             if created:
@@ -889,12 +976,25 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         sent_delta = (batch_result.get("total_sent", 0) or 0) + (retry_result.get("retried", 0) or 0)
         new_status = (
-            "Scheduled"
+            CampaignStatus.SCHEDULED.value
             if prequeue
             else (
-                "Running"
+                CampaignStatus.RUNNING.value
                 if queued and (sent_delta < queued or not send_after_queue)
-                else ("Completed" if queued else (_field(cf, "status", "Status", default="Scheduled") or "Scheduled"))
+                else (
+                    CampaignStatus.COMPLETED.value
+                    if queued
+                    else (
+                        _field(
+                            cf,
+                            CAMPAIGN_STATUS_FIELD,
+                            "status",
+                            "Status",
+                            default=CampaignStatus.SCHEDULED.value,
+                        )
+                        or CampaignStatus.SCHEDULED.value
+                    )
+                )
             )
         )
 
@@ -913,9 +1013,9 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         # IMPORTANT: never push to computed fields (e.g., "total_sent")
         campaign_update = {
-            "status": new_status,
-            "Last Run Result": json.dumps(last_result),
-            "last_run_at": iso_now(),
+            CAMPAIGN_STATUS_FIELD: new_status,
+            CAMPAIGN_LAST_RUN_RESULT_FIELD: json.dumps(last_result),
+            CAMPAIGN_LAST_RUN_AT_FIELD: iso_now(),
         }
         # If your base has a *writable* messages_sent, you can uncomment the next line.
         # campaign_update["messages_sent"] = int(cf.get("messages_sent") or 0) + sent_delta

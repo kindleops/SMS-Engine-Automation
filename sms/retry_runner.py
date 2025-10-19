@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from typing import Optional, Dict, Any, List
 
+from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS
+
 # ------------- optional send backends -------------
 try:
     from sms.message_processor import MessageProcessor as _MP
@@ -50,16 +52,16 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 CONVOS_TABLE_NAME = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
-PHONE_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
-MESSAGE_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIRECTION_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
+PHONE_FIELD = CONV_FIELDS["FROM"]
+MESSAGE_FIELD = CONV_FIELDS["BODY"]
+STATUS_FIELD = CONV_FIELDS["STATUS"]
+DIRECTION_FIELD = CONV_FIELDS["DIRECTION"]
 
-RETRY_COUNT_FIELD = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
-RETRY_AFTER_FIELD = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
-RETRIED_AT_FIELD = os.getenv("CONV_RETRIED_AT_FIELD", "retried_at")
-LAST_ERROR_FIELD = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
-PERM_FAIL_REASON = os.getenv("CONV_PERM_FAIL_FIELD", "permanent_fail_reason")
+RETRY_COUNT_FIELD = CONVERSATIONS_FIELDS.get("RETRY_COUNT", "retry_count")
+RETRY_AFTER_FIELD = CONVERSATIONS_FIELDS.get("RETRY_AFTER", "retry_after")
+RETRIED_AT_FIELD = CONVERSATIONS_FIELDS.get("LAST_RETRY_AT", "retried_at")
+LAST_ERROR_FIELD = CONVERSATIONS_FIELDS.get("LAST_ERROR", "last_retry_error")
+PERM_FAIL_REASON = CONVERSATIONS_FIELDS.get("PERMANENT_FAIL", "permanent_fail_reason")
 
 # ------------- Retry tuning -------------
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))

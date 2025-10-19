@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Literal, Optional, Dict, Any, List
 
+from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS
+
 # -----------------------------
 # pyairtable compatibility
 # -----------------------------
@@ -41,11 +43,11 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
 # -----------------------------
 # Env-driven Field Mapping
 # -----------------------------
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-RETRY_COUNT_FIELD = os.getenv("CONV_RETRY_COUNT_FIELD", "retry_count")
-RETRY_AFTER_FIELD = os.getenv("CONV_RETRY_AFTER_FIELD", "retry_after")
-LAST_ERROR_FIELD = os.getenv("CONV_LAST_ERROR_FIELD", "last_retry_error")
-LAST_RETRY_AT_FIELD = os.getenv("CONV_LAST_RETRY_AT_FIELD", "last_retry_at")
+STATUS_FIELD = CONV_FIELDS["STATUS"]
+RETRY_COUNT_FIELD = CONVERSATIONS_FIELDS.get("RETRY_COUNT", "retry_count")
+RETRY_AFTER_FIELD = CONVERSATIONS_FIELDS.get("RETRY_AFTER", "retry_after")
+LAST_ERROR_FIELD = CONVERSATIONS_FIELDS.get("LAST_ERROR", "last_retry_error")
+LAST_RETRY_AT_FIELD = CONVERSATIONS_FIELDS.get("LAST_RETRY_AT", "last_retry_at")
 
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
