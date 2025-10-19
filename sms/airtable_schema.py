@@ -1843,3 +1843,853 @@ def campaign_manager_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[st
         definition = CAMPAIGN_MANAGER_TABLE.fields[key]
         results[key] = definition.candidates()
     return results
+
+
+# ---------------------------------------------------------------------------
+# Numbers table schema (Campaign Control base)
+# ---------------------------------------------------------------------------
+
+
+class NumberStatus(str, Enum):
+    ACTIVE = "Active"
+    INACTIVE = "Inactive"
+
+
+class NumberMarket(str, Enum):
+    MIAMI = "Miami, FL"
+    ATLANTA = "Atlanta, GA"
+    DALLAS = "Dallas, TX"
+    HOUSTON = "Houston, TX"
+    CHARLOTTE = "Charlotte, NC"
+    JACKSONVILLE = "Jacksonville, FL"
+    LOS_ANGELES = "Los Angeles, CA"
+    TAMPA = "Tampa, FL"
+    MINNEAPOLIS = "Minneapolis, MN"
+    AUSTIN = "Austin, TX"
+    PHOENIX = "Phoenix, AZ"
+
+
+class NumberRiskLevel(str, Enum):
+    LOW = "Low"
+    MEDIUM = "Medium"
+    HIGH = "High"
+    CRITICAL = "Critical"
+
+
+class NumberRecommendation(str, Enum):
+    KEEP_ACTIVE = "Keep Active"
+    ROTATE_SOON = "Rotate Soon"
+    PAUSE = "Pause"
+    REPLACE = "Replace"
+
+
+NUMBERS_TABLE_DEF = TableDefinition(
+    default="Numbers",
+    env_vars=("NUMBERS_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Number",
+            env_vars=("NUMBER_PRIMARY_FIELD",),
+            fallbacks=("phone", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("NUMBER_NAME_FIELD",),
+            fallbacks=("Friendly Name", "name"),
+        ),
+        "FRIENDLY_NAME": FieldDefinition(
+            default="Friendly Name",
+            env_vars=("NUMBER_FRIENDLY_NAME_FIELD",),
+            fallbacks=("friendly_name",),
+        ),
+        "STATUS": FieldDefinition(
+            default="Status",
+            env_vars=("NUMBER_STATUS_FIELD",),
+            options=tuple(status.value for status in NumberStatus),
+            fallbacks=("status",),
+        ),
+        "MARKET": FieldDefinition(
+            default="Market",
+            env_vars=("NUMBER_MARKET_FIELD",),
+            options=tuple(market.value for market in NumberMarket),
+            fallbacks=("market",),
+        ),
+        "AI_RISK_LEVEL": FieldDefinition(
+            default="AI Risk Level",
+            env_vars=("NUMBER_AI_RISK_LEVEL_FIELD",),
+            options=tuple(level.value for level in NumberRiskLevel),
+            fallbacks=("ai_risk_level",),
+        ),
+        "AI_RECOMMENDATION": FieldDefinition(
+            default="AI Recommendation",
+            env_vars=("NUMBER_AI_RECOMMENDATION_FIELD",),
+            options=tuple(rec.value for rec in NumberRecommendation),
+            fallbacks=("ai_recommendation",),
+        ),
+        "TOTAL_SENT": FieldDefinition(
+            default="Total Sent",
+            env_vars=("NUMBER_TOTAL_SENT_FIELD",),
+            fallbacks=("total_sent",),
+        ),
+        "TOTAL_REPLIES": FieldDefinition(
+            default="Total Replies",
+            env_vars=("NUMBER_TOTAL_REPLIES_FIELD",),
+            fallbacks=("total_replies",),
+        ),
+        "TOTAL_OPT_OUTS": FieldDefinition(
+            default="Total Opt-Outs",
+            env_vars=("NUMBER_TOTAL_OPT_OUTS_FIELD",),
+            fallbacks=("total_opt_outs",),
+        ),
+        "TOTAL_LEADS": FieldDefinition(
+            default="Total Leads",
+            env_vars=("NUMBER_TOTAL_LEADS_FIELD",),
+            fallbacks=("total_leads",),
+        ),
+        "TOTAL_FAILED": FieldDefinition(
+            default="Total Failed",
+            env_vars=("NUMBER_TOTAL_FAILED_FIELD",),
+            fallbacks=("total_failed",),
+        ),
+        "TOTAL_DELIVERED": FieldDefinition(
+            default="Total Delivered",
+            env_vars=("NUMBER_TOTAL_DELIVERED_FIELD",),
+            fallbacks=("total_delivered",),
+        ),
+        "SENT_TODAY": FieldDefinition(
+            default="Sent Today",
+            env_vars=("NUMBER_SENT_TODAY_FIELD",),
+            fallbacks=("sent_today",),
+        ),
+        "REMAINING_TODAY": FieldDefinition(
+            default="Remaining Today",
+            env_vars=("NUMBER_REMAINING_TODAY_FIELD",),
+            fallbacks=("remaining_today",),
+        ),
+        "OPT_OUTS_TODAY": FieldDefinition(
+            default="Opt-Outs Today",
+            env_vars=("NUMBER_OPT_OUTS_TODAY_FIELD",),
+            fallbacks=("opt_outs_today",),
+        ),
+        "FAILED_TODAY": FieldDefinition(
+            default="Failed Today",
+            env_vars=("NUMBER_FAILED_TODAY_FIELD",),
+            fallbacks=("failed_today",),
+        ),
+        "DELIVERED_TODAY": FieldDefinition(
+            default="Delivered Today",
+            env_vars=("NUMBER_DELIVERED_TODAY_FIELD",),
+            fallbacks=("delivered_today",),
+        ),
+        "AI_HEALTH_SCORE": FieldDefinition(
+            default="AI Health Score",
+            env_vars=("NUMBER_AI_HEALTH_SCORE_FIELD",),
+            fallbacks=("ai_health_score",),
+        ),
+        "AI_NOTES": FieldDefinition(
+            default="AI Notes",
+            env_vars=("NUMBER_AI_NOTES_FIELD",),
+            fallbacks=("ai_notes",),
+        ),
+        "OPT_OUTS_LINK": FieldDefinition(
+            default="Opt-Outs",
+            env_vars=("NUMBER_OPT_OUTS_LINK_FIELD",),
+            fallbacks=("Opt-Outs",),
+        ),
+        "MARKETS_LINK": FieldDefinition(
+            default="Markets",
+            env_vars=("NUMBER_MARKETS_LINK_FIELD",),
+            fallbacks=("Markets",),
+        ),
+        "CAMPAIGNS_LINK": FieldDefinition(
+            default="Campaigns",
+            env_vars=("NUMBER_CAMPAIGNS_LINK_FIELD",),
+            fallbacks=("Campaigns",),
+        ),
+        "REPLACED_DATE": FieldDefinition(
+            default="Replaced Date",
+            env_vars=("NUMBER_REPLACED_DATE_FIELD",),
+            fallbacks=("replaced_date",),
+        ),
+        "RELEASED_DATE": FieldDefinition(
+            default="Released Date",
+            env_vars=("NUMBER_RELEASED_DATE_FIELD",),
+            fallbacks=("released_date",),
+        ),
+        "LAST_USED": FieldDefinition(
+            default="Last Used",
+            env_vars=("NUMBER_LAST_USED_FIELD",),
+            fallbacks=("last_used",),
+        ),
+        "LAST_HEALTH_CHECK": FieldDefinition(
+            default="Last Health Check (AI)",
+            env_vars=("NUMBER_LAST_HEALTH_CHECK_FIELD",),
+            fallbacks=("last_health_check",),
+        ),
+        "DAILY_RESET": FieldDefinition(
+            default="Daily Reset",
+            env_vars=("NUMBER_DAILY_RESET_FIELD",),
+            fallbacks=("daily_reset",),
+        ),
+        "ACTIVE": FieldDefinition(
+            default="Active",
+            env_vars=("NUMBER_ACTIVE_FIELD",),
+            fallbacks=("active",),
+        ),
+    },
+)
+
+
+def numbers_field_map() -> Dict[str, str]:
+    fields = NUMBERS_TABLE_DEF.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def numbers_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = NUMBERS_TABLE_DEF.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Opt-Outs table schema (Campaign Control base)
+# ---------------------------------------------------------------------------
+
+
+class OptOutSource(str, Enum):
+    CAMPAIGN = "Campaign"
+    AUTORESPONDER = "Autoresponder"
+    AI_RESPONSE = "AI Response"
+    MANUAL = "Manual"
+
+
+class OptOutSeverity(str, Enum):
+    LOW = "Low"
+    MEDIUM = "Medium"
+    HIGH = "High"
+
+
+class OptOutReason(str, Enum):
+    STOP = "STOP"
+    WRONG_NUMBER = "Wrong Number"
+    NOT_OWNER = "Not Owner"
+    ANGRY = "Angry"
+    POLITE_DECLINE = "Polite Decline"
+    SPAM_FLAG = "Spam Flag"
+    DUPLICATE = "Duplicate"
+    OTHER = "Other"
+
+
+OPTOUTS_TABLE = TableDefinition(
+    default="Opt-Outs",
+    env_vars=("OPTOUTS_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Phone",
+            env_vars=("OPTOUT_PRIMARY_FIELD",),
+            fallbacks=("phone", "Name"),
+        ),
+        "SOURCE": FieldDefinition(
+            default="Source",
+            env_vars=("OPTOUT_SOURCE_FIELD",),
+            options=tuple(source.value for source in OptOutSource),
+            fallbacks=("source",),
+        ),
+        "SEVERITY": FieldDefinition(
+            default="Severity Level (AI)",
+            env_vars=("OPTOUT_SEVERITY_FIELD",),
+            options=tuple(severity.value for severity in OptOutSeverity),
+            fallbacks=("severity_level",),
+        ),
+        "REASON": FieldDefinition(
+            default="Reason (AI-Detected)",
+            env_vars=("OPTOUT_REASON_FIELD",),
+            options=tuple(reason.value for reason in OptOutReason),
+            fallbacks=("reason",),
+        ),
+        "RELATED_MARKET": FieldDefinition(
+            default="Related Market",
+            env_vars=("OPTOUT_MARKET_FIELD",),
+            fallbacks=("related_market",),
+        ),
+        "ORIGINAL_MESSAGE": FieldDefinition(
+            default="Original Message",
+            env_vars=("OPTOUT_ORIGINAL_MESSAGE_FIELD",),
+            fallbacks=("original_message",),
+        ),
+        "AI_RESPONSE_USED": FieldDefinition(
+            default="AI Auto-Response Used",
+            env_vars=("OPTOUT_AI_RESPONSE_FIELD",),
+            fallbacks=("ai_auto_response_used",),
+        ),
+        "NUMBER_LINK": FieldDefinition(
+            default="Related Number Record",
+            env_vars=("OPTOUT_NUMBER_LINK_FIELD",),
+            fallbacks=("Related Number Record",),
+        ),
+        "CAMPAIGN_MANAGER_LINK": FieldDefinition(
+            default="Campaigns Manager",
+            env_vars=("OPTOUT_CAMPAIGN_MANAGER_LINK_FIELD",),
+            fallbacks=("Campaigns Manager",),
+        ),
+        "OPTOUT_MONTH": FieldDefinition(
+            default="Opt-Out Month",
+            env_vars=("OPTOUT_MONTH_FIELD",),
+            fallbacks=("opt_out_month",),
+        ),
+        "OPTOUT_DATE": FieldDefinition(
+            default="Opt-Out Date",
+            env_vars=("OPTOUT_DATE_FIELD",),
+            fallbacks=("opt_out_date",),
+        ),
+    },
+)
+
+
+def optouts_field_map() -> Dict[str, str]:
+    fields = OPTOUTS_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def optouts_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = OPTOUTS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Markets table schema (Campaign Control base)
+# ---------------------------------------------------------------------------
+
+
+class MarketRegion(str, Enum):
+    NORTHEAST = "Northeast"
+    SOUTHEAST = "Southeast"
+    WEST_COAST = "West Coast"
+    MIDWEST = "Midwest"
+    SOUTH = "South"
+    SOUTHWEST = "Southwest"
+
+
+class MarketRiskLevel(str, Enum):
+    LOW = "Low"
+    MEDIUM = "Medium"
+    HIGH = "High"
+
+
+class MarketRecommendation(str, Enum):
+    HOLD = "Hold"
+    THROTTLE = "Throttle"
+    PAUSE = "Pause"
+
+
+MARKETS_TABLE = TableDefinition(
+    default="Markets",
+    env_vars=("MARKETS_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Market Name",
+            env_vars=("MARKET_PRIMARY_FIELD",),
+            fallbacks=("Market Name", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("MARKET_NAME_FIELD",),
+            fallbacks=("name",),
+        ),
+        "REGION": FieldDefinition(
+            default="Region",
+            env_vars=("MARKET_REGION_FIELD",),
+            options=tuple(region.value for region in MarketRegion),
+            fallbacks=("region",),
+        ),
+        "AI_RISK_LEVEL": FieldDefinition(
+            default="AI Risk Level",
+            env_vars=("MARKET_AI_RISK_LEVEL_FIELD",),
+            options=tuple(level.value for level in MarketRiskLevel),
+            fallbacks=("ai_risk_level",),
+        ),
+        "AI_RECOMMENDATION": FieldDefinition(
+            default="AI Recommendation",
+            env_vars=("MARKET_AI_RECOMMENDATION_FIELD",),
+            options=tuple(rec.value for rec in MarketRecommendation),
+            fallbacks=("ai_recommendation",),
+        ),
+        "SENT_TOTAL": FieldDefinition(
+            default="Sent Total (All Numbers)",
+            env_vars=("MARKET_SENT_TOTAL_FIELD",),
+            fallbacks=("sent_total",),
+        ),
+        "SENT_TODAY": FieldDefinition(
+            default="Sent Today (All Numbers)",
+            env_vars=("MARKET_SENT_TODAY_FIELD",),
+            fallbacks=("sent_today",),
+        ),
+        "REMAINING_CAPACITY": FieldDefinition(
+            default="Remaining Capacity (All Numbers)",
+            env_vars=("MARKET_REMAINING_CAPACITY_FIELD",),
+            fallbacks=("remaining_capacity",),
+        ),
+        "OPT_OUTS_TOTAL": FieldDefinition(
+            default="Opt-Outs Total (All Numbers)",
+            env_vars=("MARKET_OPT_OUTS_TOTAL_FIELD",),
+            fallbacks=("opt_outs_total",),
+        ),
+        "OPT_OUTS_TODAY": FieldDefinition(
+            default="Opt-Outs Today (All Numbers)",
+            env_vars=("MARKET_OPT_OUTS_TODAY_FIELD",),
+            fallbacks=("opt_outs_today",),
+        ),
+        "FAILED_TOTAL": FieldDefinition(
+            default="Failed Total (All Numbers)",
+            env_vars=("MARKET_FAILED_TOTAL_FIELD",),
+            fallbacks=("failed_total",),
+        ),
+        "FAILED_TODAY": FieldDefinition(
+            default="Failed Today (All Numbers)",
+            env_vars=("MARKET_FAILED_TODAY_FIELD",),
+            fallbacks=("failed_today",),
+        ),
+        "DELIVERED_TOTAL": FieldDefinition(
+            default="Delivered Total (All Numbers)",
+            env_vars=("MARKET_DELIVERED_TOTAL_FIELD",),
+            fallbacks=("delivered_total",),
+        ),
+        "DELIVERED_TODAY": FieldDefinition(
+            default="Delivered Today (All Numbers)",
+            env_vars=("MARKET_DELIVERED_TODAY_FIELD",),
+            fallbacks=("delivered_today",),
+        ),
+        "TOTAL_SENT": FieldDefinition(
+            default="Total Sent",
+            env_vars=("MARKET_TOTAL_SENT_FIELD",),
+            fallbacks=("total_sent",),
+        ),
+        "TOTAL_REPLIES": FieldDefinition(
+            default="Total Replies",
+            env_vars=("MARKET_TOTAL_REPLIES_FIELD",),
+            fallbacks=("total_replies",),
+        ),
+        "TOTAL_LEADS": FieldDefinition(
+            default="Total Leads",
+            env_vars=("MARKET_TOTAL_LEADS_FIELD",),
+            fallbacks=("total_leads",),
+        ),
+        "TOTAL_DEALS": FieldDefinition(
+            default="Total Deals",
+            env_vars=("MARKET_TOTAL_DEALS_FIELD",),
+            fallbacks=("total_deals",),
+        ),
+        "TOTAL_CONTRACTS": FieldDefinition(
+            default="Total Contracts",
+            env_vars=("MARKET_TOTAL_CONTRACTS_FIELD",),
+            fallbacks=("total_contracts",),
+        ),
+        "DAILY_LIMIT_OVERRIDE": FieldDefinition(
+            default="Daily Limit Override",
+            env_vars=("MARKET_DAILY_LIMIT_OVERRIDE_FIELD",),
+            fallbacks=("daily_limit_override",),
+        ),
+        "AI_SENTIMENT_SCORE": FieldDefinition(
+            default="AI Market Sentiment Score (0-100)",
+            env_vars=("MARKET_SENTIMENT_SCORE_FIELD",),
+            fallbacks=("ai_market_sentiment",),
+        ),
+        "AI_CAPACITY_FORECAST": FieldDefinition(
+            default="AI Forecast: Tomorrow Send Capacity",
+            env_vars=("MARKET_CAPACITY_FORECAST_FIELD",),
+            fallbacks=("ai_capacity_forecast",),
+        ),
+        "AI_P2P_CONVERSATIONS": FieldDefinition(
+            default="AI P2P Conversations",
+            env_vars=("MARKET_P2P_CONVERSATIONS_FIELD",),
+            fallbacks=("ai_p2p_conversations",),
+        ),
+        "AI_NOTES": FieldDefinition(
+            default="AI Notes",
+            env_vars=("MARKET_AI_NOTES_FIELD",),
+            fallbacks=("ai_notes",),
+        ),
+        "NUMBERS_LINK": FieldDefinition(
+            default="Numbers",
+            env_vars=("MARKET_NUMBERS_LINK_FIELD",),
+            fallbacks=("Numbers",),
+        ),
+        "CAMPAIGNS_LINK": FieldDefinition(
+            default="Campaigns",
+            env_vars=("MARKET_CAMPAIGNS_LINK_FIELD",),
+            fallbacks=("Campaigns",),
+        ),
+        "UPDATED_AT": FieldDefinition(
+            default="Updated At",
+            env_vars=("MARKET_UPDATED_AT_FIELD",),
+            fallbacks=("updated_at",),
+        ),
+        "MARKET_SCORE": FieldDefinition(
+            default="Market Score",
+            env_vars=("MARKET_SCORE_FIELD",),
+            fallbacks=("market_score",),
+        ),
+        "MARKET_HEALTH": FieldDefinition(
+            default="Market Health",
+            env_vars=("MARKET_HEALTH_FIELD",),
+            fallbacks=("market_health",),
+        ),
+        "TOTAL_REVENUE": FieldDefinition(
+            default="Total Revenue",
+            env_vars=("MARKET_TOTAL_REVENUE_FIELD",),
+            fallbacks=("total_revenue",),
+        ),
+        "TOTAL_PROFIT": FieldDefinition(
+            default="Total Profit",
+            env_vars=("MARKET_TOTAL_PROFIT_FIELD",),
+            fallbacks=("total_profit",),
+        ),
+        "TOTAL_EXPENSE": FieldDefinition(
+            default="Total Expense",
+            env_vars=("MARKET_TOTAL_EXPENSE_FIELD",),
+            fallbacks=("total_expense",),
+        ),
+        "CREATED_AT": FieldDefinition(
+            default="Created At",
+            env_vars=("MARKET_CREATED_AT_FIELD",),
+            fallbacks=("created_at",),
+        ),
+        "ACTIVE": FieldDefinition(
+            default="Active",
+            env_vars=("MARKET_ACTIVE_FIELD",),
+            fallbacks=("active",),
+        ),
+    },
+)
+
+
+def markets_field_map() -> Dict[str, str]:
+    fields = MARKETS_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def markets_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = MARKETS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Logs table schema (Performance base)
+# ---------------------------------------------------------------------------
+
+
+class LogType(str, Enum):
+    OUTBOUND = "Outbound"
+    AI_CLOSER = "AI Closer"
+    MANUAL_QA = "Manual QA"
+    RESET_QUOTAS = "Reset Quotas"
+    METRICS_UPDATE = "Metrics Update"
+    SYSTEM_ALERT = "System Alert"
+
+
+class LogSubsystem(str, Enum):
+    AIRTABLE = "Airtable"
+    TEXTGRID = "TextGrid"
+    CODEX = "Codex"
+    GITHUB = "Github"
+    PYTHON_WORKER = "Python Worker"
+    NOTION_SYNC = "Notion Sync"
+    RENDER = "Render"
+    DOCKER = "Docker"
+    FASTAPI = "Fast API"
+    UPSTASH = "UpStash"
+
+
+class LogRunEnvironment(str, Enum):
+    PRODUCTION = "Production"
+    STAGING = "Staging"
+    DEV = "Dev"
+
+
+class LogTriggerSource(str, Enum):
+    MANUAL = "Manual"
+    SCHEDULER = "Scheduler"
+    WEBHOOK = "Webhook"
+    CODEX = "Codex"
+    GITHUB = "Github"
+    ERROR_RETRY = "Error Retry"
+
+
+class LogRunCategory(str, Enum):
+    DATA_SYNC = "Data Sync"
+    CAMPAIGN_DISPATCH = "Campaign Dispatch"
+    AI_RESPONSE = "AI Response"
+    SCORING = "Scoring"
+    DRIP_QUEUE = "Drip Queue"
+    ERROR_RECOVERY = "Error Recovery"
+    COMPLIANCE_SWEEP = "Compliance Sweep"
+
+
+class LogRunEvaluation(str, Enum):
+    EXCELLENT = "Excellent"
+    GOOD = "Good"
+    WARNING = "Warning"
+    FAILED = "Failed"
+
+
+LOGS_TABLE = TableDefinition(
+    default="Logs",
+    env_vars=("RUNS_TABLE", "RUNS_TABLE_NAME"),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Run ID",
+            env_vars=("RUN_PRIMARY_FIELD",),
+            fallbacks=("Run ID", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("RUN_NAME_FIELD",),
+            fallbacks=("name",),
+        ),
+        "RUNTIME_LOG_LINK": FieldDefinition(
+            default="Runtime Log Link",
+            env_vars=("RUN_LOG_LINK_FIELD",),
+            fallbacks=("runtime_log_link",),
+        ),
+        "TYPE": FieldDefinition(
+            default="Type",
+            env_vars=("RUN_TYPE_FIELD",),
+            options=tuple(log_type.value for log_type in LogType),
+            fallbacks=("type",),
+        ),
+        "SUBSYSTEM": FieldDefinition(
+            default="Subsystem Impact",
+            env_vars=("RUN_SUBSYSTEM_FIELD",),
+            options=tuple(subsystem.value for subsystem in LogSubsystem),
+            fallbacks=("subsystem",),
+        ),
+        "RUNTIME_ENV": FieldDefinition(
+            default="Runtime Environment",
+            env_vars=("RUN_ENV_FIELD",),
+            options=tuple(env.value for env in LogRunEnvironment),
+            fallbacks=("runtime_environment",),
+        ),
+        "TRIGGER": FieldDefinition(
+            default="Run Trigger Source",
+            env_vars=("RUN_TRIGGER_FIELD",),
+            options=tuple(src.value for src in LogTriggerSource),
+            fallbacks=("run_trigger_source",),
+        ),
+        "RUN_CATEGORY": FieldDefinition(
+            default="Run Category",
+            env_vars=("RUN_CATEGORY_FIELD",),
+            options=tuple(cat.value for cat in LogRunCategory),
+            fallbacks=("run_category",),
+        ),
+        "AI_EVALUATION": FieldDefinition(
+            default="AI Run Evaluation",
+            env_vars=("RUN_AI_EVALUATION_FIELD",),
+            options=tuple(eval.value for eval in LogRunEvaluation),
+            fallbacks=("ai_run_evaluation",),
+        ),
+        "OPERATOR": FieldDefinition(
+            default="Operator",
+            env_vars=("RUN_OPERATOR_FIELD",),
+            fallbacks=("operator",),
+        ),
+        "EXECUTION_CONTEXT": FieldDefinition(
+            default="Execution Context",
+            env_vars=("RUN_EXECUTION_CONTEXT_FIELD",),
+            fallbacks=("execution_context",),
+        ),
+        "AUTOMATION_VERSION": FieldDefinition(
+            default="Automation Version",
+            env_vars=("RUN_AUTOMATION_VERSION_FIELD",),
+            fallbacks=("automation_version",),
+        ),
+        "RECORDS_AFFECTED": FieldDefinition(
+            default="Records Affected",
+            env_vars=("RUN_RECORDS_AFFECTED_FIELD",),
+            fallbacks=("records_affected",),
+        ),
+        "PROCESSED": FieldDefinition(
+            default="Processed",
+            env_vars=("RUN_PROCESSED_FIELD",),
+            fallbacks=("processed",),
+        ),
+        "MEMORY": FieldDefinition(
+            default="Memory (MB)",
+            env_vars=("RUN_MEMORY_FIELD",),
+            fallbacks=("memory_mb",),
+        ),
+        "ERRORS_ENCOUNTERED": FieldDefinition(
+            default="Errors Encountered",
+            env_vars=("RUN_ERRORS_ENCOUNTERED_FIELD",),
+            fallbacks=("errors_encountered",),
+        ),
+        "ERRORS": FieldDefinition(
+            default="Errors",
+            env_vars=("RUN_ERRORS_FIELD",),
+            fallbacks=("errors",),
+        ),
+        "CPU_USAGE": FieldDefinition(
+            default="CPU Usage",
+            env_vars=("RUN_CPU_USAGE_FIELD",),
+            fallbacks=("cpu_usage",),
+        ),
+        "AI_CONFIDENCE": FieldDefinition(
+            default="AI Confidence Score (0-100)",
+            env_vars=("RUN_AI_CONFIDENCE_FIELD",),
+            fallbacks=("ai_confidence_score",),
+        ),
+        "NOTES": FieldDefinition(
+            default="Notes",
+            env_vars=("RUN_NOTES_FIELD",),
+            fallbacks=("notes",),
+        ),
+        "NEXT_ACTION": FieldDefinition(
+            default="Next Recommended Action (AI)",
+            env_vars=("RUN_NEXT_ACTION_FIELD",),
+            fallbacks=("next_recommended_action",),
+        ),
+        "ERROR_SUMMARY": FieldDefinition(
+            default="Error Summary (AI)",
+            env_vars=("RUN_ERROR_SUMMARY_FIELD",),
+            fallbacks=("error_summary",),
+        ),
+        "BREAKDOWN": FieldDefinition(
+            default="Breakdown",
+            env_vars=("RUN_BREAKDOWN_FIELD",),
+            fallbacks=("breakdown",),
+        ),
+        "AI_PERFORMANCE_NOTES": FieldDefinition(
+            default="AI Performance Notes",
+            env_vars=("RUN_AI_PERFORMANCE_NOTES_FIELD",),
+            fallbacks=("ai_performance_notes",),
+        ),
+        "DURATION": FieldDefinition(
+            default="Duration",
+            env_vars=("RUN_DURATION_FIELD",),
+            fallbacks=("duration",),
+        ),
+        "TIMESTAMP": FieldDefinition(
+            default="Timestamp",
+            env_vars=("RUN_TIMESTAMP_FIELD",),
+            fallbacks=("timestamp",),
+        ),
+    },
+)
+
+
+def logs_field_map() -> Dict[str, str]:
+    fields = LOGS_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def logs_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = LOGS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# KPIs table schema (Performance base)
+# ---------------------------------------------------------------------------
+
+
+class KPIHealth(str, Enum):
+    EXCELLENT = "Excellent"
+    STABLE = "Stable"
+    WARNING = "Warning"
+    CRITICAL = "Critical"
+
+
+class KPICategory(str, Enum):
+    SMS = "SMS"
+    LEADS = "Leads"
+    DEALS = "Deals"
+    COMPLIANCE = "Compliance"
+    REVENUE = "Revenue"
+
+
+KPIS_TABLE_DEF = TableDefinition(
+    default="KPIs",
+    env_vars=("KPIS_TABLE", "KPIS_TABLE_NAME"),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Campaign",
+            env_vars=("KPI_PRIMARY_FIELD",),
+            fallbacks=("Campaign", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("KPI_NAME_FIELD",),
+            fallbacks=("Metric Name", "name"),
+        ),
+        "HEALTH": FieldDefinition(
+            default="Health",
+            env_vars=("KPI_HEALTH_FIELD",),
+            options=tuple(health.value for health in KPIHealth),
+            fallbacks=("health",),
+        ),
+        "CATEGORY": FieldDefinition(
+            default="Category",
+            env_vars=("KPI_CATEGORY_FIELD",),
+            options=tuple(category.value for category in KPICategory),
+            fallbacks=("category",),
+        ),
+        "MARKET": FieldDefinition(
+            default="Market",
+            env_vars=("KPI_MARKET_FIELD",),
+            fallbacks=("market",),
+        ),
+        "VALUE": FieldDefinition(
+            default="Value",
+            env_vars=("KPI_VALUE_FIELD",),
+            fallbacks=("value",),
+        ),
+        "TARGET": FieldDefinition(
+            default="Target",
+            env_vars=("KPI_TARGET_FIELD",),
+            fallbacks=("target",),
+        ),
+        "SCORE": FieldDefinition(
+            default="Score",
+            env_vars=("KPI_SCORE_FIELD",),
+            fallbacks=("score",),
+        ),
+        "AI_ANALYSIS": FieldDefinition(
+            default="AI Analysis",
+            env_vars=("KPI_AI_ANALYSIS_FIELD",),
+            fallbacks=("ai_analysis",),
+        ),
+        "TIMESTAMP": FieldDefinition(
+            default="Timestamp",
+            env_vars=("KPI_TIMESTAMP_FIELD",),
+            fallbacks=("timestamp",),
+        ),
+        "DATE": FieldDefinition(
+            default="Date",
+            env_vars=("KPI_DATE_FIELD",),
+            fallbacks=("date",),
+        ),
+    },
+)
+
+
+def kpi_field_map() -> Dict[str, str]:
+    fields = KPIS_TABLE_DEF.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def kpi_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = KPIS_TABLE_DEF.fields[key]
+        results[key] = definition.candidates()
+    return results

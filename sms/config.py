@@ -16,6 +16,11 @@ from sms.airtable_schema import (
     PROSPECTS_TABLE,
     DEALS_TABLE,
     CAMPAIGN_MANAGER_TABLE,
+    NUMBERS_TABLE_DEF,
+    OPTOUTS_TABLE,
+    MARKETS_TABLE,
+    LOGS_TABLE,
+    KPIS_TABLE_DEF,
     conversations_field_map,
     leads_field_map,
     campaign_field_map,
@@ -24,6 +29,11 @@ from sms.airtable_schema import (
     prospects_field_map,
     deals_field_map,
     campaign_manager_field_map,
+    numbers_field_map,
+    optouts_field_map,
+    markets_field_map,
+    logs_field_map,
+    kpi_field_map,
 )
 
 # .env loader (safe if missing)
@@ -108,6 +118,26 @@ DEALS_FIELD_MAP = deals_field_map()
 CAMPAIGN_MANAGER_FIELDS = CAMPAIGN_MANAGER_TABLE.field_names()
 CAMPAIGN_MANAGER_FIELD_CANDIDATES = CAMPAIGN_MANAGER_TABLE.field_candidates()
 CAMPAIGN_MANAGER_FIELD_MAP = campaign_manager_field_map()
+
+NUMBERS_FIELDS = NUMBERS_TABLE_DEF.field_names()
+NUMBERS_FIELD_CANDIDATES = NUMBERS_TABLE_DEF.field_candidates()
+NUMBERS_FIELD_MAP = numbers_field_map()
+
+OPTOUT_FIELDS = OPTOUTS_TABLE.field_names()
+OPTOUT_FIELD_CANDIDATES = OPTOUTS_TABLE.field_candidates()
+OPTOUT_FIELD_MAP = optouts_field_map()
+
+MARKET_FIELDS = MARKETS_TABLE.field_names()
+MARKET_FIELD_CANDIDATES = MARKETS_TABLE.field_candidates()
+MARKET_FIELD_MAP = markets_field_map()
+
+LOG_FIELDS = LOGS_TABLE.field_names()
+LOG_FIELD_CANDIDATES = LOGS_TABLE.field_candidates()
+LOG_FIELD_MAP = logs_field_map()
+
+KPI_FIELDS = KPIS_TABLE_DEF.field_names()
+KPI_FIELD_CANDIDATES = KPIS_TABLE_DEF.field_candidates()
+KPI_FIELD_MAP = kpi_field_map()
 PHONE_FIELDS = [
     "phone",
     "Phone",
@@ -149,6 +179,10 @@ class Settings:
     DRIP_QUEUE_TABLE: str
     CAMPAIGNS_TABLE: str
     CAMPAIGN_MANAGER_TABLE: str
+    OPTOUTS_TABLE: str
+    MARKETS_TABLE: str
+    LOGS_TABLE: str
+    KPIS_TABLE: str
     DEALS_TABLE: str
 
     # Tables (control base)
@@ -200,6 +234,10 @@ def settings() -> Settings:
         DRIP_QUEUE_TABLE=env_str("DRIP_QUEUE_TABLE", "Drip Queue"),
         CAMPAIGNS_TABLE=env_str("CAMPAIGNS_TABLE", "Campaigns"),
         CAMPAIGN_MANAGER_TABLE=env_str("CAMPAIGN_MANAGER_TABLE", "Campaigns Manager"),
+        OPTOUTS_TABLE=env_str("OPTOUTS_TABLE", "Opt-Outs"),
+        MARKETS_TABLE=env_str("MARKETS_TABLE", "Markets"),
+        LOGS_TABLE=env_str("RUNS_TABLE", "Runs/Logs"),
+        KPIS_TABLE=env_str("KPIS_TABLE", "KPIs"),
         DEALS_TABLE=env_str("DEALS_TABLE", "Deals"),
         NUMBERS_TABLE=env_str("NUMBERS_TABLE", "Numbers"),
         DAILY_LIMIT_DEFAULT=env_int("DAILY_LIMIT", 750),
