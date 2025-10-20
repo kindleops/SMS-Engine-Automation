@@ -198,7 +198,12 @@ class DataConnector:
         return self._table(base, DRIP_QUEUE_TABLE.name())
 
     def campaigns(self) -> TableHandle:
-        base = _first_non_empty("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
+        base = _first_non_empty(
+            "LEADS_CONVOS_BASE",
+            "AIRTABLE_LEADS_CONVOS_BASE_ID",
+            "CAMPAIGN_CONTROL_BASE",
+            "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID",
+        )
         return self._table(base, CAMPAIGNS_TABLE.name())
 
     def numbers(self) -> TableHandle:

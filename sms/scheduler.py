@@ -94,7 +94,8 @@ def _log_scheduler_env() -> None:
     present_sources = [name for name in API_KEY_ENV_PRIORITY if os.getenv(name)]
 
     logger.info(
-        "Scheduler Airtable env: base=%s, campaigns_table=%s, api_key=%s (from %s), alt_keys=%s, env_files=%s",
+        "Scheduler Airtable env: leads_base=%s, control_base=%s, campaigns_table=%s, api_key=%s (from %s), alt_keys=%s, env_files=%s",
+        cfg.LEADS_CONVOS_BASE or "<missing>",
         cfg.CAMPAIGN_CONTROL_BASE or "<missing>",
         cfg.CAMPAIGNS_TABLE or "<missing>",
         _mask_token(token),
@@ -241,11 +242,13 @@ def _probe_airtable_table(api_key: str, base_id: str, table_name: str) -> Tuple[
 
 def _validate_airtable_access() -> Optional[Dict[str, Any]]:
     cfg = settings()
-    base_id = cfg.CAMPAIGN_CONTROL_BASE
+    base_id = cfg.LEADS_CONVOS_BASE
     table_name = cfg.CAMPAIGNS_TABLE
     token, source = _resolve_api_key()
     details: Dict[str, Any] = {
         "base_id": base_id,
+        "leads_base": cfg.LEADS_CONVOS_BASE,
+        "control_base": cfg.CAMPAIGN_CONTROL_BASE,
         "campaigns_table": table_name,
         "env_files": ENV_SOURCES or [],
         "available_key_envs": [
@@ -256,11 +259,11 @@ def _validate_airtable_access() -> Optional[Dict[str, Any]]:
         details["api_key_source"] = source
 
     if not base_id:
-        message = "CAMPAIGN_CONTROL_BASE is not configured."
+        message = "LEADS_CONVOS_BASE is not configured."
         logger.error(message)
         return {"ok": False, "error": message, "details": details}
     if not BASE_ID_PATTERN.match(base_id):
-        message = f"CAMPAIGN_CONTROL_BASE '{base_id}' does not look like a valid Airtable base id."
+        message = f"LEADS_CONVOS_BASE '{base_id}' does not look like a valid Airtable base id."
         logger.error(message)
         return {"ok": False, "error": message, "details": details}
     if not table_name:
