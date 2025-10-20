@@ -5,7 +5,7 @@ import os
 import re
 import traceback
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 # --- Ensure Table is always defined (prevents NameError) ---
 try:
@@ -29,6 +29,11 @@ class Table:  # thin wrapper so symbol 'Table' always exists
     def update(self, record_id: str, fields: dict):
         return self._t.update(record_id, fields)
 
+    def iterate(self, **kwargs):
+        if hasattr(self._t, "iterate"):
+            return self._t.iterate(**kwargs)
+        raise AttributeError("Underlying Table instance does not support iterate()")
+
 
 # -----------------------
 # ENV / CONFIG
@@ -40,6 +45,7 @@ KPI_TABLE = os.getenv("KPI_TABLE_NAME", "KPIs")
 # Business-timezone for daily rollups
 KPI_TZ = os.getenv("KPI_TZ", "America/Chicago")
 MAX_SCAN = int(os.getenv("KPI_MAX_SCAN", "10000"))  # safety cap
+PAGE_SIZE = max(1, min(500, MAX_SCAN)) if MAX_SCAN else 500
 
 try:
     from zoneinfo import ZoneInfo
@@ -119,6 +125,34 @@ def _remap_existing_only(tbl: Table, payload: Dict) -> Dict:
     return out
 
 
+def _fetch_kpi_rows(tbl: Table) -> List[dict]:
+    """Return KPI rows using the Airtable iterator with retry and pagination."""
+
+    attempts = 2
+    last_exc: Optional[Exception] = None
+    total_limit = MAX_SCAN if MAX_SCAN > 0 else None
+
+    for attempt in range(attempts):
+        try:
+            rows: List[dict] = []
+            fetched = 0
+            iterator = tbl.iterate(page_size=PAGE_SIZE)
+            for record in iterator:
+                rows.append(record)
+                fetched += 1
+                if total_limit is not None and fetched >= total_limit:
+                    break
+            return rows
+        except Exception as exc:  # pragma: no cover - network failure path
+            last_exc = exc
+            traceback.print_exc()
+            if attempt == attempts - 1:
+                break
+    if last_exc:
+        raise last_exc
+    return []
+
+
 # -----------------------
 # Core
 # -----------------------
@@ -139,9 +173,8 @@ def aggregate_kpis():
     now_iso = _utcnow_iso()
 
     try:
-        rows = kpi_tbl.all(max_records=MAX_SCAN)
+        rows = _fetch_kpi_rows(kpi_tbl)
     except Exception:
-        traceback.print_exc()
         return {"ok": False, "error": "Failed to read KPI rows"}
 
     # Partition: raw vs existing totals for today (so we upsert, not duplicate)

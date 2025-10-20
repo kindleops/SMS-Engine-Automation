@@ -91,6 +91,14 @@ def _quiet_window(now_utc: datetime, policy) -> tuple[bool, Optional[datetime]]:
     return in_quiet, next_allowed.astimezone(timezone.utc) if next_allowed else None
 
 
+def _coerce_positive_int(value: Any, default: int) -> int:
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(ivalue, 1)
+
+
 class CampaignRunner:
     def __init__(self, *, send_after_queue: bool = False) -> None:
         self.drip = CONNECTOR.drip_queue()
@@ -99,6 +107,7 @@ class CampaignRunner:
         self.send_after_queue = send_after_queue
 
     def run(self, limit: int) -> Dict[str, Any]:
+        limit = _coerce_positive_int(limit, 50)
         now = datetime.now(timezone.utc)
         is_quiet, next_allowed = _quiet_window(now, self.policy)
         records = self._fetch_queue(limit)
@@ -214,7 +223,7 @@ class CampaignRunner:
 
 def run_campaigns(limit: int = 50, send_after_queue: bool = False) -> Dict[str, Any]:
     runner = CampaignRunner(send_after_queue=bool(send_after_queue))
-    return runner.run(limit)
+    return runner.run(_coerce_positive_int(limit, 50))
 
 
 def get_campaigns_table():
