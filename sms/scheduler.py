@@ -340,6 +340,8 @@ PROSPECT_PHONE_FIELDS = [
     PROSPECT_FIELDS.get("PHONE_SECONDARY"),
     PROSPECT_FIELDS.get("PHONE_SECONDARY_LINKED"),
 ]
+if PROSPECT_MARKET_FIELD is None:
+    PROSPECT_MARKET_FIELD = "Market"
 
 SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
 
@@ -501,24 +503,27 @@ def _schedule_campaign(
     drip_handle,
     existing_pairs: Set[Tuple[str, str]],
     quiet: QuietHours,
-) -> Tuple[int, int]:
+) -> Tuple[int, int, int, Dict[str, int]]:
     fields = campaign.get("fields", {}) or {}
     campaign_id = campaign.get("id")
     campaign_market_raw, campaign_market_norm = _campaign_market(fields)
 
     if not campaign_market_raw:
         logger.info("Skipping campaign %s – missing market", campaign_id)
-        return 0, 0
+        return 0, 0, 0, {}
 
     start_time = _apply_quiet_hours(_campaign_start(fields), quiet)
     queued = 0
     skipped = 0
+    processed = 0
+    skip_reasons: Dict[str, int] = defaultdict(int)
 
     logger.info("🏁 Starting campaign %s for market '%s'", campaign_id, campaign_market_raw)
 
     local_market_counts = defaultdict(int)
 
     for prospect in prospects:
+        processed += 1
         pf = prospect.get("fields", {}) or {}
         prospect_id = prospect.get("id")
         prospect_market_raw, prospect_market_norm = _prospect_market(pf)
@@ -535,26 +540,37 @@ def _schedule_campaign(
             prospect_market_raw,
         )
 
-        if campaign_market_norm and prospect_market_norm:
-            if campaign_market_norm != prospect_market_norm:
-                continue
+        if campaign_market_norm and prospect_market_norm and campaign_market_norm != prospect_market_norm:
+            logger.debug(
+                "Market mismatch (ignored) campaign=%s prospect=%s",
+                campaign_market_norm,
+                prospect_market_norm,
+            )
         elif campaign_market_norm and not prospect_market_norm:
-            continue
+            logger.debug(
+                "Prospect %s missing market (ignored) for campaign %s",
+                prospect_id,
+                campaign_id,
+            )
 
         if not _matches_segment(pf, fields):
+            skip_reasons["segment_mismatch"] += 1
             continue
 
         phone = _prospect_phone(pf)
         if not phone:
+            skip_reasons["missing_phone"] += 1
             skipped += 1
             continue
         digits = last_10_digits(phone)
         if not digits:
+            skip_reasons["invalid_phone"] += 1
             skipped += 1
             continue
 
         key = (campaign["id"], digits)
         if key in existing_pairs:
+            skip_reasons["duplicate_phone"] += 1
             skipped += 1
             continue
 
@@ -579,14 +595,22 @@ def _schedule_campaign(
             queued += 1
             logger.debug("✅ Queued prospect %s for campaign %s (%s)", prospect_id, campaign_id, campaign_market_raw)
         else:
+            skip_reasons["create_failed"] += 1
             skipped += 1
 
     logger.info("🏙 Market prospect summary for campaign %s:", campaign_id)
     for mkt, count in local_market_counts.items():
         logger.info("   %s → %s prospects", mkt, count)
 
-    logger.info("✅ Finished campaign %s: %s queued, %s skipped", campaign_id, queued, skipped)
-    return queued, skipped
+    logger.info(
+        "✅ Finished campaign %s: processed=%s queued=%s skipped=%s reasons=%s",
+        campaign_id,
+        processed,
+        queued,
+        skipped,
+        dict(skip_reasons),
+    )
+    return queued, skipped, processed, dict(skip_reasons)
 
 
 def _list_with_retry(handle, label: str, attempts: int = 3, delay: float = 2.0) -> Tuple[List[Dict[str, Any]], bool]:
@@ -679,6 +703,17 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
             summary["ok"] = False
             return summary
 
+        sample_campaign_markets = [
+            (_campaign_market(c.get("fields", {}) or {})[0], type((c.get("fields", {}) or {}).get(CAMPAIGN_MARKET_FIELD)).__name__)
+            for c in campaigns[:5]
+        ]
+        sample_prospect_markets = [
+            (_prospect_market(p.get("fields", {}) or {})[0], type((p.get("fields", {}) or {}).get(PROSPECT_MARKET_FIELD)).__name__)
+            for p in prospects[:5]
+        ]
+        logger.debug("Sample campaign markets (raw, type): %s", sample_campaign_markets)
+        logger.debug("Sample prospect markets (raw, type): %s", sample_prospect_markets)
+
         existing_drip, drip_failed = _list_with_retry(drip_handle, "Drip Queue")
         pairs = _existing_pairs(existing_drip) if not drip_failed else None
 
@@ -709,8 +744,15 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     summary["ok"] = False
                     continue
 
-                queued, skipped = _schedule_campaign(campaign, prospects, drip_handle, pairs, quiet)
-                summary["campaigns"][campaign["id"]] = {"queued": queued, "skipped": skipped}
+                queued, skipped, processed_count, skip_summary = _schedule_campaign(
+                    campaign, prospects, drip_handle, pairs, quiet
+                )
+                summary["campaigns"][campaign["id"]] = {
+                    "queued": queued,
+                    "skipped": skipped,
+                    "processed": processed_count,
+                    "skip_reasons": skip_summary,
+                }
                 summary["queued"] += queued
                 processed += 1
                 if queued > 0:
