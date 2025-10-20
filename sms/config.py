@@ -7,6 +7,47 @@ from functools import lru_cache
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 
+from sms.airtable_schema import (
+    CONVERSATIONS_TABLE,
+    LEADS_TABLE,
+    CAMPAIGNS_TABLE,
+    DRIP_QUEUE_TABLE,
+    TEMPLATES_TABLE,
+    PROSPECTS_TABLE,
+    DEALS_TABLE,
+    CAMPAIGN_MANAGER_TABLE,
+    NUMBERS_TABLE_DEF,
+    OPTOUTS_TABLE,
+    MARKETS_TABLE,
+    LOGS_TABLE,
+    KPIS_TABLE_DEF,
+    DEVOPS_SERVICES_TABLE,
+    DEVOPS_DEPLOYMENTS_TABLE,
+    DEVOPS_SYSTEM_LOGS_TABLE,
+    DEVOPS_INTEGRATIONS_TABLE,
+    DEVOPS_HEALTH_CHECKS_TABLE,
+    DEVOPS_METRICS_TABLE,
+    conversations_field_map,
+    leads_field_map,
+    campaign_field_map,
+    drip_field_map,
+    template_field_map,
+    prospects_field_map,
+    deals_field_map,
+    campaign_manager_field_map,
+    numbers_field_map,
+    optouts_field_map,
+    markets_field_map,
+    logs_field_map,
+    kpi_field_map,
+    devops_services_field_map,
+    devops_deployments_field_map,
+    devops_system_logs_field_map,
+    devops_integrations_field_map,
+    devops_health_checks_field_map,
+    devops_metrics_field_map,
+)
+
 # .env loader (safe if missing)
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -58,19 +99,81 @@ def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
 # -----------------------------
 # Static field name maps
 # -----------------------------
-CONV_FIELDS = {
-    "FROM": env_str("CONV_FROM_FIELD", "phone"),
-    "TO": env_str("CONV_TO_FIELD", "to_number"),
-    "BODY": env_str("CONV_MESSAGE_FIELD", "message"),
-    "STATUS": env_str("CONV_STATUS_FIELD", "status"),
-    "DIRECTION": env_str("CONV_DIRECTION_FIELD", "direction"),
-    "TEXTGRID_ID": env_str("CONV_TEXTGRID_ID_FIELD", "TextGrid ID"),
-    "RECEIVED_AT": env_str("CONV_RECEIVED_AT_FIELD", "received_at"),
-    "INTENT": env_str("CONV_INTENT_FIELD", "intent_detected"),
-    "PROCESSED_BY": env_str("CONV_PROCESSED_BY_FIELD", "processed_by"),
-    "SENT_AT": env_str("CONV_SENT_AT_FIELD", "sent_at"),
-}
+CONVERSATIONS_FIELDS = CONVERSATIONS_TABLE.field_names()
+CONVERSATIONS_FIELD_CANDIDATES = CONVERSATIONS_TABLE.field_candidates()
+CONV_FIELDS = conversations_field_map()
 
+LEADS_FIELDS = LEADS_TABLE.field_names()
+LEADS_FIELD_CANDIDATES = LEADS_TABLE.field_candidates()
+LEAD_FIELDS = leads_field_map()
+
+CAMPAIGN_FIELDS = CAMPAIGNS_TABLE.field_names()
+CAMPAIGN_FIELD_CANDIDATES = CAMPAIGNS_TABLE.field_candidates()
+CAMPAIGN_FIELD_MAP = campaign_field_map()
+
+DRIP_FIELDS = DRIP_QUEUE_TABLE.field_names()
+DRIP_FIELD_CANDIDATES = DRIP_QUEUE_TABLE.field_candidates()
+DRIP_FIELD_MAP = drip_field_map()
+
+TEMPLATE_FIELDS = TEMPLATES_TABLE.field_names()
+TEMPLATE_FIELD_CANDIDATES = TEMPLATES_TABLE.field_candidates()
+TEMPLATE_FIELD_MAP = template_field_map()
+
+PROSPECT_FIELDS = PROSPECTS_TABLE.field_names()
+PROSPECT_FIELD_CANDIDATES = PROSPECTS_TABLE.field_candidates()
+PROSPECT_FIELD_MAP = prospects_field_map()
+
+DEALS_FIELDS = DEALS_TABLE.field_names()
+DEALS_FIELD_CANDIDATES = DEALS_TABLE.field_candidates()
+DEALS_FIELD_MAP = deals_field_map()
+
+CAMPAIGN_MANAGER_FIELDS = CAMPAIGN_MANAGER_TABLE.field_names()
+CAMPAIGN_MANAGER_FIELD_CANDIDATES = CAMPAIGN_MANAGER_TABLE.field_candidates()
+CAMPAIGN_MANAGER_FIELD_MAP = campaign_manager_field_map()
+
+NUMBERS_FIELDS = NUMBERS_TABLE_DEF.field_names()
+NUMBERS_FIELD_CANDIDATES = NUMBERS_TABLE_DEF.field_candidates()
+NUMBERS_FIELD_MAP = numbers_field_map()
+
+OPTOUT_FIELDS = OPTOUTS_TABLE.field_names()
+OPTOUT_FIELD_CANDIDATES = OPTOUTS_TABLE.field_candidates()
+OPTOUT_FIELD_MAP = optouts_field_map()
+
+MARKET_FIELDS = MARKETS_TABLE.field_names()
+MARKET_FIELD_CANDIDATES = MARKETS_TABLE.field_candidates()
+MARKET_FIELD_MAP = markets_field_map()
+
+LOG_FIELDS = LOGS_TABLE.field_names()
+LOG_FIELD_CANDIDATES = LOGS_TABLE.field_candidates()
+LOG_FIELD_MAP = logs_field_map()
+
+KPI_FIELDS = KPIS_TABLE_DEF.field_names()
+KPI_FIELD_CANDIDATES = KPIS_TABLE_DEF.field_candidates()
+KPI_FIELD_MAP = kpi_field_map()
+
+DEVOPS_SERVICE_FIELDS = DEVOPS_SERVICES_TABLE.field_names()
+DEVOPS_SERVICE_FIELD_CANDIDATES = DEVOPS_SERVICES_TABLE.field_candidates()
+DEVOPS_SERVICE_FIELD_MAP = devops_services_field_map()
+
+DEVOPS_DEPLOYMENT_FIELDS = DEVOPS_DEPLOYMENTS_TABLE.field_names()
+DEVOPS_DEPLOYMENT_FIELD_CANDIDATES = DEVOPS_DEPLOYMENTS_TABLE.field_candidates()
+DEVOPS_DEPLOYMENT_FIELD_MAP = devops_deployments_field_map()
+
+DEVOPS_SYSTEM_LOG_FIELDS = DEVOPS_SYSTEM_LOGS_TABLE.field_names()
+DEVOPS_SYSTEM_LOG_FIELD_CANDIDATES = DEVOPS_SYSTEM_LOGS_TABLE.field_candidates()
+DEVOPS_SYSTEM_LOG_FIELD_MAP = devops_system_logs_field_map()
+
+DEVOPS_INTEGRATION_FIELDS = DEVOPS_INTEGRATIONS_TABLE.field_names()
+DEVOPS_INTEGRATION_FIELD_CANDIDATES = DEVOPS_INTEGRATIONS_TABLE.field_candidates()
+DEVOPS_INTEGRATION_FIELD_MAP = devops_integrations_field_map()
+
+DEVOPS_HEALTH_FIELDS = DEVOPS_HEALTH_CHECKS_TABLE.field_names()
+DEVOPS_HEALTH_FIELD_CANDIDATES = DEVOPS_HEALTH_CHECKS_TABLE.field_candidates()
+DEVOPS_HEALTH_FIELD_MAP = devops_health_checks_field_map()
+
+DEVOPS_METRIC_FIELDS = DEVOPS_METRICS_TABLE.field_names()
+DEVOPS_METRIC_FIELD_CANDIDATES = DEVOPS_METRICS_TABLE.field_candidates()
+DEVOPS_METRIC_FIELD_MAP = devops_metrics_field_map()
 PHONE_FIELDS = [
     "phone",
     "Phone",
@@ -111,6 +214,18 @@ class Settings:
     TEMPLATES_TABLE: str
     DRIP_QUEUE_TABLE: str
     CAMPAIGNS_TABLE: str
+    CAMPAIGN_MANAGER_TABLE: str
+    OPTOUTS_TABLE: str
+    MARKETS_TABLE: str
+    LOGS_TABLE: str
+    KPIS_TABLE: str
+    DEVOPS_SERVICES_TABLE: str
+    DEVOPS_DEPLOYMENTS_TABLE: str
+    DEVOPS_SYSTEM_LOGS_TABLE: str
+    DEVOPS_INTEGRATIONS_TABLE: str
+    DEVOPS_HEALTH_CHECKS_TABLE: str
+    DEVOPS_METRICS_TABLE: str
+    DEALS_TABLE: str
 
     # Tables (control base)
     NUMBERS_TABLE: str
@@ -160,6 +275,18 @@ def settings() -> Settings:
         TEMPLATES_TABLE=env_str("TEMPLATES_TABLE", "Templates"),
         DRIP_QUEUE_TABLE=env_str("DRIP_QUEUE_TABLE", "Drip Queue"),
         CAMPAIGNS_TABLE=env_str("CAMPAIGNS_TABLE", "Campaigns"),
+        CAMPAIGN_MANAGER_TABLE=env_str("CAMPAIGN_MANAGER_TABLE", "Campaigns Manager"),
+        OPTOUTS_TABLE=env_str("OPTOUTS_TABLE", "Opt-Outs"),
+        MARKETS_TABLE=env_str("MARKETS_TABLE", "Markets"),
+        LOGS_TABLE=env_str("RUNS_TABLE", "Runs/Logs"),
+        KPIS_TABLE=env_str("KPIS_TABLE", "KPIs"),
+        DEVOPS_SERVICES_TABLE=env_str("DEVOPS_SERVICES_TABLE", "Services"),
+        DEVOPS_DEPLOYMENTS_TABLE=env_str("DEVOPS_DEPLOYMENTS_TABLE", "Deployments"),
+        DEVOPS_SYSTEM_LOGS_TABLE=env_str("DEVOPS_SYSTEM_LOGS_TABLE", "System Logs"),
+        DEVOPS_INTEGRATIONS_TABLE=env_str("DEVOPS_INTEGRATIONS_TABLE", "Integrations"),
+        DEVOPS_HEALTH_CHECKS_TABLE=env_str("DEVOPS_HEALTH_CHECKS_TABLE", "Health Checks"),
+        DEVOPS_METRICS_TABLE=env_str("DEVOPS_METRICS_TABLE", "Metrics"),
+        DEALS_TABLE=env_str("DEALS_TABLE", "Deals"),
         NUMBERS_TABLE=env_str("NUMBERS_TABLE", "Numbers"),
         DAILY_LIMIT_DEFAULT=env_int("DAILY_LIMIT", 750),
         RATE_PER_NUMBER_PER_MIN=env_int("RATE_PER_NUMBER_PER_MIN", 20),

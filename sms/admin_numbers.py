@@ -18,6 +18,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS, PROSPECT_FIELD_MAP as PROSPECT_FIELDS
+from sms.airtable_schema import DripStatus
+
 # ---- Optional Airtable client (pyairtable v2+)
 try:
     from pyairtable import Api as _Api  # v2 canonical
@@ -41,6 +44,18 @@ QUIET_TZ_NAME = os.getenv("QUIET_TZ", "America/Chicago")
 QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", "21"))  # 21:00
 QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", "9"))  # 09:00
 DAILY_LIMIT_FALLBACK = int(os.getenv("DAILY_LIMIT", "750"))
+
+DRIP_STATUS_FIELD = DRIP_FIELDS["STATUS"]
+DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS["NEXT_SEND_DATE"]
+DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS["FROM_NUMBER"]
+DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS["SELLER_PHONE"]
+DRIP_MARKET_FIELD = DRIP_FIELDS["MARKET"]
+DRIP_UI_FIELD = DRIP_FIELDS["UI"]
+DRIP_NEXT_SEND_AT_FIELD = DRIP_FIELDS["NEXT_SEND_AT"]
+DRIP_NEXT_SEND_AT_UTC_FIELD = DRIP_FIELDS["NEXT_SEND_AT_UTC"]
+DRIP_CAMPAIGN_FIELD = DRIP_FIELDS["CAMPAIGN_LINK"]
+DRIP_PROSPECT_FIELD = DRIP_FIELDS["PROSPECT_LINK"]
+PROSPECT_MARKET_FIELD = PROSPECT_FIELDS["MARKET"]
 
 
 # =========================
@@ -189,7 +204,7 @@ def _to_e164(fields: Dict[str, Any]) -> Optional[str]:
 def _supports_market(f: Dict[str, Any], market: Optional[str]) -> bool:
     if not market:
         return True
-    if f.get("Market") == market:
+    if f.get(PROSPECT_MARKET_FIELD) == market or f.get("Market") == market:
         return True
     ms = f.get("Markets")
     return isinstance(ms, list) and (market in ms)
@@ -218,7 +233,7 @@ def _prospect_market_map() -> Dict[str, Any]:
         return pmap
     try:
         for r in _safe_all(t):
-            pmap[r["id"]] = r.get("fields", {}).get("Market")
+            pmap[r["id"]] = r.get("fields", {}).get(PROSPECT_MARKET_FIELD)
     except Exception:
         traceback.print_exc()
     return pmap
@@ -315,18 +330,22 @@ def backfill_numbers_for_existing_queue(
     for r in rows:
         scanned += 1
         f = r.get("fields", {})
-        status = str(f.get("status") or f.get("Status") or "").strip().upper()
-        if status not in ("QUEUED", "READY", "SENDING"):
+        status = str(f.get(DRIP_STATUS_FIELD) or "").strip().upper()
+        if status not in (
+            DripStatus.QUEUED.value,
+            DripStatus.READY.value,
+            DripStatus.SENDING.value,
+        ):
             continue
 
-        did = f.get("from_number") or f.get("From Number")
+        did = f.get(DRIP_FROM_NUMBER_FIELD)
 
         # Resolve market if needed
-        market = f.get("Market")
-        cids = f.get("Campaign") or []
+        market = f.get(DRIP_MARKET_FIELD)
+        cids = f.get(DRIP_CAMPAIGN_FIELD) or []
         if isinstance(cids, list) and cids:
             market = market or cmap.get(cids[0])
-        pids = f.get("Prospect") or []
+        pids = f.get(DRIP_PROSPECT_FIELD) or []
         if isinstance(pids, list) and pids:
             market = market or pmap.get(pids[0])
 
@@ -336,12 +355,19 @@ def backfill_numbers_for_existing_queue(
             if not did:
                 skipped += 1
                 continue
-            _safe_update(drip, r["id"], {"from_number": did, "From Number": did})
+            _safe_update(drip, r["id"], {DRIP_FROM_NUMBER_FIELD: did})
 
         # Pace next_send_date
         t = max(next_by_num[did], now)
         next_by_num[did] = t + timedelta(seconds=sec_per_msg)
-        _safe_update(drip, r["id"], {"next_send_date": _local_naive_iso(t), "UI": "⏳"})
+        _safe_update(
+            drip,
+            r["id"],
+            {
+                DRIP_NEXT_SEND_DATE_FIELD: _local_naive_iso(t),
+                DRIP_UI_FIELD: "⏳",
+            },
+        )
         updated += 1
 
     return {"scanned": scanned, "updated": updated, "skipped": skipped}
@@ -373,15 +399,15 @@ def resequence_next_send(
     # Collect due items grouped by DID
     for r in rows:
         f = r.get("fields", {})
-        status = str(f.get("status") or f.get("Status") or "").strip().upper()
-        if status not in ("QUEUED", "READY"):
+        status = str(f.get(DRIP_STATUS_FIELD) or "").strip().upper()
+        if status not in (DripStatus.QUEUED.value, DripStatus.READY.value):
             continue
         if only_campaign_id:
-            cids = f.get("Campaign") or []
+            cids = f.get(DRIP_CAMPAIGN_FIELD) or []
             cids = cids if isinstance(cids, list) else [cids]
             if only_campaign_id not in cids:
                 continue
-        did = f.get("from_number") or f.get("From Number")
+        did = f.get(DRIP_FROM_NUMBER_FIELD)
         if not did:
             continue
         pernum[did].append(r)
@@ -392,7 +418,14 @@ def resequence_next_send(
         group.sort(key=lambda r: (str(r.get("fields", {}).get("created_at") or ""), r["id"]))
         next_t = now
         for r in group:
-            _safe_update(drip, r["id"], {"next_send_date": _local_naive_iso(next_t), "UI": "⏳"})
+            _safe_update(
+                drip,
+                r["id"],
+                {
+                    DRIP_NEXT_SEND_DATE_FIELD: _local_naive_iso(next_t),
+                    DRIP_UI_FIELD: "⏳",
+                },
+            )
             next_t = next_t + timedelta(seconds=sec_per_msg)
             updated += 1
 

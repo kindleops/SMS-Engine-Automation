@@ -5,6 +5,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple, List
 from zoneinfo import ZoneInfo
 
+from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
+from sms.airtable_schema import DripStatus
+
 # ---- pyairtable compat (no hard crash) -------------------------------------
 _PyApi = None
 _PyTable = None
@@ -21,6 +24,11 @@ AIRTABLE_KEY = os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 DRIP_QUEUE_TABLE = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 QUIET_TZ = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago"))
+
+DRIP_STATUS_FIELD = DRIP_FIELDS["STATUS"]
+DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS["NEXT_SEND_DATE"]
+DRIP_NEXT_SEND_AT_FIELD = DRIP_FIELDS["NEXT_SEND_AT"]
+DRIP_NEXT_SEND_AT_UTC_FIELD = DRIP_FIELDS["NEXT_SEND_AT_UTC"]
 
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
     if not (api_key and base_id): return None
@@ -72,7 +80,15 @@ def _parse_send_time(fields: Dict[str, Any]) -> Tuple[Optional[datetime], str]:
       - Next Send Date / next_send_date (assume CT naive)
     """
     # Prefer explicit UTC field
-    for k in ("Next Send At", "next_send_at_utc", "Send At UTC", "send_at_utc"):
+    utc_candidates = [
+        DRIP_NEXT_SEND_AT_FIELD,
+        DRIP_NEXT_SEND_AT_UTC_FIELD,
+        "Next Send At",
+        "next_send_at_utc",
+        "Send At UTC",
+        "send_at_utc",
+    ]
+    for k in utc_candidates:
         v = fields.get(k)
         if isinstance(v, str) and v.strip():
             try:
@@ -80,7 +96,8 @@ def _parse_send_time(fields: Dict[str, Any]) -> Tuple[Optional[datetime], str]:
             except Exception:
                 pass
     # Fall back to CT-naive
-    for k in ("Next Send Date", "next_send_date"):
+    date_candidates = [DRIP_NEXT_SEND_DATE_FIELD, "next_send_date"]
+    for k in date_candidates:
         v = fields.get(k)
         if isinstance(v, str) and v.strip():
             try:
@@ -118,8 +135,8 @@ def normalize_next_send_dates(dry_run: bool = True, force_now: bool = False, lim
     for r in rows:
         if updated >= limit: break
         f = r.get("fields", {}) or {}
-        status = str(f.get("status") or f.get("Status") or "").upper()
-        if status not in ("QUEUED", "READY"):
+        status = str(f.get(DRIP_STATUS_FIELD) or "").upper()
+        if status not in (DripStatus.QUEUED.value, DripStatus.READY.value):
             continue
 
         examined += 1
@@ -133,13 +150,20 @@ def normalize_next_send_dates(dry_run: bool = True, force_now: bool = False, lim
             # last resort: set to now
             new_send_utc = now + timedelta(seconds=random.randint(2, 12))
 
+        ct_local = _to_ct_local_naive(new_send_utc)
         payload = {
-            "Next Send At": new_send_utc.isoformat(),     # human+API
-            "next_send_at_utc": new_send_utc.isoformat(), # programmatic
-            "Next Send Date": _to_ct_local_naive(new_send_utc),
-            "next_send_date": _to_ct_local_naive(new_send_utc),
-            "status": "READY",
+            DRIP_NEXT_SEND_AT_FIELD: new_send_utc.isoformat(),
+            DRIP_NEXT_SEND_AT_UTC_FIELD: new_send_utc.isoformat(),
+            DRIP_NEXT_SEND_DATE_FIELD: ct_local,
+            DRIP_STATUS_FIELD: DripStatus.READY.value,
         }
+        # Maintain legacy duplicate fields if present
+        if DRIP_NEXT_SEND_DATE_FIELD != "next_send_date":
+            payload["next_send_date"] = ct_local
+        if DRIP_NEXT_SEND_AT_FIELD != "Next Send At":
+            payload["Next Send At"] = new_send_utc.isoformat()
+        if DRIP_NEXT_SEND_AT_UTC_FIELD != "next_send_at_utc":
+            payload["next_send_at_utc"] = new_send_utc.isoformat()
 
         if not dry_run:
             if _safe_update(drip, r["id"], payload):

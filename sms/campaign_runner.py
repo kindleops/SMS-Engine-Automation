@@ -51,11 +51,21 @@ try:
 except Exception:
     def update_metrics(*args, **kwargs): return {"ok": True}
 
+<<<<<<< HEAD
 from sms.dispatcher import get_policy
 
 
 def _policy():
     return get_policy()
+=======
+from sms.config import (
+    CAMPAIGN_FIELD_MAP as CAMPAIGN_FIELDS,
+    DRIP_FIELD_MAP as DRIP_FIELDS,
+    PROSPECT_FIELD_MAP as PROSPECT_FIELDS,
+)
+from sms.airtable_schema import CampaignStatus, DripStatus
+
+>>>>>>> codex-refactor-test
 
 # ─────────────────────────────────────────────────────────────
 # ENV / CONFIG
@@ -104,6 +114,7 @@ DEDUPE_HOURS              = int(os.getenv("DEDUPE_HOURS", "72"))
 DAILY_LIMIT_FALLBACK      = int(os.getenv("DAILY_LIMIT", str(_policy_defaults.daily_limit)))
 DEBUG_CAMPAIGNS           = os.getenv("DEBUG_CAMPAIGNS", "false").lower() in ("1","true","yes")
 
+<<<<<<< HEAD
 # manual control field names
 MANUAL_RUN_FIELD       = "Manual Run Now"
 MANUAL_STOP_FIELD      = "Manual Stop/Pause"
@@ -125,6 +136,86 @@ PHONE_FIELDS = [
     "Phone 1 (from Linked Owner)","Phone 2 (from Linked Owner)","Phone 3 (from Linked Owner)"
 ]
 DNC_FIELDS = ["DNC","Do Not Contact","Do Not Call","Do Not Text","Do Not SMS","Opt Out","Opt-Out","Unsubscribed","Unsubscribe","Stop (SMS)"]
+=======
+RUNNER_SEND_AFTER_QUEUE = os.getenv("RUNNER_SEND_AFTER_QUEUE", "false").lower() in ("1", "true", "yes")
+ALLOW_QUEUE_OUTSIDE_HOURS = os.getenv("ALLOW_QUEUE_OUTSIDE_HOURS", "true").lower() in ("1", "true", "yes")
+PREQUEUE_BEFORE_START = os.getenv("PREQUEUE_BEFORE_START", "true").lower() in ("1", "true", "yes")
+STRICT_CAMPAIGN_ELIGIBILITY = os.getenv("STRICT_CAMPAIGN_ELIGIBILITY", "true").lower() in ("1", "true", "yes")
+
+DEDUPE_HOURS = int(os.getenv("DEDUPE_HOURS", "72"))
+DAILY_LIMIT_FALLBACK = int(os.getenv("DAILY_LIMIT", "750"))
+DEBUG_CAMPAIGNS = os.getenv("DEBUG_CAMPAIGNS", "false").lower() in ("1", "true", "yes")
+
+# Common field names
+PHONE_FIELDS = [
+    "phone", "Phone", "Mobile", "Cell", "Phone Number", "Primary Phone",
+    "Phone 1", "Phone 2", "Phone 3",
+    "Owner Phone", "Owner Phone 1", "Owner Phone 2",
+    "Phone 1 (from Linked Owner)", "Phone 2 (from Linked Owner)", "Phone 3 (from Linked Owner)",
+]
+DNC_FIELDS = [
+    "DNC", "Do Not Contact", "Do Not Call", "Do Not Text", "Do Not SMS",
+    "Opt Out", "Opt-Out", "Unsubscribed", "Unsubscribe", "Stop (SMS)"
+]
+
+STATUS_ICON = {
+    DripStatus.QUEUED.value: "⏳",
+    DripStatus.READY.value: "⏳",
+    DripStatus.SENDING.value: "🔄",
+    DripStatus.SENT.value: "✅",
+    DripStatus.DELIVERED.value: "✅",
+    DripStatus.FAILED.value: "❌",
+    DripStatus.RETRY.value: "🔄",
+    DripStatus.THROTTLED.value: "⏸",
+    DripStatus.DNC.value: "🚫",
+}
+
+# Normalize statuses to lowercase for comparison
+ALLOWED_STATUSES_RAW = {"scheduled", "running", "ready", "active", ""}  # blank allowed only in permissive mode
+BLOCKED_STATUSES_RAW = {
+    "paused", "inactive", "on hold", "hold", "stopped", "stop",
+    "complete", "completed", "disabled", "draft", "cancelled", "canceled",
+}
+
+ALLOWED_STATUSES_RAW.update({CampaignStatus.SCHEDULED.value, CampaignStatus.RUNNING.value})
+BLOCKED_STATUSES_RAW.update({CampaignStatus.PAUSED.value, CampaignStatus.COMPLETED.value, CampaignStatus.DRAFT.value})
+
+ALLOWED_STATUSES = {s.lower() for s in ALLOWED_STATUSES_RAW}
+BLOCKED_STATUSES = {s.lower() for s in BLOCKED_STATUSES_RAW}
+
+# Canonical field names (resolved via schema)
+CAMPAIGN_NAME_FIELD = CAMPAIGN_FIELDS["NAME"]
+CAMPAIGN_PUBLIC_NAME_FIELD = CAMPAIGN_FIELDS["PUBLIC_NAME"]
+CAMPAIGN_STATUS_FIELD = CAMPAIGN_FIELDS["STATUS"]
+CAMPAIGN_MARKET_FIELD = CAMPAIGN_FIELDS["MARKET"]
+CAMPAIGN_VIEW_FIELD = CAMPAIGN_FIELDS["VIEW_SEGMENT"]
+CAMPAIGN_TEMPLATES_FIELD = CAMPAIGN_FIELDS["TEMPLATES_LINK"]
+CAMPAIGN_START_TIME_FIELD = CAMPAIGN_FIELDS["START_TIME"]
+CAMPAIGN_END_TIME_FIELD = CAMPAIGN_FIELDS["END_TIME"]
+CAMPAIGN_LAST_RUN_AT_FIELD = CAMPAIGN_FIELDS["LAST_RUN_AT"]
+CAMPAIGN_LAST_RUN_RESULT_FIELD = CAMPAIGN_FIELDS["LAST_RUN_RESULT"]
+
+DRIP_STATUS_FIELD = DRIP_FIELDS["STATUS"]
+DRIP_MARKET_FIELD = DRIP_FIELDS["MARKET"]
+DRIP_TEMPLATE_FIELD = DRIP_FIELDS["TEMPLATE_LINK"]
+DRIP_PROSPECT_FIELD = DRIP_FIELDS["PROSPECT_LINK"]
+DRIP_CAMPAIGN_FIELD = DRIP_FIELDS["CAMPAIGN_LINK"]
+DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS["SELLER_PHONE"]
+DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS["FROM_NUMBER"]
+DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS["MESSAGE_PREVIEW"]
+DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS["NEXT_SEND_DATE"]
+DRIP_PROPERTY_ID_FIELD = DRIP_FIELDS["PROPERTY_ID"]
+DRIP_NUMBER_RECORD_ID_FIELD = DRIP_FIELDS["NUMBER_RECORD_ID"]
+DRIP_UI_FIELD = DRIP_FIELDS["UI"]
+PROSPECT_MARKET_FIELD = PROSPECT_FIELDS["MARKET"]
+PROSPECT_PROPERTY_ID_FIELD = PROSPECT_FIELDS["PROPERTY_ID"]
+
+# ─────────────────────────────────────────────────────────────
+# Time / helpers
+# ─────────────────────────────────────────────────────────────
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+>>>>>>> codex-refactor-test
 
 # ─────────────────────────────────────────────────────────────
 # Time / small utils
@@ -571,13 +662,18 @@ def _send_after_queue_flag(cf: Dict[str, Any]) -> bool:
 def _refresh_ui_icons_for_campaign(drip_tbl, campaign_id: str):
     try:
         for r in drip_tbl.all():  # type: ignore[attr-defined]
+<<<<<<< HEAD
             f = r.get("fields", {}) or {}
             cids = f.get("Campaign") or []
+=======
+            f = r.get("fields", {})
+            cids = f.get(DRIP_CAMPAIGN_FIELD) or []
+>>>>>>> codex-refactor-test
             if campaign_id in (cids if isinstance(cids, list) else [cids]):
-                status = str(f.get("status") or f.get("Status") or "")
+                status = str(f.get(DRIP_STATUS_FIELD) or "")
                 icon = STATUS_ICON.get(status, "")
-                if icon and f.get("UI") != icon:
-                    _safe_update(drip_tbl, r["id"], {"UI": icon})
+                if icon and f.get(DRIP_UI_FIELD) != icon:
+                    _safe_update(drip_tbl, r["id"], {DRIP_UI_FIELD: icon})
     except Exception:
         traceback.print_exc()
 
@@ -599,6 +695,7 @@ def run_catchup_for_overdue(limit: int = 200) -> Dict[str, Any]:
     # We rely on send_batch to pick up eligible rows; run in chunks
     total_sent = 0
     try:
+<<<<<<< HEAD
         # run multiple small bursts to avoid carrier spikes
         remaining = limit
         while remaining > 0:
@@ -615,6 +712,88 @@ def run_catchup_for_overdue(limit: int = 200) -> Dict[str, Any]:
     except Exception:
         traceback.print_exc()
         return {"ok": False, "sent": total_sent, "errors": ["send_batch failed"]}
+=======
+        cutoff_dt = _last_n_hours_dt(DEDUPE_HOURS)
+        l10 = last10(phone)
+        for r in drip_tbl.all():  # type: ignore[attr-defined]
+            f = r.get("fields", {})
+            ph = f.get(DRIP_SELLER_PHONE_FIELD)
+            if last10(ph) == l10:
+                cids = f.get(DRIP_CAMPAIGN_FIELD) or []
+                cids = cids if isinstance(cids, list) else [cids]
+                if campaign_id in cids:
+                    status = str(f.get(DRIP_STATUS_FIELD) or "")
+                    when_raw = f.get(DRIP_NEXT_SEND_DATE_FIELD) or f.get("created_at") or ""
+                    when_dt = _parse_time_maybe_ct(when_raw) or utcnow()
+                    if status in (
+                        DripStatus.QUEUED.value,
+                        DripStatus.SENDING.value,
+                        DripStatus.READY.value,
+                    ) and when_dt >= cutoff_dt:
+                        return True
+        return False
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
+# ─────────────────────────────────────────────────────────────
+# Limit normalizer (prevents None/ALL crashes)
+# ─────────────────────────────────────────────────────────────
+def _normalize_limit(limit: Optional[int | str]) -> int:
+    if limit is None:
+        return 999_999
+    try:
+        s = str(limit).strip().upper()
+        if s in ("", "ALL", "UNLIMITED", "NONE"):
+            return 999_999
+        v = int(s)
+        return max(1, v)
+    except Exception:
+        return 999_999
+
+
+# ─────────────────────────────────────────────────────────────
+# Status/flag helpers
+# ─────────────────────────────────────────────────────────────
+def _status_tuple(f: Dict[str, Any]) -> Tuple[str, str]:
+    """Returns (normalized_status, original_status_str)"""
+    raw = _field(f, CAMPAIGN_STATUS_FIELD, "status", "Status", default="")
+    if isinstance(raw, list):  # extremely rare (multi-select)
+        raw = raw[0] if raw else ""
+    s = str(raw or "").strip()
+    return (s.lower(), s)
+
+def _campaign_is_eligible(f: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Decide eligibility once, clearly.
+    STRICT mode:
+      - require (Go Live OR Active) is truthy AND status in ALLOWED (blank NOT allowed)
+      - block if status in BLOCKED
+    PERMISSIVE mode:
+      - allow if status is blank OR in ALLOWED, and neither Go Live nor Active is explicitly False
+    """
+    status_norm, status_raw = _status_tuple(f)
+    go_live = _get_bool(f, "Go Live", "go live", "go_live", "Live", default=False)
+    active  = _get_bool(f, "Active", "active", "Enabled", "enabled", default=False)
+
+    if status_norm in BLOCKED_STATUSES:
+        return (False, f"status '{status_raw}' is BLOCKED")
+
+    if STRICT_CAMPAIGN_ELIGIBILITY:
+        if status_norm not in (ALLOWED_STATUSES - {""}):  # blank NOT allowed in strict
+            return (False, f"status '{status_raw}' is NOT allowed in strict")
+        if not (go_live or active):
+            return (False, f"Go Live={go_live} and Active={active} (both false)")
+        return (True, "eligible (strict)")
+    else:
+        # permissive: blank ok; only explicit False blocks
+        if status_norm and status_norm not in ALLOWED_STATUSES:
+            return (False, f"status '{status_raw}' not in allowed (permissive)")
+        if f.get("Go Live") is False or f.get("Active") is False:
+            return (False, "explicit false on Go Live or Active")
+        return (True, "eligible (permissive)")
+>>>>>>> codex-refactor-test
 
     try: update_metrics()
     except Exception: pass
@@ -653,8 +832,17 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
     eligible: List[Dict] = []
 
     for c in all_campaigns:
+<<<<<<< HEAD
         cf = c.get("fields", {}) or {}
         name = cf.get("Name") or cf.get("name") or c.get("id")
+=======
+        f = c.get("fields", {}) or {}
+        name = (
+            _field(f, CAMPAIGN_NAME_FIELD, CAMPAIGN_PUBLIC_NAME_FIELD, "Name", "name", default=c.get("id"))
+            or c.get("id")
+        )
+        ok, why = _campaign_is_eligible(f)
+>>>>>>> codex-refactor-test
 
         # Manual overrides first
         forced_status, post_updates = _campaign_manual_overrides(cf)
@@ -671,11 +859,48 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             if DEBUG_CAMPAIGNS: print(f"[skip] {c.get('id')} ({name}) → {why}.")
             continue
 
+<<<<<<< HEAD
         start_dt = _get_time_field(cf, "Start Time","Start","Start At","start_time","Start Date","Schedule Start")
         end_dt   = _get_time_field(cf, "End Time","End","End At","end_time","End Date","Schedule End")
         if end_dt and now_utc >= end_dt:
             _set_campaign_status(campaigns, c["id"], "Completed")
             if DEBUG_CAMPAIGNS: print(f"[campaign] COMPLETE {name}: now>=end")
+=======
+        # Time window
+        start_dt = _get_time_field(
+            f,
+            CAMPAIGN_START_TIME_FIELD,
+            "Start Time",
+            "Start",
+            "Start At",
+            "start_time",
+            "Start Date",
+            "Schedule Start",
+        )
+        end_dt = _get_time_field(
+            f,
+            CAMPAIGN_END_TIME_FIELD,
+            "End Time",
+            "End",
+            "End At",
+            "end_time",
+            "End Date",
+            "Schedule End",
+        )
+
+        # Completed if end passed
+        if end_dt and now_utc >= end_dt:
+            _safe_update(
+                campaigns,
+                c["id"],
+                {
+                    CAMPAIGN_STATUS_FIELD: CampaignStatus.COMPLETED.value,
+                    CAMPAIGN_LAST_RUN_AT_FIELD: iso_now(),
+                },
+            )
+            if DEBUG_CAMPAIGNS:
+                print(f"[campaign] COMPLETE {name}: now>=end")
+>>>>>>> codex-refactor-test
             continue
 
         # Prequeue window gating
@@ -725,15 +950,22 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         cf = camp.get("fields", {}) or {}
         cid = camp["id"]
+<<<<<<< HEAD
         name = (cf.get("Name") or cf.get("name") or "Unnamed")
         view = (_field(cf, "View/Segment","View", default="") or "").strip() or None
         market = _field(cf, "Market","market", default=None)
+=======
+        name = (_field(cf, CAMPAIGN_NAME_FIELD, "Name", "name", default="Unnamed") or "Unnamed")
+        view = (_field(cf, CAMPAIGN_VIEW_FIELD, "View/Segment", "View", default="") or "").strip() or None
+        market = _field(cf, CAMPAIGN_MARKET_FIELD, "Market", "market", default=None)
+>>>>>>> codex-refactor-test
 
         # Pull prospects
         try:
             prospect_rows = get_prospects_table().all(view=view) if view else get_prospects_table().all()  # type: ignore[attr-defined]
         except Exception:
             traceback.print_exc()
+<<<<<<< HEAD
             _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
             continue
 
@@ -743,6 +975,30 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             _safe_update(get_campaigns_table(), cid, {"last_run_at": iso_now()})
             if DEBUG_CAMPAIGNS: print(f"[campaign] SKIP {name}: no Templates")
             continue
+=======
+            continue
+
+        template_ids = cf.get(CAMPAIGN_TEMPLATES_FIELD) or cf.get("Templates") or cf.get("templates") or []
+        if not template_ids:
+            if DEBUG_CAMPAIGNS:
+                print(f"[campaign] SKIP {name}: no Templates linked")
+            # still update last_run_at so you can see it attempted
+            _safe_update(get_campaigns_table(), cid, {CAMPAIGN_LAST_RUN_AT_FIELD: iso_now()})
+            continue
+
+        start_dt = _get_time_field(
+            cf,
+            CAMPAIGN_START_TIME_FIELD,
+            "Start Time",
+            "Start",
+            "Start At",
+            "start_time",
+            "Start Date",
+            "Schedule Start",
+        )
+        prequeue = bool(start_dt and now_utc < start_dt and PREQUEUE_BEFORE_START)
+        base_utc = start_dt if prequeue else (max(now_utc, start_dt) if start_dt else now_utc)
+>>>>>>> codex-refactor-test
 
         # Timing
         start_dt = _get_time_field(cf, "Start Time","Start","Start At","start_time","Start Date","Schedule Start")
@@ -774,11 +1030,24 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
 
         # Status prior to queue for clear UX
         if prequeue:
+<<<<<<< HEAD
             _set_campaign_status(get_campaigns_table(), cid, "Scheduled", **{
                 NEXT_RUN_AT_FIELD: start_dt.astimezone(QUIET_TZ).isoformat(timespec="seconds") if start_dt else None
             })
         else:
             _set_campaign_status(get_campaigns_table(), cid, "Running")
+=======
+            _safe_update(get_campaigns_table(), cid, {CAMPAIGN_LAST_RUN_AT_FIELD: iso_now()})
+        else:
+            _safe_update(
+                get_campaigns_table(),
+                cid,
+                {
+                    CAMPAIGN_STATUS_FIELD: CampaignStatus.RUNNING.value,
+                    CAMPAIGN_LAST_RUN_AT_FIELD: iso_now(),
+                },
+            )
+>>>>>>> codex-refactor-test
 
         # Queue loop
         queued = 0
@@ -811,6 +1080,7 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             scheduled_local = _local_naive_iso(scheduled)
 
             payload = {
+<<<<<<< HEAD
                 "Prospect": [pr["id"]],
                 "Campaign": [cid],
                 "Template": [trow["id"]] if trow and trow.get("id") else None,
@@ -823,6 +1093,20 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
                 "Property ID": pf.get("Property ID"),
                 "Number Record Id": ns.rec_id,
                 "UI": STATUS_ICON.get("QUEUED","⏳"),
+=======
+                DRIP_PROSPECT_FIELD: [pr["id"]],
+                DRIP_CAMPAIGN_FIELD: [cid],
+                DRIP_TEMPLATE_FIELD: [tid] if tid else None,
+                DRIP_MARKET_FIELD: market or pf.get(PROSPECT_MARKET_FIELD),
+                DRIP_SELLER_PHONE_FIELD: phone,
+                DRIP_MESSAGE_PREVIEW_FIELD: body,
+                DRIP_FROM_NUMBER_FIELD: ns.e164,
+                DRIP_STATUS_FIELD: DripStatus.QUEUED.value,
+                DRIP_NEXT_SEND_DATE_FIELD: scheduled_local,
+                DRIP_PROPERTY_ID_FIELD: pf.get(PROSPECT_PROPERTY_ID_FIELD),
+                DRIP_NUMBER_RECORD_ID_FIELD: ns.rec_id,
+                DRIP_UI_FIELD: STATUS_ICON.get(DripStatus.QUEUED.value, "⏳"),
+>>>>>>> codex-refactor-test
             }
             created = _safe_create(get_drip_table(), {k:v for k,v in payload.items() if v is not None})
             if created:
@@ -848,12 +1132,37 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
         _refresh_ui_icons_for_campaign(get_drip_table(), cid)
 
         sent_delta = (batch_result.get("total_sent", 0) or 0) + (retry_result.get("retried", 0) or 0)
+<<<<<<< HEAD
         if end_dt and utcnow() >= end_dt:
             new_status = "Completed"
         elif queued == 0 and not prequeue:
             new_status = _field(cf,"status","Status", default="Running") or "Running"
         else:
             new_status = "Scheduled" if prequeue else "Running"
+=======
+        new_status = (
+            CampaignStatus.SCHEDULED.value
+            if prequeue
+            else (
+                CampaignStatus.RUNNING.value
+                if queued and (sent_delta < queued or not send_after_queue)
+                else (
+                    CampaignStatus.COMPLETED.value
+                    if queued
+                    else (
+                        _field(
+                            cf,
+                            CAMPAIGN_STATUS_FIELD,
+                            "status",
+                            "Status",
+                            default=CampaignStatus.SCHEDULED.value,
+                        )
+                        or CampaignStatus.SCHEDULED.value
+                    )
+                )
+            )
+        )
+>>>>>>> codex-refactor-test
 
         last_result = {
             "Queued": queued,
@@ -870,12 +1179,25 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
             "EndTime": end_dt.isoformat() if end_dt else None,
         }
 
+<<<<<<< HEAD
         _safe_update(get_campaigns_table(), cid, {
             "status": new_status,
             "Last Run Result": json.dumps(last_result),
             "last_run_at": iso_now(),
             NEXT_RUN_AT_FIELD: start_dt.astimezone(QUIET_TZ).isoformat(timespec="seconds") if prequeue and start_dt else None,
         })
+=======
+        # IMPORTANT: never push to computed fields (e.g., "total_sent")
+        campaign_update = {
+            CAMPAIGN_STATUS_FIELD: new_status,
+            CAMPAIGN_LAST_RUN_RESULT_FIELD: json.dumps(last_result),
+            CAMPAIGN_LAST_RUN_AT_FIELD: iso_now(),
+        }
+        # If your base has a *writable* messages_sent, you can uncomment the next line.
+        # campaign_update["messages_sent"] = int(cf.get("messages_sent") or 0) + sent_delta
+
+        _safe_update(get_campaigns_table(), cid, campaign_update)
+>>>>>>> codex-refactor-test
 
         runs_tbl, kpis_tbl = get_runs_table(), get_kpis_table()
         if runs_tbl:
@@ -910,6 +1232,7 @@ def run_campaigns(limit: Optional[int | str] = 1, send_after_queue: Optional[boo
     # Global catch-up after campaigns finish (send any overdue items)
     catchup = run_catchup_for_overdue(limit=MESSAGES_PER_MIN * 3)
 
+<<<<<<< HEAD
     try: update_metrics()
     except Exception: pass
 
@@ -932,3 +1255,6 @@ if __name__ == "__main__":
     else:
         out = run_campaigns(limit=args.limit, send_after_queue=(not args.no_send_after_queue))
         print(json.dumps(out, indent=2))
+=======
+    return {"ok": True, "processed": processed, "results": results, "errors": []}
+>>>>>>> codex-refactor-test

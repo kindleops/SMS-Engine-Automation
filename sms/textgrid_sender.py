@@ -36,6 +36,17 @@ try:
 except Exception:
     get_convos = get_leads = lambda *a, **k: None  # type: ignore
 
+<<<<<<< HEAD
+=======
+# Centralized Airtable field map + enums
+from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS, LEAD_FIELDS
+from sms.airtable_schema import (
+    ConversationDirection,
+    ConversationDeliveryStatus,
+    ConversationProcessor,
+    LeadStatus,
+)
+>>>>>>> codex-refactor-test
 
 # =========================
 # ENV / CONFIG
@@ -45,6 +56,7 @@ AUTH_TOKEN = os.getenv("TEXTGRID_AUTH_TOKEN")
 BASE_URL = f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json" if ACCOUNT_SID else None
 
 # Conversations field mapping (defaults align with your base)
+<<<<<<< HEAD
 FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")          # counterparty phone (recipient)
 TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")          # our DID used to send
 MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
@@ -59,8 +71,42 @@ LEAD_LINK_FIELD = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")         # often "
 PROPERTY_ID_FIELD = os.getenv("CONV_PROPERTY_ID_FIELD", "Property ID") # link or text
 TEMPLATE_LINK_FLD = os.getenv("CONV_TEMPLATE_LINK_FIELD", "Template")  # linked
 CAMPAIGN_LINK_FLD = os.getenv("CONV_CAMPAIGN_LINK_FIELD", "Campaign")  # linked
+=======
+FROM_FIELD = CONV_FIELDS["FROM"]  # counterparty phone (recipient)
+TO_FIELD = CONV_FIELDS["TO"]  # our DID used to send
+MSG_FIELD = CONV_FIELDS["BODY"]
+STATUS_FIELD = CONV_FIELDS["STATUS"]
+DIR_FIELD = CONV_FIELDS["DIRECTION"]
+TG_ID_FIELD = CONV_FIELDS["TEXTGRID_ID"]
+SENT_AT_FIELD = CONV_FIELDS["SENT_AT"]
+PROCESSED_BY_FIELD = CONV_FIELDS["PROCESSED_BY"]
 
-DEFAULT_SENDER_LABEL = "TextGrid Sender"
+# Optional extras we’ll write only if fields exist
+LEAD_LINK_FIELD = CONVERSATIONS_FIELDS.get("LEAD_LINK", "Lead")
+PROPERTY_ID_FIELD = CONVERSATIONS_FIELDS.get("PROPERTY_ID", "Property Record ID")
+TEMPLATE_LINK_FLD = CONVERSATIONS_FIELDS.get("TEMPLATE_LINK", "Template")
+CAMPAIGN_LINK_FLD = CONVERSATIONS_FIELDS.get("CAMPAIGN_LINK", "Campaign")
+>>>>>>> codex-refactor-test
+
+LEAD_STATUS_FIELD = LEAD_FIELDS["STATUS"]
+LEAD_PHONE_FIELD = LEAD_FIELDS["PHONE"]
+LEAD_SOURCE_FIELD = LEAD_FIELDS.get("SOURCE", "Source")
+LEAD_REPLY_COUNT_FIELD = LEAD_FIELDS["REPLY_COUNT"]
+LEAD_SENT_COUNT_FIELD = LEAD_FIELDS["SENT_COUNT"]
+LEAD_DELIVERED_COUNT_FIELD = LEAD_FIELDS["DELIVERED_COUNT"]
+LEAD_FAILED_COUNT_FIELD = LEAD_FIELDS["FAILED_COUNT"]
+LEAD_LAST_ACTIVITY_FIELD = LEAD_FIELDS["LAST_ACTIVITY"]
+LEAD_LAST_DIRECTION_FIELD = LEAD_FIELDS["LAST_DIRECTION"]
+LEAD_LAST_MESSAGE_FIELD = LEAD_FIELDS["LAST_MESSAGE"]
+LEAD_LAST_OUTBOUND_FIELD = LEAD_FIELDS["LAST_OUTBOUND"]
+LEAD_LAST_INBOUND_FIELD = LEAD_FIELDS["LAST_INBOUND"]
+LEAD_LAST_DELIVERY_STATUS_FIELD = LEAD_FIELDS["LAST_DELIVERY_STATUS"]
+LEAD_PROPERTY_ID_FIELD = LEAD_FIELDS["PROPERTY_ID"]
+
+DEFAULT_PROCESSED_BY = os.getenv(
+    "TEXTGRID_PROCESSED_BY_LABEL",
+    ConversationProcessor.CAMPAIGN_RUNNER.value,
+)
 DRY_RUN = os.getenv("TEXTGRID_DRY_RUN", "0").lower() in ("1", "true", "yes")
 
 
@@ -188,7 +234,12 @@ def _find_or_create_lead(phone_number: str, source: str = "Outbound") -> Tuple[O
     if not (leads_tbl and phone_number):
         return None, None
     try:
+<<<<<<< HEAD
         recs = leads_tbl.all(formula=f"{{phone}}='{phone_number}'")
+=======
+        # match on exact 'phone'; extend if you keep last10 elsewhere
+        recs = leads_tbl.all(formula=f"{{{LEAD_PHONE_FIELD}}}='{phone_number}'")
+>>>>>>> codex-refactor-test
         if recs:
             lf = recs[0].get("fields", {})
             return recs[0]["id"], lf.get(PROPERTY_ID_FIELD) or lf.get("Property ID")
@@ -196,20 +247,20 @@ def _find_or_create_lead(phone_number: str, source: str = "Outbound") -> Tuple[O
         created = _safe_table_create(
             leads_tbl,
             {
-                "phone": phone_number,
-                "Lead Status": "New",
-                "Source": source,
-                "Reply Count": 0,
-                "Sent Count": 0,
-                "Delivered Count": 0,
-                "Failed Count": 0,
-                "Last Activity": _now_iso(),
+                LEAD_PHONE_FIELD: phone_number,
+                LEAD_STATUS_FIELD: LeadStatus.NEW.value,
+                LEAD_SOURCE_FIELD: source,
+                LEAD_REPLY_COUNT_FIELD: 0,
+                LEAD_SENT_COUNT_FIELD: 0,
+                LEAD_DELIVERED_COUNT_FIELD: 0,
+                LEAD_FAILED_COUNT_FIELD: 0,
+                LEAD_LAST_ACTIVITY_FIELD: _now_iso(),
             },
         )
         if created:
             print(f"✨ Created Lead for {phone_number}")
             cf = created.get("fields", {}) if isinstance(created, dict) else {}
-            return created.get("id"), cf.get(PROPERTY_ID_FIELD) or cf.get("Property ID")
+            return created.get("id"), cf.get(LEAD_PROPERTY_ID_FIELD) or cf.get("Property ID")
     except Exception:
         traceback.print_exc()
     return None, None
@@ -230,15 +281,24 @@ def _update_lead_activity(
         current = leads_tbl.get(lead_id) or {}
         f = current.get("fields", {}) if isinstance(current, dict) else {}
         patch = {
-            "Last Activity": _now_iso(),
-            "Last Direction": direction,
-            "Last Message": (body or "")[:500],
+            LEAD_LAST_ACTIVITY_FIELD: _now_iso(),
+            LEAD_LAST_DIRECTION_FIELD: direction,
+            LEAD_LAST_MESSAGE_FIELD: (body or "")[:500],
         }
+<<<<<<< HEAD
         if direction == "OUT":
             patch["Last Outbound"] = _now_iso()
             patch["Sent Count"] = int(f.get("Sent Count", 0)) + 1
         if property_id:
             patch[PROPERTY_ID_FIELD] = property_id
+=======
+        if direction in ("OUT", ConversationDirection.OUTBOUND.value):
+            patch[LEAD_LAST_OUTBOUND_FIELD] = _now_iso()
+        if direction in ("IN", ConversationDirection.INBOUND.value):
+            patch[LEAD_LAST_INBOUND_FIELD] = _now_iso()
+        if property_id and LEAD_PROPERTY_ID_FIELD:
+            patch[LEAD_PROPERTY_ID_FIELD] = property_id
+>>>>>>> codex-refactor-test
         _safe_table_update(leads_tbl, lead_id, patch)
     except Exception:
         traceback.print_exc()
@@ -327,10 +387,14 @@ def send_message(
                 FROM_FIELD: to,               # counterparty phone
                 TO_FIELD: sender,             # our DID used to send
                 MSG_FIELD: body,
-                DIR_FIELD: "OUT",
-                STATUS_FIELD: "SENT" if last_err is None else "FAILED",
+                DIR_FIELD: ConversationDirection.OUTBOUND.value,
+                STATUS_FIELD: (
+                    ConversationDeliveryStatus.SENT.value
+                    if last_err is None
+                    else ConversationDeliveryStatus.FAILED.value
+                ),
                 SENT_AT_FIELD: _now_iso(),
-                PROCESSED_BY: DEFAULT_SENDER_LABEL,
+                PROCESSED_BY_FIELD: DEFAULT_PROCESSED_BY,
                 TG_ID_FIELD: msg_id,
             }
             if lead_id and LEAD_LINK_FIELD:
@@ -348,7 +412,7 @@ def send_message(
 
     # Update lead activity trail (increments Sent Count on OUT)
     try:
-        _update_lead_activity(lead_id, body, "OUT", property_id=property_id)
+        _update_lead_activity(lead_id, body, ConversationDirection.OUTBOUND.value, property_id=property_id)
     except Exception:
         traceback.print_exc()
 

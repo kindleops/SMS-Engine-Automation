@@ -1,11 +1,12 @@
 # sms/message_processor.py
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, Optional
+
+import os
 
 try:
     from pyairtable import Table
@@ -14,16 +15,34 @@ except ImportError:
 
 from sms.textgrid_sender import send_message
 from sms.retry_handler import handle_retry
+from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS, LEAD_FIELDS
+from sms.airtable_schema import ConversationDirection, ConversationDeliveryStatus
 
 
 # ---------- Field mappings (env-overridable) ----------
-FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")  # other party (seller) phone
-TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")  # our DID used to send
-MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
-SENT_AT_FIELD = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-TEXTGRID_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
+FROM_FIELD = CONV_FIELDS["FROM"]  # other party (seller) phone
+TO_FIELD = CONV_FIELDS["TO"]  # our DID used to send
+MSG_FIELD = CONV_FIELDS["BODY"]
+STATUS_FIELD = CONV_FIELDS["STATUS"]
+DIR_FIELD = CONV_FIELDS["DIRECTION"]
+SENT_AT_FIELD = CONV_FIELDS["SENT_AT"]
+TEXTGRID_ID_FIELD = CONV_FIELDS["TEXTGRID_ID"]
+
+CAMPAIGN_LINK_FIELD = CONVERSATIONS_FIELDS.get("CAMPAIGN_LINK", "Campaign")
+TEMPLATE_LINK_FIELD = CONVERSATIONS_FIELDS.get("TEMPLATE_LINK", "Template")
+DRIP_QUEUE_LINK_FIELD = CONVERSATIONS_FIELDS.get("DRIP_QUEUE_LINK", "Drip Queue")
+
+LEAD_STATUS_FIELD = LEAD_FIELDS["STATUS"]
+LEAD_LAST_ACTIVITY_FIELD = LEAD_FIELDS["LAST_ACTIVITY"]
+LEAD_LAST_MESSAGE_FIELD = LEAD_FIELDS["LAST_MESSAGE"]
+LEAD_LAST_OUTBOUND_FIELD = LEAD_FIELDS["LAST_OUTBOUND"]
+LEAD_LAST_INBOUND_FIELD = LEAD_FIELDS["LAST_INBOUND"]
+LEAD_LAST_DIRECTION_FIELD = LEAD_FIELDS["LAST_DIRECTION"]
+LEAD_LAST_DELIVERY_STATUS_FIELD = LEAD_FIELDS["LAST_DELIVERY_STATUS"]
+LEAD_DELIVERED_COUNT_FIELD = LEAD_FIELDS["DELIVERED_COUNT"]
+LEAD_FAILED_COUNT_FIELD = LEAD_FIELDS["FAILED_COUNT"]
+LEAD_SENT_COUNT_FIELD = LEAD_FIELDS["SENT_COUNT"]
+LEAD_PROPERTY_ID_FIELD = LEAD_FIELDS["PROPERTY_ID"]
 
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
@@ -103,7 +122,7 @@ class MessageProcessor:
         drip_queue_id: str | None = None,  # (optional) if you want to back-link
         lead_id: str | None = None,
         property_id: str | None = None,
-        direction: str = "OUT",
+        direction: str = ConversationDirection.OUTBOUND.value,
         metadata: Dict[str, Any] | None = None,  # any extra fields to stash on Conversations
     ) -> dict:
         """
@@ -157,7 +176,11 @@ class MessageProcessor:
         ok = provider_status in {"sent", "queued", "accepted", "submitted", "enroute", "delivered"}
 
         # ---- 2) Log Conversations (safe field filter)
-        convo_status = "SENT" if ok else "FAILED"
+        convo_status = (
+            ConversationDeliveryStatus.SENT.value
+            if ok
+            else ConversationDeliveryStatus.FAILED.value
+        )
         convo_id = MessageProcessor._log_conversation(
             status=convo_status,
             phone=phone,
@@ -174,13 +197,24 @@ class MessageProcessor:
         # ---- 3) Update Lead activity (best effort)
         if lead_id and leads:
             now_iso = utcnow_iso()
+            dir_key = (direction or "").replace("_", " ").strip().upper()
+            if dir_key in ("OUT", ConversationDirection.OUTBOUND.value):
+                canonical_direction = ConversationDirection.OUTBOUND.value
+            elif dir_key in ("IN", ConversationDirection.INBOUND.value):
+                canonical_direction = ConversationDirection.INBOUND.value
+            else:
+                canonical_direction = direction or ConversationDirection.OUTBOUND.value
             patch = {
-                "Last Activity": now_iso,
-                "Last Message": body[:500],
-                "Property ID": property_id,
+                LEAD_LAST_ACTIVITY_FIELD: now_iso,
+                LEAD_LAST_MESSAGE_FIELD: body[:500],
+                LEAD_LAST_DIRECTION_FIELD: canonical_direction,
             }
-            if direction == "OUT":
-                patch["Last Outbound"] = now_iso
+            if property_id:
+                patch[LEAD_PROPERTY_ID_FIELD] = property_id
+            if canonical_direction == ConversationDirection.OUTBOUND.value:
+                patch[LEAD_LAST_OUTBOUND_FIELD] = now_iso
+            elif canonical_direction == ConversationDirection.INBOUND.value:
+                patch[LEAD_LAST_INBOUND_FIELD] = now_iso
             try:
                 leads.update(lead_id, _remap_existing_only(leads, patch))
             except Exception as e:
@@ -220,19 +254,38 @@ class MessageProcessor:
         metadata: Dict[str, Any] | None,
     ) -> Optional[str]:
         convos = get_convos()
+        direction_key = (direction or "").replace("_", " ").strip().upper()
+        if direction_key in ("OUT", ConversationDirection.OUTBOUND.value):
+            canonical_direction = ConversationDirection.OUTBOUND.value
+        elif direction_key in ("IN", ConversationDirection.INBOUND.value):
+            canonical_direction = ConversationDirection.INBOUND.value
+        else:
+            canonical_direction = direction or ConversationDirection.OUTBOUND.value
+
+        status_lookup = {
+            "SENT": ConversationDeliveryStatus.SENT.value,
+            "FAILED": ConversationDeliveryStatus.FAILED.value,
+            "DELIVERED": ConversationDeliveryStatus.DELIVERED.value,
+            "QUEUED": ConversationDeliveryStatus.QUEUED.value,
+            "UNDELIVERED": ConversationDeliveryStatus.UNDELIVERED.value,
+            "OPT OUT": ConversationDeliveryStatus.OPT_OUT.value,
+        }
+        status_key = (status or "").replace("_", " ").strip().upper()
+        canonical_status = status_lookup.get(status_key, status or ConversationDeliveryStatus.SENT.value)
+
         payload = {
             # core mapped fields
             FROM_FIELD: phone,
             TO_FIELD: from_number,
             MSG_FIELD: body,
-            DIR_FIELD: direction,
-            STATUS_FIELD: status,
+            DIR_FIELD: canonical_direction,
+            STATUS_FIELD: canonical_status,
             SENT_AT_FIELD: utcnow_iso(),
             TEXTGRID_ID_FIELD: sid,
             # helpful links/trace
-            "Campaign": [campaign_id] if campaign_id else None,
-            "Template": [template_id] if template_id else None,
-            "Drip Queue": [drip_queue_id] if drip_queue_id else None,  # will be ignored if field not present
+            CAMPAIGN_LINK_FIELD: [campaign_id] if campaign_id and CAMPAIGN_LINK_FIELD else None,
+            TEMPLATE_LINK_FIELD: [template_id] if template_id and TEMPLATE_LINK_FIELD else None,
+            DRIP_QUEUE_LINK_FIELD: [drip_queue_id] if drip_queue_id and DRIP_QUEUE_LINK_FIELD else None,
         }
         if metadata:
             payload.update(metadata)

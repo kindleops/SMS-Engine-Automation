@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Python
 __pycache__/
 *.py[cod]
@@ -50,3 +51,13 @@ coverage.xml
 
 # Misc
 *.log
+=======
+.venv/
+.env
+.DS_Store
+__pycache__/
+.coverage
+*.pyc
+
+>>>>>>> codex-refactor-test
+.venv/

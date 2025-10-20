@@ -2,6 +2,7 @@
 import os, re, time
 from datetime import datetime
 from sms.tables import get_table as _get
+<<<<<<< HEAD
 
 DRY_RUN = os.getenv("DRY_RUN","false").lower() == "true"
 BASE = "LEADS_CONVOS_BASE" if os.getenv("LEADS_CONVOS_BASE") else "LEADS_CONVO_BASE"
@@ -9,6 +10,23 @@ BASE = "LEADS_CONVOS_BASE" if os.getenv("LEADS_CONVOS_BASE") else "LEADS_CONVO_B
 C = _get("AIRTABLE_API_KEY", BASE, "CONVERSATIONS_TABLE", "Conversations")
 T = _get("AIRTABLE_API_KEY", BASE, "TEMPLATES_TABLE",    "Templates")
 K = _get("AIRTABLE_API_KEY", BASE, "CAMPAIGNS_TABLE",    "Campaigns")
+=======
+from sms.config import TEMPLATE_FIELD_MAP as TEMPLATE_FIELDS
+
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+BASE = "LEADS_CONVOS_BASE" if os.getenv("LEADS_CONVOS_BASE") else "LEADS_CONVO_BASE"
+
+C = _get("AIRTABLE_API_KEY", BASE, "CONVERSATIONS_TABLE", "Conversations")
+T = _get("AIRTABLE_API_KEY", BASE, "TEMPLATES_TABLE", "Templates")
+K = _get("AIRTABLE_API_KEY", BASE, "CAMPAIGNS_TABLE", "Campaigns")
+
+TEMPLATE_INTERNAL_ID_FIELD = TEMPLATE_FIELDS["INTERNAL_ID"]
+TEMPLATE_PRIMARY_FIELD = TEMPLATE_FIELDS["PRIMARY"]
+TEMPLATE_MESSAGE_FIELD = TEMPLATE_FIELDS["MESSAGE"]
+TEMPLATE_NAME_KEY_FIELD = TEMPLATE_FIELDS.get("NAME_KEY", "Name (Key)")
+TEMPLATE_NAME_FIELD = TEMPLATE_FIELDS.get("NAME", "Name")
+TEMPLATE_RECORD_ID_FIELD = TEMPLATE_FIELDS.get("RECORD_ID", "Record ID")
+>>>>>>> codex-refactor-test
 
 def ok_link(v): return isinstance(v, list) and v and isinstance(v[0], str) and v[0].startswith("rec")
 def first(*vals):
@@ -56,10 +74,22 @@ tmpl_internal = {}       # internal id -> rec
 
 for r in T.all():
     f = r.get("fields", {})
+<<<<<<< HEAD
     rec_id = f.get("Record ID") or r["id"]
     body = first(f.get("Message"), f.get("Body"), f.get("Text"), f.get("Content"))
     name = first(f.get("Name (Key)"), f.get("Name"), f.get("Template Name"))
     internal = first(f.get("Internal ID"), f.get("Template ID"))
+=======
+    rec_id = f.get(TEMPLATE_RECORD_ID_FIELD) or r["id"]
+    body = first(
+        f.get(TEMPLATE_MESSAGE_FIELD),
+        f.get("Body"),
+        f.get("Text"),
+        f.get("Content"),
+    )
+    name = first(f.get(TEMPLATE_NAME_KEY_FIELD), f.get(TEMPLATE_NAME_FIELD), f.get("Template Name"))
+    internal = first(f.get(TEMPLATE_INTERNAL_ID_FIELD), f.get(TEMPLATE_PRIMARY_FIELD))
+>>>>>>> codex-refactor-test
 
     if isinstance(body, str) and body.strip():
         nb = norm_text(body)

@@ -6,6 +6,8 @@ from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from typing import List, Optional, Dict, Any
 
+from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -46,17 +48,17 @@ KPIS_TABLE          = os.getenv("KPIS_TABLE_NAME", "KPIs")
 RUNS_TABLE          = os.getenv("RUNS_TABLE_NAME", "Runs/Logs")
 
 # ───────────────────────────────── Field mappings (env overrideable) ─────────────────────────────
-CONV_FROM_FIELD         = os.getenv("CONV_FROM_FIELD", "phone")
-CONV_TO_FIELD           = os.getenv("CONV_TO_FIELD", "to_number")
-CONV_MESSAGE_FIELD      = os.getenv("CONV_MESSAGE_FIELD", "message")
-CONV_STATUS_FIELD       = os.getenv("CONV_STATUS_FIELD", "status")
-CONV_DIRECTION_FIELD    = os.getenv("CONV_DIRECTION_FIELD", "direction")
-CONV_TEXTGRID_ID_FIELD  = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-CONV_RECEIVED_AT_FIELD  = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
-CONV_INTENT_FIELD       = os.getenv("CONV_INTENT_FIELD", "intent_detected")
-CONV_PROCESSED_BY_FIELD = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
-CONV_SENT_AT_FIELD      = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-CONV_CAMPAIGN_FIELD     = os.getenv("CONV_CAMPAIGN_FIELD", "Campaign")  # linked/name field used in formulas
+CONV_FROM_FIELD         = CONV_FIELDS["FROM"]
+CONV_TO_FIELD           = CONV_FIELDS["TO"]
+CONV_MESSAGE_FIELD      = CONV_FIELDS["BODY"]
+CONV_STATUS_FIELD       = CONV_FIELDS["STATUS"]
+CONV_DIRECTION_FIELD    = CONV_FIELDS["DIRECTION"]
+CONV_TEXTGRID_ID_FIELD  = CONV_FIELDS["TEXTGRID_ID"]
+CONV_RECEIVED_AT_FIELD  = CONV_FIELDS["RECEIVED_AT"]
+CONV_INTENT_FIELD       = CONV_FIELDS["INTENT"]
+CONV_PROCESSED_BY_FIELD = CONV_FIELDS["PROCESSED_BY"]
+CONV_SENT_AT_FIELD      = CONV_FIELDS["SENT_AT"]
+CONV_CAMPAIGN_FIELD     = CONVERSATIONS_FIELDS.get("CAMPAIGN_LINK", "Campaign")  # linked/name field used in formulas
 
 # Normalize statuses to UPPER for matching
 DELIVERED_STATES = {"DELIVERED"}          # adjust if you track more granular states

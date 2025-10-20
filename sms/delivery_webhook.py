@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Request, Header, HTTPException
 
+from sms.config import CONV_FIELDS
+
 # ----- Optional Redis backends -----
 try:
     import redis as _redis  # TCP redis / Upstash Redis (TCP)
@@ -47,17 +49,17 @@ CONVERSATIONS_TABLE_NAME = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 DRIP_QUEUE_TABLE_NAME = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 NUMBERS_TABLE_NAME = os.getenv("NUMBERS_TABLE", "Numbers")
 
-# Conversations field names (from your .env)
-CONV_FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
-CONV_TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")
-CONV_MESSAGE_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
-CONV_STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-CONV_DIRECTION_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
-CONV_TEXTGRID_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-CONV_SENT_AT_FIELD = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-CONV_RECEIVED_AT_FIELD = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
-CONV_PROCESSED_BY_FIELD = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
-CONV_INTENT_FIELD = os.getenv("CONV_INTENT_FIELD", "intent_detected")
+# Conversations field names (centralized schema)
+CONV_FROM_FIELD = CONV_FIELDS["FROM"]
+CONV_TO_FIELD = CONV_FIELDS["TO"]
+CONV_MESSAGE_FIELD = CONV_FIELDS["BODY"]
+CONV_STATUS_FIELD = CONV_FIELDS["STATUS"]
+CONV_DIRECTION_FIELD = CONV_FIELDS["DIRECTION"]
+CONV_TEXTGRID_ID_FIELD = CONV_FIELDS["TEXTGRID_ID"]
+CONV_SENT_AT_FIELD = CONV_FIELDS["SENT_AT"]
+CONV_RECEIVED_AT_FIELD = CONV_FIELDS["RECEIVED_AT"]
+CONV_PROCESSED_BY_FIELD = CONV_FIELDS["PROCESSED_BY"]
+CONV_INTENT_FIELD = CONV_FIELDS["INTENT"]
 
 # Optional shared secret (accept either)
 WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN") or os.getenv("CRON_TOKEN") or os.getenv("TEXTGRID_AUTH_TOKEN")
