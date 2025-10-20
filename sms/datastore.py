@@ -295,11 +295,21 @@ def _log_airtable_exception(handle: TableHandle, exc: Exception, action: str) ->
 
 
 def _safe_all(handle: TableHandle, **kwargs) -> List[Dict[str, Any]]:
-    try:
-        return list(handle.table.all(**kwargs))
-    except Exception as exc:  # pragma: no cover - network failure path
-        _log_airtable_exception(handle, exc, "all")
-        return []
+    attempts = 2
+    last_exc: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            return list(handle.table.all(**kwargs))
+        except Exception as exc:  # pragma: no cover - network failure path
+            last_exc = exc
+            _log_airtable_exception(handle, exc, "all")
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            if status and 500 <= int(status) < 600 and attempt < attempts - 1:
+                time.sleep(1.5)
+                continue
+            break
+    return []
 
 
 def _safe_get(handle: TableHandle, record_id: str):

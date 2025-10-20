@@ -338,7 +338,6 @@ PROSPECT_PHONE_FIELDS = [
     PROSPECT_FIELDS.get("PHONE_SECONDARY"),
     PROSPECT_FIELDS.get("PHONE_SECONDARY_LINKED"),
 ]
-PROSPECT_STATUS_FIELD = PROSPECT_FIELDS.get("STATUS")
 
 SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
 
@@ -482,13 +481,6 @@ def _schedule_campaign(
     skipped = 0
     for prospect in prospects:
         pf = prospect.get("fields", {}) or {}
-        status_value = (
-            str(pf.get(PROSPECT_STATUS_FIELD) or "").strip().lower()
-            if PROSPECT_STATUS_FIELD
-            else ""
-        )
-        if PROSPECT_STATUS_FIELD and status_value and status_value != "new":
-            continue
         if _prospect_market(pf) != market:
             continue
         if not _matches_segment(pf, fields):

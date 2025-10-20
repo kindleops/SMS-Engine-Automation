@@ -45,7 +45,7 @@ KPI_TABLE = os.getenv("KPI_TABLE_NAME", "KPIs")
 # Business-timezone for daily rollups
 KPI_TZ = os.getenv("KPI_TZ", "America/Chicago")
 MAX_SCAN = int(os.getenv("KPI_MAX_SCAN", "10000"))  # safety cap
-PAGE_SIZE = max(1, min(500, MAX_SCAN)) if MAX_SCAN else 500
+PAGE_SIZE = 100
 
 try:
     from zoneinfo import ZoneInfo
