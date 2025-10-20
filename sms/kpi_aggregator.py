@@ -163,11 +163,13 @@ def _fetch_kpi_rows(tbl: Table) -> Tuple[List[dict], Optional[str]]:
 
     attempts = 2
     total_limit = MAX_SCAN if MAX_SCAN and MAX_SCAN > 0 else None
+    max_records = min(total_limit, 100) if total_limit else 100
     last_error: Optional[str] = None
 
     for attempt in range(attempts):
         try:
-            rows = tbl.all(page_size=PAGE_SIZE, max_records=total_limit)
+            rows = tbl.all(page_size=PAGE_SIZE, max_records=max_records)
+            time.sleep(0.25)
             return rows, None
         except requests.exceptions.HTTPError as exc:
             response = getattr(exc, "response", None)
@@ -178,7 +180,11 @@ def _fetch_kpi_rows(tbl: Table) -> Tuple[List[dict], Optional[str]]:
                 f" table={getattr(tbl, 'table_name', '<unknown>')}, status={status}): {body}"
             )
             logger.error(last_error)
-            if status and 500 <= int(status) < 600 and attempt < attempts - 1:
+            try:
+                status_int = int(status) if status is not None else None
+            except (TypeError, ValueError):
+                status_int = None
+            if status_int and 500 <= status_int < 600 and attempt < attempts - 1:
                 time.sleep(1.5)
                 continue
             break
@@ -314,6 +320,7 @@ def aggregate_kpis():
                     kpi_tbl.update(existing_map[metric_name]["id"], _remap_existing_only(kpi_tbl, payload))
                 else:
                     kpi_tbl.create(_remap_existing_only(kpi_tbl, payload))
+                time.sleep(0.25)
 
                 if suffix == "DAILY_TOTAL":
                     written["daily"] += 1

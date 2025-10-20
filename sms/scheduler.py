@@ -548,6 +548,7 @@ def _schedule_campaign(
         if created:
             existing_pairs.add(key)
             queued += 1
+            time.sleep(0.25)
         else:
             logger.error(
                 "Failed to create drip queue record for campaign=%s prospect=%s (phone=%s)",
@@ -560,104 +561,142 @@ def _schedule_campaign(
     return queued, skipped
 
 
+def _list_with_retry(handle, label: str, attempts: int = 3, delay: float = 2.0) -> Tuple[List[Dict[str, Any]], bool]:
+    last_error: Optional[Dict[str, Any]] = None
+    for attempt in range(attempts):
+        rows = list_records(handle, max_records=100, page_size=100)
+        if rows or not handle.last_error:
+            return rows, False
+        last_error = handle.last_error
+        logger.warning(
+            "Airtable fetch issue for %s [%s/%s] attempt %s/%s: %s",
+            label,
+            handle.base_id or "memory",
+            handle.table_name,
+            attempt + 1,
+            attempts,
+            last_error,
+        )
+        time.sleep(delay)
+    logger.error(
+        "⚠️ %s fetch failed after %s attempts [%s/%s]: %s",
+        label,
+        attempts,
+        handle.base_id or "memory",
+        handle.table_name,
+        last_error,
+    )
+    return [], True
+
+
 def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
     """Queue scheduled campaigns into the Drip Queue."""
 
     logger.info("Starting campaign scheduler run")
     _log_scheduler_env()
 
+    summary: Dict[str, Any] = {"queued": 0, "campaigns": {}, "errors": [], "ok": True}
+
+    if TEST_MODE:
+        logger.info("TEST_MODE enabled – returning mock scheduler result")
+        summary["note"] = "test mode"
+        return summary
+
     if not TEST_MODE:
         validation_error = _validate_airtable_access()
         if validation_error:
             return validation_error
 
-    campaigns_handle = CONNECTOR.campaigns()
-    drip_handle = CONNECTOR.drip_queue()
-    prospects_handle = CONNECTOR.prospects()
+    try:
+        campaigns_handle = CONNECTOR.campaigns()
+        drip_handle = CONNECTOR.drip_queue()
+        prospects_handle = CONNECTOR.prospects()
 
-    logger.info(
-        "Scheduler using campaigns base=%s table=%s",
-        campaigns_handle.base_id,
-        campaigns_handle.table_name,
-    )
+        logger.info(
+            "Scheduler using campaigns base=%s table=%s",
+            campaigns_handle.base_id,
+            campaigns_handle.table_name,
+        )
 
-    if not TEST_MODE:
-        for handle, label in (
-            (campaigns_handle, "Campaigns"),
-            (prospects_handle, "Prospects"),
-            (drip_handle, "Drip Queue"),
-        ):
-            if handle.in_memory:
-                logger.error(
-                    "%s handle using in-memory fallback (base=%s). Check Airtable credentials and permissions.",
-                    label,
-                    handle.base_id,
+        if not TEST_MODE:
+            for handle, label in (
+                (campaigns_handle, "Campaigns"),
+                (prospects_handle, "Prospects"),
+                (drip_handle, "Drip Queue"),
+            ):
+                if handle.in_memory:
+                    logger.error(
+                        "%s handle using in-memory fallback (base=%s). Check Airtable credentials and permissions.",
+                        label,
+                        handle.base_id,
+                    )
+                    return {
+                        "ok": False,
+                        "queued": 0,
+                        "campaigns": {},
+                        "errors": [f"{label} table unavailable"],
+                    }
+
+        campaigns, campaigns_failed = _list_with_retry(campaigns_handle, "Campaigns")
+        if campaigns_failed:
+            summary["errors"].append("Failed to load campaigns after retries")
+            summary["ok"] = False
+            return summary
+
+        prospects, prospects_failed = _list_with_retry(prospects_handle, "Prospects")
+        if prospects_failed:
+            summary["errors"].append("Failed to load prospects after retries")
+            summary["ok"] = False
+            return summary
+
+        existing_drip, drip_failed = _list_with_retry(drip_handle, "Drip Queue")
+        pairs = _existing_pairs(existing_drip) if not drip_failed else None
+
+        quiet = _quiet_hours()
+        processed = 0
+
+        for campaign in campaigns:
+            if limit is not None and processed >= limit:
+                break
+            fields = campaign.get("fields", {}) or {}
+            status = str(fields.get(CAMPAIGN_STATUS_FIELD) or "").strip().lower()
+            if status != "scheduled":
+                logger.debug(
+                    "Skipping campaign %s due to status '%s'",
+                    campaign.get("id"),
+                    status,
                 )
-                return {
-                    "ok": False,
-                    "error": f"{label} table unavailable",
-                    "details": {"base_id": handle.base_id, "table": handle.table_name},
-                }
+                continue
 
-    campaigns = list_records(campaigns_handle)
-    prospects = list_records(prospects_handle)
-    if (
-        not TEST_MODE
-        and not prospects
-        and prospects_handle.last_error
-        and isinstance(prospects_handle.last_error, dict)
-        and prospects_handle.last_error.get("status")
-    ):
-        try:
-            status_code = int(prospects_handle.last_error.get("status", 0))
-        except (TypeError, ValueError):
-            status_code = None
-        if status_code and 500 <= status_code < 600:
-            logger.warning(
-                "Prospects fetch failed with status %s, retrying once after backoff",
-                status_code,
-            )
-            time.sleep(2)
-            prospects_handle.last_error = None
-            prospects = list_records(prospects_handle)
-            if prospects_handle.last_error:
-                logger.error(
-                    "Prospects retry failed: %s",
-                    prospects_handle.last_error,
-                )
-    existing_drip = list_records(drip_handle)
+            try:
+                if pairs is None:
+                    logger.warning(
+                        "⚠️ Skipped Drip Queue batch due to repeated connection resets: %s",
+                        campaign.get("id"),
+                    )
+                    summary["campaigns"][campaign["id"]] = {"queued": 0, "skipped": 0, "error": "Drip Queue unavailable"}
+                    summary["errors"].append(f"Drip Queue unavailable for {campaign.get('id')}")
+                    summary["ok"] = False
+                    continue
 
-    quiet = _quiet_hours()
-    summary: Dict[str, Any] = {"queued": 0, "campaigns": {}, "errors": [], "ok": True}
-    processed = 0
-    pairs = _existing_pairs(existing_drip)
-
-    for campaign in campaigns:
-        if limit is not None and processed >= limit:
-            break
-        fields = campaign.get("fields", {}) or {}
-        status = str(fields.get(CAMPAIGN_STATUS_FIELD) or "").strip().lower()
-        if status != "scheduled":
-            logger.debug(
-                "Skipping campaign %s due to status '%s'",
-                campaign.get("id"),
-                status,
-            )
-            continue
-
-        try:
-            queued, skipped = _schedule_campaign(campaign, prospects, drip_handle, pairs, quiet)
-            summary["campaigns"][campaign["id"]] = {"queued": queued, "skipped": skipped}
-            summary["queued"] += queued
-            processed += 1
-            if queued > 0:
-                patch = {CAMPAIGN_STATUS_FIELD: "Active"}
-                if CAMPAIGN_LAST_RUN_FIELD:
-                    patch[CAMPAIGN_LAST_RUN_FIELD] = iso_now()
-                update_record(campaigns_handle, campaign["id"], patch)
-        except Exception as exc:  # pragma: no cover - defensive path
-            logger.exception("Campaign scheduling failed for %s", campaign.get("id"))
-            summary["errors"].append({"campaign": campaign.get("id"), "error": str(exc)})
+                queued, skipped = _schedule_campaign(campaign, prospects, drip_handle, pairs, quiet)
+                summary["campaigns"][campaign["id"]] = {"queued": queued, "skipped": skipped}
+                summary["queued"] += queued
+                processed += 1
+                if queued > 0:
+                    patch = {CAMPAIGN_STATUS_FIELD: "Active"}
+                    if CAMPAIGN_LAST_RUN_FIELD:
+                        patch[CAMPAIGN_LAST_RUN_FIELD] = iso_now()
+                    update_record(campaigns_handle, campaign["id"], patch)
+            except Exception as exc:  # pragma: no cover - defensive path
+                logger.exception("Campaign scheduling failed for %s", campaign.get("id"))
+                summary["errors"].append({"campaign": campaign.get("id"), "error": str(exc)})
+                summary["ok"] = False
+    except Exception as exc:
+        logger.exception("Scheduler fatal error")
+        summary["errors"].append(str(exc))
+        summary["ok"] = False
+        return summary
 
     summary["ok"] = not summary["errors"]
     logger.info("Campaign scheduler finished: %s queued entries", summary["queued"])

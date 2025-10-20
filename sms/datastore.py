@@ -310,11 +310,24 @@ def _safe_all(handle: TableHandle, **kwargs) -> List[Dict[str, Any]]:
     last_exc: Optional[Exception] = None
     if "page_size" not in kwargs and "pageSize" not in kwargs:
         kwargs["page_size"] = 100
+    if "max_records" not in kwargs and "maxRecords" not in kwargs:
+        kwargs["max_records"] = 100
     for attempt in range(attempts):
         try:
             records = list(handle.table.all(**kwargs))
             handle.last_error = None
             return records
+        except (requests.exceptions.ConnectionError, ConnectionResetError) as exc:
+            logger.warning(
+                "Airtable connection reset [%s/%s] — retry %s/%s: %s",
+                handle.base_id or "memory",
+                handle.table_name,
+                attempt + 1,
+                attempts,
+                exc,
+            )
+            time.sleep(2)
+            continue
         except Exception as exc:  # pragma: no cover - network failure path
             last_exc = exc
             _log_airtable_exception(handle, exc, "all")
@@ -328,6 +341,8 @@ def _safe_all(handle: TableHandle, **kwargs) -> List[Dict[str, Any]]:
                 time.sleep(1.5)
                 continue
             break
+        finally:
+            time.sleep(0.25)
     return []
 
 
