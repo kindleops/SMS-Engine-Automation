@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
+from collections import defaultdict
 
 try:  # Python 3.9+
     from zoneinfo import ZoneInfo
@@ -440,40 +441,42 @@ def _matches_segment(prospect_fields: Dict[str, Any], campaign_fields: Dict[str,
     return any(str(v).strip() == view for v in values)
 
 
+market_counts = defaultdict(int)
+
+
 def _coerce_market(value: Any) -> str:
+    """Normalize market values from Airtable (single select, linked, or text)."""
+    if not value:
+        return ""
     if isinstance(value, str):
         return value.strip()
-    if isinstance(value, dict):
-        # Airtable linked records may include nested fields
-        fields = value.get("fields")
-        if isinstance(fields, dict):
-            for key in ("Name", "name", "Market", "market", "Label", "label"):
-                v = fields.get(key)
+    if isinstance(value, (list, tuple)) and value:
+        first = value[0]
+        if isinstance(first, str):
+            return first.strip()
+        if isinstance(first, dict):
+            for key in ("name", "Name", "label", "Label", "value", "Value", "Market", "market"):
+                v = first.get(key)
                 if isinstance(v, str) and v.strip():
                     return v.strip()
-        for key in ("name", "Name", "label", "Label", "value", "Value", "id", "ID"):
+            return ""
+    if isinstance(value, dict):
+        for key in ("name", "Name", "label", "Label", "value", "Value", "Market", "market"):
             v = value.get(key)
             if isinstance(v, str) and v.strip():
                 return v.strip()
         return ""
-    if isinstance(value, (list, tuple)) and value:
-        first = value[0]
-        return _coerce_market(first)
-    if value is None:
-        return ""
-    return str(value).strip()
+    return str(value or "").strip()
 
 
 def _campaign_market(fields: Dict[str, Any]) -> Tuple[str, str]:
     raw = _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
-    raw = raw.strip()
-    return raw, raw.lower() if raw else ""
+    return raw, raw.lower().strip() if raw else ""
 
 
 def _prospect_market(fields: Dict[str, Any]) -> Tuple[str, str]:
     raw = _coerce_market(fields.get(PROSPECT_MARKET_FIELD)) if PROSPECT_MARKET_FIELD else ""
-    raw = raw.strip()
-    return raw, raw.lower() if raw else ""
+    return raw, raw.lower().strip() if raw else ""
 
 
 def _existing_pairs(drip_records: List[Dict[str, Any]]) -> Set[Tuple[str, str]]:
@@ -502,6 +505,7 @@ def _schedule_campaign(
     fields = campaign.get("fields", {}) or {}
     campaign_id = campaign.get("id")
     campaign_market_raw, campaign_market_norm = _campaign_market(fields)
+
     if not campaign_market_raw:
         logger.info("Skipping campaign %s – missing market", campaign_id)
         return 0, 0
@@ -509,67 +513,48 @@ def _schedule_campaign(
     start_time = _apply_quiet_hours(_campaign_start(fields), quiet)
     queued = 0
     skipped = 0
+
+    logger.info("🏁 Starting campaign %s for market '%s'", campaign_id, campaign_market_raw)
+
+    local_market_counts = defaultdict(int)
+
     for prospect in prospects:
         pf = prospect.get("fields", {}) or {}
         prospect_id = prospect.get("id")
         prospect_market_raw, prospect_market_norm = _prospect_market(pf)
 
+        if prospect_market_norm:
+            market_counts[prospect_market_norm] += 1
+            local_market_counts[prospect_market_norm] += 1
+
         logger.debug(
-            "Market match check: campaign=%s, prospect=%s",
+            "Market check: campaign=%s (%s) prospect=%s (%s)",
+            campaign_market_norm,
             campaign_market_raw,
+            prospect_market_norm,
             prospect_market_raw,
         )
 
-        if campaign_market_norm:
-            if prospect_market_norm:
-                if prospect_market_norm != campaign_market_norm:
-                    logger.debug(
-                        "Skipping prospect %s for campaign %s due to market mismatch (%s != %s)",
-                        prospect_id,
-                        campaign_id,
-                        prospect_market_norm,
-                        campaign_market_norm,
-                    )
-                    continue
-            else:
-                logger.debug(
-                    "Skipping prospect %s for campaign %s because prospect market is missing",
-                    prospect_id,
-                    campaign_id,
-                )
+        if campaign_market_norm and prospect_market_norm:
+            if campaign_market_norm != prospect_market_norm:
                 continue
-        if not _matches_segment(pf, fields):
-            logger.debug(
-                "Skipping prospect %s for campaign %s due to segment/view mismatch",
-                prospect_id,
-                campaign_id,
-            )
+        elif campaign_market_norm and not prospect_market_norm:
             continue
+
+        if not _matches_segment(pf, fields):
+            continue
+
         phone = _prospect_phone(pf)
         if not phone:
-            logger.debug(
-                "Skipping prospect %s for campaign %s due to missing phone",
-                prospect_id,
-                campaign_id,
-            )
             skipped += 1
             continue
         digits = last_10_digits(phone)
         if not digits:
-            logger.debug(
-                "Skipping prospect %s for campaign %s due to invalid digits",
-                prospect_id,
-                campaign_id,
-            )
             skipped += 1
             continue
+
         key = (campaign["id"], digits)
         if key in existing_pairs:
-            logger.debug(
-                "Skipping prospect %s for campaign %s because phone already queued",
-                prospect_id,
-                campaign_id,
-            )
             skipped += 1
             continue
 
@@ -592,23 +577,15 @@ def _schedule_campaign(
         if created:
             existing_pairs.add(key)
             queued += 1
-            time.sleep(0.25)
-            logger.debug(
-                "Queued prospect %s for campaign %s at market '%s' phone=%s",
-                prospect_id,
-                campaign_id,
-                campaign_market_raw,
-                phone,
-            )
+            logger.debug("✅ Queued prospect %s for campaign %s (%s)", prospect_id, campaign_id, campaign_market_raw)
         else:
-            logger.error(
-                "Failed to create drip queue record for campaign=%s prospect=%s (phone=%s)",
-                campaign_id,
-                prospect_id,
-                phone,
-            )
             skipped += 1
 
+    logger.info("🏙 Market prospect summary for campaign %s:", campaign_id)
+    for mkt, count in local_market_counts.items():
+        logger.info("   %s → %s prospects", mkt, count)
+
+    logger.info("✅ Finished campaign %s: %s queued, %s skipped", campaign_id, queued, skipped)
     return queued, skipped
 
 
@@ -647,6 +624,8 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
     _log_scheduler_env()
 
     summary: Dict[str, Any] = {"queued": 0, "campaigns": {}, "errors": [], "ok": True}
+
+    market_counts.clear()
 
     if TEST_MODE:
         logger.info("TEST_MODE enabled – returning mock scheduler result")
@@ -748,6 +727,10 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
         summary["errors"].append(str(exc))
         summary["ok"] = False
         return summary
+
+    logger.info("🏙 Market prospect summary (global):")
+    for mkt, count in market_counts.items():
+        logger.info("   %s → %s prospects", mkt, count)
 
     summary["ok"] = not summary["errors"]
     logger.info("Campaign scheduler finished: %s queued entries", summary["queued"])
