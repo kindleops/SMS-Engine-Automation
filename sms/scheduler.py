@@ -440,12 +440,29 @@ def _matches_segment(prospect_fields: Dict[str, Any], campaign_fields: Dict[str,
     return any(str(v).strip() == view for v in values)
 
 
+def _coerce_market(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("name", "Name", "label", "Label", "value", "Value", "id", "ID"):
+            v = value.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+    if isinstance(value, (list, tuple)) and value:
+        first = value[0]
+        return _coerce_market(first)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def _campaign_market(fields: Dict[str, Any]) -> str:
-    return str(fields.get(CAMPAIGN_MARKET_FIELD) or "").strip()
+    return _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
 
 
 def _prospect_market(fields: Dict[str, Any]) -> str:
-    return str(fields.get(PROSPECT_MARKET_FIELD) or "").strip() if PROSPECT_MARKET_FIELD else ""
+    return _coerce_market(fields.get(PROSPECT_MARKET_FIELD)) if PROSPECT_MARKET_FIELD else ""
 
 
 def _existing_pairs(drip_records: List[Dict[str, Any]]) -> Set[Tuple[str, str]]:
@@ -549,6 +566,13 @@ def _schedule_campaign(
             existing_pairs.add(key)
             queued += 1
             time.sleep(0.25)
+            logger.debug(
+                "Queued prospect %s for campaign %s at market '%s' phone=%s",
+                prospect_id,
+                campaign_id,
+                market,
+                phone,
+            )
         else:
             logger.error(
                 "Failed to create drip queue record for campaign=%s prospect=%s (phone=%s)",
