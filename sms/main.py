@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from sms.dispatcher import get_policy
 
@@ -220,6 +221,11 @@ def _parse_limit_param(raw: Optional[str]) -> Optional[int]:
         print(f"[warn] Invalid limit param: {raw!r} → treating as None")
         return None
 
+
+class RunCampaignsRequest(BaseModel):
+    limit: Optional[int] = None
+    send_after_queue: Optional[bool] = None
+
 def _runner_limit_arg(safe_limit: Optional[int]) -> int | str:
     return safe_limit if (safe_limit and safe_limit > 0) else "ALL"
 
@@ -317,6 +323,7 @@ async def run_campaigns_endpoint(
     x_webhook_token: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
     send_after_queue: Optional[bool] = Query(None, description="If true, attempt immediate sends when not in quiet hours."),
+    payload: Optional[RunCampaignsRequest] = None,
 ):
     """
     Queue campaigns (and optionally send immediately).
@@ -325,11 +332,24 @@ async def run_campaigns_endpoint(
       - Else → skip entirely
     """
     _require_token(request, token, x_webhook_token, x_cron_token)
+
+    if payload:
+        if payload.limit is not None:
+            limit = str(payload.limit)
+        if payload.send_after_queue is not None:
+            send_after_queue = payload.send_after_queue
+
     safe_limit = _parse_limit_param(limit)
     runner_limit = _runner_limit_arg(safe_limit)
+    send_flag = bool(send_after_queue) if send_after_queue is not None else False
 
     if TEST_MODE:
-        return {"ok": True, "status": "mock_campaign_runner", "limit": runner_limit}
+        return {
+            "ok": True,
+            "status": "mock_campaign_runner",
+            "limit": runner_limit,
+            "send_after_queue": send_flag,
+        }
 
     if is_quiet_hours_local():
         if not ALLOW_QUEUE_OUTSIDE_HOURS:
@@ -343,7 +363,7 @@ async def run_campaigns_endpoint(
             raise HTTPException(status_code=500, detail=str(e))
 
     try:
-        return run_campaigns(limit=runner_limit, send_after_queue=send_after_queue)
+        return run_campaigns(limit=runner_limit, send_after_queue=send_flag)
     except Exception as e:
         log_error("run_campaigns (normal hours)", e)
         raise HTTPException(status_code=500, detail=str(e))

@@ -92,17 +92,23 @@ def _quiet_window(now_utc: datetime, policy) -> tuple[bool, Optional[datetime]]:
 
 
 class CampaignRunner:
-    def __init__(self) -> None:
+    def __init__(self, *, send_after_queue: bool = False) -> None:
         self.drip = CONNECTOR.drip_queue()
-        self.summary: Dict[str, Any] = {"sent": 0, "failed": 0, "deferred": 0, "errors": []}
+        self.summary: Dict[str, Any] = {"sent": 0, "failed": 0, "deferred": 0, "errors": [], "ok": True}
         self.policy = get_policy()
+        self.send_after_queue = send_after_queue
 
     def run(self, limit: int) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         is_quiet, next_allowed = _quiet_window(now, self.policy)
         records = self._fetch_queue(limit)
         if not records:
-            return {"sent": 0, "failed": 0, "deferred": 0, "errors": [], "ok": True}
+            return self.summary.copy()
+
+        if not self.send_after_queue:
+            self.summary["note"] = "send_after_queue disabled; leaving queue untouched"
+            self.summary["queued_pending"] = len(records)
+            return self.summary
 
         for record in records:
             fields = record.get("fields", {}) or {}
@@ -121,7 +127,7 @@ class CampaignRunner:
                 self.summary["failed"] += 1
                 self.summary["errors"].append({"drip_id": record.get("id"), "error": str(exc)})
 
-        self.summary["ok"] = True
+        self.summary["ok"] = not self.summary["errors"]
         return self.summary
 
     def _fetch_queue(self, limit: int) -> List[Dict[str, Any]]:
@@ -206,8 +212,8 @@ class CampaignRunner:
         )
 
 
-def run_campaigns(limit: int = 50) -> Dict[str, Any]:
-    runner = CampaignRunner()
+def run_campaigns(limit: int = 50, send_after_queue: bool = False) -> Dict[str, Any]:
+    runner = CampaignRunner(send_after_queue=bool(send_after_queue))
     return runner.run(limit)
 
 

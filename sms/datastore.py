@@ -121,6 +121,8 @@ def _first_non_empty(*names: str) -> Optional[str]:
 class TableHandle:
     table: Any
     in_memory: bool
+    base_id: Optional[str]
+    table_name: str
     field_cache: Dict[str, str] = dataclass_field(default_factory=dict)
 
 
@@ -136,7 +138,12 @@ class DataConnector:
             return self._tables[key]
 
         if os.getenv("SMS_FORCE_IN_MEMORY", "").lower() in {"1", "true", "yes"}:
-            handle = TableHandle(table=InMemoryTable(table_name), in_memory=True)
+            handle = TableHandle(
+                table=InMemoryTable(table_name),
+                in_memory=True,
+                base_id=base,
+                table_name=table_name,
+            )
             self._tables[key] = handle
             return handle
 
@@ -150,13 +157,23 @@ class DataConnector:
         if base and api_key and _Table is not None:
             try:
                 table = _Table(api_key, base, table_name)
-                handle = TableHandle(table=table, in_memory=False)
+                handle = TableHandle(
+                    table=table,
+                    in_memory=False,
+                    base_id=base,
+                    table_name=table_name,
+                )
                 self._tables[key] = handle
                 return handle
             except Exception:  # pragma: no cover - network failure path
                 logger.warning("Falling back to in-memory table for %s", table_name, exc_info=True)
 
-        handle = TableHandle(table=InMemoryTable(table_name), in_memory=True)
+        handle = TableHandle(
+            table=InMemoryTable(table_name),
+            in_memory=True,
+            base_id=base,
+            table_name=table_name,
+        )
         self._tables[key] = handle
         return handle
 
@@ -241,11 +258,41 @@ def _remap_existing_only(handle: TableHandle, payload: Dict[str, Any]) -> Dict[s
     return result or dict(payload)
 
 
+def _log_airtable_exception(handle: TableHandle, exc: Exception, action: str) -> None:
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = response.text  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                body = response.content.decode("utf-8", "ignore")  # type: ignore[attr-defined]
+            except Exception:
+                body = repr(response)
+        status = getattr(response, "status_code", "unknown")  # type: ignore[attr-defined]
+        logger.error(
+            "Airtable %s failed [%s/%s] status=%s body=%s",
+            action,
+            handle.base_id or "memory",
+            handle.table_name,
+            status,
+            body,
+        )
+    else:
+        logger.error(
+            "Airtable %s failed [%s/%s]: %s",
+            action,
+            handle.base_id or "memory",
+            handle.table_name,
+            exc,
+        )
+    traceback.print_exc()
+
+
 def _safe_all(handle: TableHandle, **kwargs) -> List[Dict[str, Any]]:
     try:
         return list(handle.table.all(**kwargs))
     except Exception as exc:  # pragma: no cover - network failure path
-        logger.warning("Table.all failed for %s: %s", getattr(handle.table, "name", handle.table), exc)
+        _log_airtable_exception(handle, exc, "all")
         return []
 
 
@@ -254,7 +301,8 @@ def _safe_get(handle: TableHandle, record_id: str):
         return None
     try:
         return handle.table.get(record_id)
-    except Exception:
+    except Exception as exc:
+        _log_airtable_exception(handle, exc, "get")
         return None
 
 
@@ -272,8 +320,7 @@ def _safe_create(handle: TableHandle, fields: Dict[str, Any]) -> Optional[Dict[s
     except Exception as exc:  # pragma: no cover - network failure path
         if handle.in_memory:
             return handle.table.create(payload)
-        logger.error("Create failed on table %s: %s", getattr(handle.table, "name", handle.table), exc)
-        traceback.print_exc()
+        _log_airtable_exception(handle, exc, "create")
         return None
 
 
@@ -293,8 +340,7 @@ def _safe_update(handle: TableHandle, record_id: str, fields: Dict[str, Any]) ->
     except Exception as exc:  # pragma: no cover - network failure path
         if handle.in_memory:
             return handle.table.update(record_id, payload)
-        logger.error("Update failed on table %s: %s", getattr(handle.table, "name", handle.table), exc)
-        traceback.print_exc()
+        _log_airtable_exception(handle, exc, "update")
         return None
 
 

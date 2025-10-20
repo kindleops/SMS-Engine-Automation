@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -21,6 +22,7 @@ from sms.datastore import CONNECTOR, create_record, list_records, update_record
 from sms.runtime import get_logger, iso_now, last_10_digits, normalize_phone
 
 logger = get_logger(__name__)
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() in {"1", "true", "yes"}
 
 CAMPAIGN_FIELDS = campaign_field_map()
 DRIP_FIELDS = drip_field_map()
@@ -232,6 +234,12 @@ def _schedule_campaign(
             existing_pairs.add(key)
             queued += 1
         else:
+            logger.error(
+                "Failed to create drip queue record for campaign=%s prospect=%s (phone=%s)",
+                campaign.get("id"),
+                prospect.get("id"),
+                phone,
+            )
             skipped += 1
 
     return queued, skipped
@@ -241,9 +249,35 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
     """Queue scheduled campaigns into the Drip Queue."""
 
     logger.info("Starting campaign scheduler run")
+    if not any(
+        os.getenv(key)
+        for key in (
+            "AIRTABLE_API_KEY",
+            "AIRTABLE_ACQUISITIONS_KEY",
+            "AIRTABLE_COMPLIANCE_KEY",
+            "AIRTABLE_REPORTING_KEY",
+        )
+    ) and not TEST_MODE:
+        logger.error("No Airtable API key configured; aborting scheduler run.")
+        return {"ok": False, "error": "Missing Airtable API key"}
+
     campaigns_handle = CONNECTOR.campaigns()
     drip_handle = CONNECTOR.drip_queue()
     prospects_handle = CONNECTOR.prospects()
+
+    if not TEST_MODE:
+        for handle, label in (
+            (campaigns_handle, "Campaigns"),
+            (prospects_handle, "Prospects"),
+            (drip_handle, "Drip Queue"),
+        ):
+            if handle.in_memory:
+                logger.error(
+                    "%s handle using in-memory fallback (base=%s). Check Airtable credentials and permissions.",
+                    label,
+                    handle.base_id,
+                )
+                return {"ok": False, "error": f"{label} table unavailable"}
 
     campaigns = list_records(campaigns_handle)
     prospects = list_records(prospects_handle)
