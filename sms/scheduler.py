@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import quote
+
+import requests
+from dotenv import load_dotenv
 
 try:  # Python 3.9+
     from zoneinfo import ZoneInfo
@@ -23,6 +29,279 @@ from sms.runtime import get_logger, iso_now, last_10_digits, normalize_phone
 
 logger = get_logger(__name__)
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() in {"1", "true", "yes"}
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+ENV_SOURCES: List[str] = []
+_ENV_LOADED = False
+_LOGGED_ENV = False
+API_KEY_ENV_PRIORITY = (
+    "AIRTABLE_API_KEY",
+    "AIRTABLE_ACQUISITIONS_KEY",
+    "AIRTABLE_COMPLIANCE_KEY",
+    "AIRTABLE_REPORTING_KEY",
+)
+BASE_ID_PATTERN = re.compile(r"^app[a-zA-Z0-9]{14}$")
+
+
+def _load_env_once() -> None:
+    """Load environment variables from project-level .env files, once."""
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+
+    for candidate in (ROOT_DIR / ".env", ROOT_DIR / "config" / ".env"):
+        try:
+            if candidate.exists():
+                load_dotenv(candidate, override=False)
+                ENV_SOURCES.append(str(candidate))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed loading %s: %s", candidate, exc)
+
+    _ENV_LOADED = True
+
+
+_load_env_once()
+
+
+def _resolve_api_key() -> Tuple[Optional[str], Optional[str]]:
+    """Return the first configured Airtable API key along with its env var name."""
+    for name in API_KEY_ENV_PRIORITY:
+        value = os.getenv(name)
+        if value:
+            return value, name
+    return None, None
+
+
+def _mask_token(token: Optional[str]) -> str:
+    if not token:
+        return "<missing>"
+    trimmed = token.strip()
+    if len(trimmed) <= 4:
+        return "*" * len(trimmed)
+    if len(trimmed) <= 8:
+        return f"{trimmed[:2]}...{trimmed[-2:]}"
+    return f"{trimmed[:4]}...{trimmed[-4:]}"
+
+
+def _log_scheduler_env() -> None:
+    """Print a one-time snapshot of key Airtable env configuration."""
+    global _LOGGED_ENV
+    if _LOGGED_ENV:
+        return
+
+    cfg = settings()
+    token, source = _resolve_api_key()
+    present_sources = [name for name in API_KEY_ENV_PRIORITY if os.getenv(name)]
+
+    logger.info(
+        "Scheduler Airtable env: base=%s, campaigns_table=%s, api_key=%s (from %s), alt_keys=%s, env_files=%s",
+        cfg.CAMPAIGN_CONTROL_BASE or "<missing>",
+        cfg.CAMPAIGNS_TABLE or "<missing>",
+        _mask_token(token),
+        source or "<none>",
+        ", ".join(name for name in present_sources if name != source) or "<none>",
+        ", ".join(ENV_SOURCES) or "<none>",
+    )
+    _LOGGED_ENV = True
+
+
+def _safe_response_preview(response: requests.Response) -> str:
+    try:
+        body = response.text or ""
+    except Exception:
+        body = repr(response)
+    body = body.replace("\n", " ").strip()
+    return body[:500]
+
+
+def _list_available_tables(api_key: str, base_id: str) -> Optional[List[str]]:
+    url = f"https://api.airtable.com/v0/meta/bases/{base_id}/tables"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+    except requests.RequestException as exc:
+        logger.debug("Unable to list Airtable tables for base %s: %s", base_id, exc)
+        return None
+    if resp.status_code != 200:
+        logger.debug(
+            "Listing tables via metadata API failed for base %s (status=%s)",
+            base_id,
+            resp.status_code,
+        )
+        return None
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+
+    tables = [
+        tbl.get("name")
+        for tbl in data.get("tables", [])
+        if isinstance(tbl, dict) and tbl.get("name")
+    ]
+    return tables or None
+
+
+def _get_token_scopes(api_key: str) -> Optional[List[str]]:
+    url = "https://api.airtable.com/v0/meta/whoami"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+    except requests.RequestException as exc:
+        logger.debug("Unable to fetch Airtable token scopes: %s", exc)
+        return None
+
+    if resp.status_code != 200:
+        logger.debug("Airtable whoami endpoint returned status %s", resp.status_code)
+        return None
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+
+    scopes = data.get("scopes")
+    if isinstance(scopes, list):
+        return [str(scope) for scope in scopes]
+    return None
+
+
+def _probe_airtable_table(api_key: str, base_id: str, table_name: str) -> Tuple[bool, Dict[str, Any]]:
+    url = f"https://api.airtable.com/v0/{base_id}/{quote(table_name, safe='')}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    params = {"maxRecords": 1}
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+    except requests.RequestException as exc:
+        message = (
+            f"Unable to reach Airtable for base '{base_id}' table '{table_name}': {exc}"
+        )
+        return False, {"message": message, "exception": str(exc)}
+
+    if resp.status_code == 200:
+        scopes = _get_token_scopes(api_key)
+        info: Dict[str, Any] = {}
+        if scopes:
+            info["scopes"] = scopes
+        return True, info
+
+    preview = _safe_response_preview(resp)
+
+    if resp.status_code == 404:
+        tables = _list_available_tables(api_key, base_id)
+        suggestion = None
+        if tables:
+            suggestion = next(
+                (name for name in tables if name.lower() == table_name.lower()),
+                None,
+            )
+        message = (
+            f"Airtable table '{table_name}' not found in base '{base_id}'."
+            " Check for typos or case mismatches."
+        )
+        if suggestion and suggestion != table_name:
+            message += f" Did you mean '{suggestion}'?"
+        if tables:
+            message += f" Available tables: {', '.join(tables)}."
+        return False, {
+            "message": message,
+            "status": resp.status_code,
+            "response": preview,
+            "available_tables": tables,
+            "suggested_table": suggestion,
+        }
+
+    if resp.status_code == 403:
+        scopes = _get_token_scopes(api_key)
+        message = (
+            f"Airtable denied access to base '{base_id}'."
+            " Confirm the API key has been granted that base with read/write permissions"
+            " and includes the data.records:read/write scopes."
+        )
+        info = {
+            "message": message,
+            "status": resp.status_code,
+            "response": preview,
+        }
+        if scopes:
+            info["scopes"] = scopes
+        return False, info
+
+    message = (
+        f"Airtable responded with unexpected status {resp.status_code} for"
+        f" base '{base_id}' table '{table_name}'."
+    )
+    return False, {
+        "message": message,
+        "status": resp.status_code,
+        "response": preview,
+    }
+
+
+def _validate_airtable_access() -> Optional[Dict[str, Any]]:
+    cfg = settings()
+    base_id = cfg.CAMPAIGN_CONTROL_BASE
+    table_name = cfg.CAMPAIGNS_TABLE
+    token, source = _resolve_api_key()
+    details: Dict[str, Any] = {
+        "base_id": base_id,
+        "campaigns_table": table_name,
+        "env_files": ENV_SOURCES or [],
+        "available_key_envs": [
+            name for name in API_KEY_ENV_PRIORITY if os.getenv(name)
+        ],
+    }
+    if source:
+        details["api_key_source"] = source
+
+    if not base_id:
+        message = "CAMPAIGN_CONTROL_BASE is not configured."
+        logger.error(message)
+        return {"ok": False, "error": message, "details": details}
+    if not BASE_ID_PATTERN.match(base_id):
+        message = f"CAMPAIGN_CONTROL_BASE '{base_id}' does not look like a valid Airtable base id."
+        logger.error(message)
+        return {"ok": False, "error": message, "details": details}
+    if not table_name:
+        message = "CAMPAIGNS_TABLE is not configured."
+        logger.error(message)
+        return {"ok": False, "error": message, "details": details}
+    if not token:
+        message = (
+            "No Airtable API key found (checked AIRTABLE_API_KEY, AIRTABLE_ACQUISITIONS_KEY,"
+            " AIRTABLE_COMPLIANCE_KEY, AIRTABLE_REPORTING_KEY)."
+        )
+        logger.error(message)
+        return {"ok": False, "error": message, "details": details}
+
+    ok, info = _probe_airtable_table(token, base_id, table_name)
+    if not ok:
+        message = info.get("message") or "Unable to verify Airtable access."
+        logger.error(message)
+        info.pop("message", None)
+        details.update(info)
+        return {"ok": False, "error": message, "details": details}
+
+    scopes = info.get("scopes") if isinstance(info, dict) else None
+    if scopes:
+        details["scopes"] = scopes
+        missing = [
+            scope
+            for scope in ("data.records:read", "data.records:write")
+            if scope not in scopes
+        ]
+        if missing:
+            message = (
+                "Airtable API key is missing required scopes: "
+                + ", ".join(missing)
+                + "."
+            )
+            logger.error(message)
+            details["missing_scopes"] = missing
+            return {"ok": False, "error": message, "details": details}
+
+    return None
 
 CAMPAIGN_FIELDS = campaign_field_map()
 DRIP_FIELDS = drip_field_map()
@@ -249,17 +528,12 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
     """Queue scheduled campaigns into the Drip Queue."""
 
     logger.info("Starting campaign scheduler run")
-    if not any(
-        os.getenv(key)
-        for key in (
-            "AIRTABLE_API_KEY",
-            "AIRTABLE_ACQUISITIONS_KEY",
-            "AIRTABLE_COMPLIANCE_KEY",
-            "AIRTABLE_REPORTING_KEY",
-        )
-    ) and not TEST_MODE:
-        logger.error("No Airtable API key configured; aborting scheduler run.")
-        return {"ok": False, "error": "Missing Airtable API key"}
+    _log_scheduler_env()
+
+    if not TEST_MODE:
+        validation_error = _validate_airtable_access()
+        if validation_error:
+            return validation_error
 
     campaigns_handle = CONNECTOR.campaigns()
     drip_handle = CONNECTOR.drip_queue()
@@ -277,7 +551,11 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     label,
                     handle.base_id,
                 )
-                return {"ok": False, "error": f"{label} table unavailable"}
+                return {
+                    "ok": False,
+                    "error": f"{label} table unavailable",
+                    "details": {"base_id": handle.base_id, "table": handle.table_name},
+                }
 
     campaigns = list_records(campaigns_handle)
     prospects = list_records(prospects_handle)
