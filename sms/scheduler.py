@@ -444,6 +444,13 @@ def _coerce_market(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, dict):
+        # Airtable linked records may include nested fields
+        fields = value.get("fields")
+        if isinstance(fields, dict):
+            for key in ("Name", "name", "Market", "market", "Label", "label"):
+                v = fields.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
         for key in ("name", "Name", "label", "Label", "value", "Value", "id", "ID"):
             v = value.get(key)
             if isinstance(v, str) and v.strip():
@@ -457,12 +464,14 @@ def _coerce_market(value: Any) -> str:
     return str(value).strip()
 
 
-def _campaign_market(fields: Dict[str, Any]) -> str:
-    return _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
+def _campaign_market(fields: Dict[str, Any]) -> Tuple[str, str]:
+    raw = _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
+    return raw, raw.lower() if raw else ""
 
 
-def _prospect_market(fields: Dict[str, Any]) -> str:
-    return _coerce_market(fields.get(PROSPECT_MARKET_FIELD)) if PROSPECT_MARKET_FIELD else ""
+def _prospect_market(fields: Dict[str, Any]) -> Tuple[str, str]:
+    raw = _coerce_market(fields.get(PROSPECT_MARKET_FIELD)) if PROSPECT_MARKET_FIELD else ""
+    return raw, raw.lower() if raw else ""
 
 
 def _existing_pairs(drip_records: List[Dict[str, Any]]) -> Set[Tuple[str, str]]:
@@ -490,8 +499,8 @@ def _schedule_campaign(
 ) -> Tuple[int, int]:
     fields = campaign.get("fields", {}) or {}
     campaign_id = campaign.get("id")
-    market = _campaign_market(fields)
-    if not market:
+    campaign_market_raw, campaign_market_norm = _campaign_market(fields)
+    if not campaign_market_raw:
         logger.info("Skipping campaign %s – missing market", campaign_id)
         return 0, 0
 
@@ -501,14 +510,25 @@ def _schedule_campaign(
     for prospect in prospects:
         pf = prospect.get("fields", {}) or {}
         prospect_id = prospect.get("id")
-        prospect_market = _prospect_market(pf)
-        if prospect_market != market:
+        prospect_market_raw, prospect_market_norm = _prospect_market(pf)
+
+        logger.debug(
+            "Market comparison campaign=%s ('%s' -> %s) vs prospect=%s ('%s' -> %s)",
+            campaign_id,
+            campaign_market_raw,
+            campaign_market_norm or "<blank>",
+            prospect_id,
+            prospect_market_raw,
+            prospect_market_norm or "<blank>",
+        )
+
+        if campaign_market_norm and prospect_market_norm and prospect_market_norm != campaign_market_norm:
             logger.debug(
                 "Skipping prospect %s for campaign %s due to market mismatch (%s != %s)",
                 prospect_id,
                 campaign_id,
-                prospect_market,
-                market,
+                prospect_market_norm,
+                campaign_market_norm,
             )
             continue
         if not _matches_segment(pf, fields):
@@ -548,7 +568,7 @@ def _schedule_campaign(
 
         payload: Dict[str, Any] = {
             DRIP_STATUS_FIELD: "QUEUED",
-            DRIP_MARKET_FIELD: market,
+            DRIP_MARKET_FIELD: campaign_market_raw,
             DRIP_SELLER_PHONE_FIELD: phone,
             DRIP_PROCESSOR_FIELD: SCHEDULER_PROCESSOR_LABEL,
             DRIP_NEXT_SEND_DATE_FIELD: start_time.isoformat(),
@@ -570,7 +590,7 @@ def _schedule_campaign(
                 "Queued prospect %s for campaign %s at market '%s' phone=%s",
                 prospect_id,
                 campaign_id,
-                market,
+                campaign_market_raw,
                 phone,
             )
         else:
