@@ -466,11 +466,13 @@ def _coerce_market(value: Any) -> str:
 
 def _campaign_market(fields: Dict[str, Any]) -> Tuple[str, str]:
     raw = _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
+    raw = raw.strip()
     return raw, raw.lower() if raw else ""
 
 
 def _prospect_market(fields: Dict[str, Any]) -> Tuple[str, str]:
     raw = _coerce_market(fields.get(PROSPECT_MARKET_FIELD)) if PROSPECT_MARKET_FIELD else ""
+    raw = raw.strip()
     return raw, raw.lower() if raw else ""
 
 
@@ -513,24 +515,29 @@ def _schedule_campaign(
         prospect_market_raw, prospect_market_norm = _prospect_market(pf)
 
         logger.debug(
-            "Market comparison campaign=%s ('%s' -> %s) vs prospect=%s ('%s' -> %s)",
-            campaign_id,
+            "Market match check: campaign=%s, prospect=%s",
             campaign_market_raw,
-            campaign_market_norm or "<blank>",
-            prospect_id,
             prospect_market_raw,
-            prospect_market_norm or "<blank>",
         )
 
-        if campaign_market_norm and prospect_market_norm and prospect_market_norm != campaign_market_norm:
-            logger.debug(
-                "Skipping prospect %s for campaign %s due to market mismatch (%s != %s)",
-                prospect_id,
-                campaign_id,
-                prospect_market_norm,
-                campaign_market_norm,
-            )
-            continue
+        if campaign_market_norm:
+            if prospect_market_norm:
+                if prospect_market_norm != campaign_market_norm:
+                    logger.debug(
+                        "Skipping prospect %s for campaign %s due to market mismatch (%s != %s)",
+                        prospect_id,
+                        campaign_id,
+                        prospect_market_norm,
+                        campaign_market_norm,
+                    )
+                    continue
+            else:
+                logger.debug(
+                    "Skipping prospect %s for campaign %s because prospect market is missing",
+                    prospect_id,
+                    campaign_id,
+                )
+                continue
         if not _matches_segment(pf, fields):
             logger.debug(
                 "Skipping prospect %s for campaign %s due to segment/view mismatch",
