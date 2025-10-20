@@ -259,6 +259,7 @@ class Settings:
 
     # Security / API
     CRON_TOKEN: Optional[str]
+    CAMPAIGNS_BASE_ID: Optional[str]
 
 
 @lru_cache(maxsize=1)
@@ -304,6 +305,9 @@ def settings() -> Settings:
         RUNNER_SEND_AFTER_QUEUE_DEFAULT=env_bool("RUNNER_SEND_AFTER_QUEUE", False),
         AUTO_BACKFILL_FROM_NUMBER=env_bool("AUTO_BACKFILL_FROM_NUMBER", True),
         CRON_TOKEN=env_str("CRON_TOKEN"),
+        CAMPAIGNS_BASE_ID=env_str("CAMPAIGNS_BASE_ID")
+        or env_str("LEADS_CONVOS_BASE")
+        or env_str("AIRTABLE_LEADS_CONVOS_BASE_ID"),
     )
 
 

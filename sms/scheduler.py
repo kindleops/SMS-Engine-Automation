@@ -94,7 +94,8 @@ def _log_scheduler_env() -> None:
     present_sources = [name for name in API_KEY_ENV_PRIORITY if os.getenv(name)]
 
     logger.info(
-        "Scheduler Airtable env: leads_base=%s, control_base=%s, campaigns_table=%s, api_key=%s (from %s), alt_keys=%s, env_files=%s",
+        "Scheduler Airtable env: campaigns_base=%s, leads_base=%s, control_base=%s, campaigns_table=%s, api_key=%s (from %s), alt_keys=%s, env_files=%s",
+        cfg.CAMPAIGNS_BASE_ID or "<missing>",
         cfg.LEADS_CONVOS_BASE or "<missing>",
         cfg.CAMPAIGN_CONTROL_BASE or "<missing>",
         cfg.CAMPAIGNS_TABLE or "<missing>",
@@ -242,11 +243,12 @@ def _probe_airtable_table(api_key: str, base_id: str, table_name: str) -> Tuple[
 
 def _validate_airtable_access() -> Optional[Dict[str, Any]]:
     cfg = settings()
-    base_id = cfg.LEADS_CONVOS_BASE
+    base_id = cfg.CAMPAIGNS_BASE_ID or cfg.LEADS_CONVOS_BASE
     table_name = cfg.CAMPAIGNS_TABLE
     token, source = _resolve_api_key()
     details: Dict[str, Any] = {
         "base_id": base_id,
+        "campaigns_base": cfg.CAMPAIGNS_BASE_ID,
         "leads_base": cfg.LEADS_CONVOS_BASE,
         "control_base": cfg.CAMPAIGN_CONTROL_BASE,
         "campaigns_table": table_name,
@@ -259,11 +261,11 @@ def _validate_airtable_access() -> Optional[Dict[str, Any]]:
         details["api_key_source"] = source
 
     if not base_id:
-        message = "LEADS_CONVOS_BASE is not configured."
+        message = "CAMPAIGNS_BASE_ID (or LEADS_CONVOS_BASE) is not configured."
         logger.error(message)
         return {"ok": False, "error": message, "details": details}
     if not BASE_ID_PATTERN.match(base_id):
-        message = f"LEADS_CONVOS_BASE '{base_id}' does not look like a valid Airtable base id."
+        message = f"Campaigns base '{base_id}' does not look like a valid Airtable base id."
         logger.error(message)
         return {"ok": False, "error": message, "details": details}
     if not table_name:
@@ -541,6 +543,12 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
     campaigns_handle = CONNECTOR.campaigns()
     drip_handle = CONNECTOR.drip_queue()
     prospects_handle = CONNECTOR.prospects()
+
+    logger.info(
+        "Scheduler using campaigns base=%s table=%s",
+        campaigns_handle.base_id,
+        campaigns_handle.table_name,
+    )
 
     if not TEST_MODE:
         for handle, label in (

@@ -199,6 +199,7 @@ class DataConnector:
 
     def campaigns(self) -> TableHandle:
         base = _first_non_empty(
+            "CAMPAIGNS_BASE_ID",
             "LEADS_CONVOS_BASE",
             "AIRTABLE_LEADS_CONVOS_BASE_ID",
             "CAMPAIGN_CONTROL_BASE",
