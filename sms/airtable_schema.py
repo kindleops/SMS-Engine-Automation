@@ -799,14 +799,14 @@ def campaign_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]
 
 
 class DripStatus(str, Enum):
-    FAILED = "FAILED"
-    QUEUED = "QUEUED"
-    READY = "READY"
-    SENDING = "SENDING"
-    SENT = "SENT"
-    DELIVERED = "DELIVERED"
-    RETRY = "RETRY"
-    THROTTLED = "THROTTLED"
+    FAILED = "Failed"
+    QUEUED = "Queued"
+    READY = "Ready"
+    SENDING = "Sending..."
+    SENT = "Sent"
+    DELIVERED = "Delivered"
+    RETRY = "Retry"
+    THROTTLED = "Throttled"
     DNC = "DNC"
 
 
