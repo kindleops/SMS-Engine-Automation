@@ -3,9 +3,14 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import traceback
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+import requests
+
+from sms.runtime import get_logger
 
 # --- Ensure Table is always defined (prevents NameError) ---
 try:
@@ -18,6 +23,8 @@ class Table:  # thin wrapper so symbol 'Table' always exists
     def __init__(self, api_key: str, base_id: str, table_name: str):
         if _RealTable is None:
             raise ImportError("pyairtable is not installed or failed to import. Install with: pip install pyairtable")
+        self.base_id = base_id
+        self.table_name = table_name
         self._t = _RealTable(api_key, base_id, table_name)
 
     def all(self, **kwargs):
@@ -41,11 +48,13 @@ class Table:  # thin wrapper so symbol 'Table' always exists
 AIRTABLE_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
 PERF_BASE = os.getenv("PERFORMANCE_BASE")
 KPI_TABLE = os.getenv("KPI_TABLE_NAME", "KPIs")
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() in {"1", "true", "yes"}
 
 # Business-timezone for daily rollups
 KPI_TZ = os.getenv("KPI_TZ", "America/Chicago")
 MAX_SCAN = int(os.getenv("KPI_MAX_SCAN", "10000"))  # safety cap
 PAGE_SIZE = 100
+_ENV_LOGGED = False
 
 try:
     from zoneinfo import ZoneInfo
@@ -95,7 +104,7 @@ def _norm(s):  # normalize field names
 # -----------------------
 def _kpi_table() -> Optional[Table]:
     if not (AIRTABLE_KEY and PERF_BASE):
-        print("⚠️ KPI Aggregator: missing AIRTABLE key or PERFORMANCE_BASE")
+        logger.error("KPI Aggregator: missing AIRTABLE key or PERFORMANCE_BASE")
         return None
     try:
         return Table(AIRTABLE_KEY, PERF_BASE, KPI_TABLE)
@@ -125,32 +134,77 @@ def _remap_existing_only(tbl: Table, payload: Dict) -> Dict:
     return out
 
 
-def _fetch_kpi_rows(tbl: Table) -> List[dict]:
-    """Return KPI rows using the Airtable iterator with retry and pagination."""
+def _log_kpi_env() -> None:
+    global _ENV_LOGGED
+    if _ENV_LOGGED:
+        return
+    masked_key = "<missing>"
+    if AIRTABLE_KEY:
+        token = AIRTABLE_KEY.strip()
+        if len(token) <= 4:
+            masked_key = "*" * len(token)
+        elif len(token) <= 8:
+            masked_key = f"{token[:2]}...{token[-2:]}"
+        else:
+            masked_key = f"{token[:4]}...{token[-4:]}"
+    logger.info(
+        "KPI Aggregator env: base=%s, table=%s, api_key=%s, max_scan=%s, test_mode=%s",
+        PERF_BASE or "<missing>",
+        KPI_TABLE,
+        masked_key,
+        MAX_SCAN,
+        TEST_MODE,
+    )
+    _ENV_LOGGED = True
+
+
+def _fetch_kpi_rows(tbl: Table) -> Tuple[List[dict], Optional[str]]:
+    """Return KPI rows with pagination, retries, and rich error reporting."""
 
     attempts = 2
-    last_exc: Optional[Exception] = None
-    total_limit = MAX_SCAN if MAX_SCAN > 0 else None
+    total_limit = MAX_SCAN if MAX_SCAN and MAX_SCAN > 0 else None
+    last_error: Optional[str] = None
 
     for attempt in range(attempts):
         try:
-            rows: List[dict] = []
-            fetched = 0
-            iterator = tbl.iterate(page_size=PAGE_SIZE)
-            for record in iterator:
-                rows.append(record)
-                fetched += 1
-                if total_limit is not None and fetched >= total_limit:
-                    break
-            return rows
-        except Exception as exc:  # pragma: no cover - network failure path
-            last_exc = exc
+            rows = tbl.all(page_size=PAGE_SIZE, max_records=total_limit)
+            return rows, None
+        except requests.exceptions.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            body = getattr(response, "text", str(exc))
+            last_error = (
+                f"HTTPError fetching KPIs (base={getattr(tbl, 'base_id', '<unknown>')},"
+                f" table={getattr(tbl, 'table_name', '<unknown>')}, status={status}): {body}"
+            )
+            logger.error(last_error)
+            if status and 500 <= int(status) < 600 and attempt < attempts - 1:
+                time.sleep(1.5)
+                continue
+            break
+        except requests.exceptions.RequestException as exc:
+            last_error = (
+                f"RequestException fetching KPIs (base={getattr(tbl, 'base_id', '<unknown>')},"
+                f" table={getattr(tbl, 'table_name', '<unknown>')}): {exc}"
+            )
+            logger.error(last_error)
+            if attempt < attempts - 1:
+                time.sleep(1.5)
+                continue
+            break
+        except Exception as exc:
+            last_error = (
+                f"Unexpected error fetching KPIs (base={getattr(tbl, 'base_id', '<unknown>')},"
+                f" table={getattr(tbl, 'table_name', '<unknown>')}): {exc}"
+            )
+            logger.error(last_error)
             traceback.print_exc()
-            if attempt == attempts - 1:
-                break
-    if last_exc:
-        raise last_exc
-    return []
+            if attempt < attempts - 1:
+                time.sleep(1.5)
+                continue
+            break
+
+    return [], last_error
 
 
 # -----------------------
@@ -163,19 +217,22 @@ def aggregate_kpis():
     - Timezone-aware (KPI_TZ, default America/Chicago).
     - Safe writes (only updates fields that exist in the table).
     """
+    _log_kpi_env()
+
+    if TEST_MODE:
+        logger.info("TEST_MODE enabled – skipping KPI aggregation work")
+        return {"ok": True, "daily": {}, "weekly": {}, "monthly": {}, "written": {"daily": 0, "weekly": 0, "monthly": 0}, "errors": [], "note": "test mode"}
+
     kpi_tbl = _kpi_table()
     if not kpi_tbl:
-        return {"ok": False, "error": "KPI table not configured"}
+        return {"ok": False, "errors": ["KPI table not configured"], "daily": {}, "weekly": {}, "monthly": {}, "written": {"daily": 0, "weekly": 0, "monthly": 0}}
 
     today_local = _tz_now().date()
     start_week = today_local - timedelta(days=7)
     start_month = today_local.replace(day=1)
     now_iso = _utcnow_iso()
 
-    try:
-        rows = _fetch_kpi_rows(kpi_tbl)
-    except Exception:
-        return {"ok": False, "error": "Failed to read KPI rows"}
+    rows, fetch_error = _fetch_kpi_rows(kpi_tbl)
 
     # Partition: raw vs existing totals for today (so we upsert, not duplicate)
     raw = []
@@ -235,6 +292,8 @@ def aggregate_kpis():
 
     written = {"daily": 0, "weekly": 0, "monthly": 0}
     errors = []
+    if fetch_error:
+        errors.append(fetch_error)
 
     def _upsert_totals(suffix: str, totals: Dict[str, float], existing_map: Dict[str, dict]):
         nonlocal written
@@ -263,7 +322,7 @@ def aggregate_kpis():
                 else:
                     written["monthly"] += 1
             except Exception as e:
-                traceback.print_exc()
+                logger.error("Failed to upsert KPI metric %s: %s", metric_name, e, exc_info=True)
                 errors.append(f"{metric_name}: {e}")
 
     _upsert_totals("DAILY_TOTAL", daily, existing_totals_daily)
@@ -271,10 +330,11 @@ def aggregate_kpis():
     _upsert_totals("MONTHLY_TOTAL", monthly, existing_totals_monthly)
 
     return {
-        "ok": True,
+        "ok": not errors,
         "daily": daily,
         "weekly": weekly,
         "monthly": monthly,
         "written": written,
         "errors": errors,
     }
+logger = get_logger(__name__)

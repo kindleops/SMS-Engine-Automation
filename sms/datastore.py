@@ -5,10 +5,13 @@ from __future__ import annotations
 import itertools
 import os
 import re
+import time
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Dict, List, Optional, Tuple
+
+import requests
 
 from sms.runtime import get_logger, iso_now, last_10_digits, normalize_phone, retry
 from sms.airtable_schema import (
@@ -124,6 +127,7 @@ class TableHandle:
     base_id: Optional[str]
     table_name: str
     field_cache: Dict[str, str] = dataclass_field(default_factory=dict)
+    last_error: Optional[Dict[str, Any]] = None
 
 
 class DataConnector:
@@ -266,6 +270,11 @@ def _remap_existing_only(handle: TableHandle, payload: Dict[str, Any]) -> Dict[s
 
 def _log_airtable_exception(handle: TableHandle, exc: Exception, action: str) -> None:
     response = getattr(exc, "response", None)
+    error_payload: Dict[str, Any] = {
+        "action": action,
+        "error": str(exc),
+        "timestamp": iso_now(),
+    }
     if response is not None:
         try:
             body = response.text  # type: ignore[attr-defined]
@@ -275,6 +284,7 @@ def _log_airtable_exception(handle: TableHandle, exc: Exception, action: str) ->
             except Exception:
                 body = repr(response)
         status = getattr(response, "status_code", "unknown")  # type: ignore[attr-defined]
+        error_payload.update({"status": status, "body": body})
         logger.error(
             "Airtable %s failed [%s/%s] status=%s body=%s",
             action,
@@ -292,20 +302,29 @@ def _log_airtable_exception(handle: TableHandle, exc: Exception, action: str) ->
             exc,
         )
     traceback.print_exc()
+    handle.last_error = error_payload
 
 
 def _safe_all(handle: TableHandle, **kwargs) -> List[Dict[str, Any]]:
     attempts = 2
     last_exc: Optional[Exception] = None
+    if "page_size" not in kwargs and "pageSize" not in kwargs:
+        kwargs["page_size"] = 100
     for attempt in range(attempts):
         try:
-            return list(handle.table.all(**kwargs))
+            records = list(handle.table.all(**kwargs))
+            handle.last_error = None
+            return records
         except Exception as exc:  # pragma: no cover - network failure path
             last_exc = exc
             _log_airtable_exception(handle, exc, "all")
             response = getattr(exc, "response", None)
             status = getattr(response, "status_code", None)
-            if status and 500 <= int(status) < 600 and attempt < attempts - 1:
+            try:
+                status_int = int(status) if status is not None else None
+            except (TypeError, ValueError):
+                status_int = None
+            if status_int and 500 <= status_int < 600 and attempt < attempts - 1:
                 time.sleep(1.5)
                 continue
             break
@@ -316,7 +335,9 @@ def _safe_get(handle: TableHandle, record_id: str):
     if not record_id:
         return None
     try:
-        return handle.table.get(record_id)
+        record = handle.table.get(record_id)
+        handle.last_error = None
+        return record
     except Exception as exc:
         _log_airtable_exception(handle, exc, "get")
         return None
@@ -332,7 +353,9 @@ def _safe_create(handle: TableHandle, fields: Dict[str, Any]) -> Optional[Dict[s
         return handle.table.create(payload)
 
     try:
-        return retry(_op, retries=3, base_delay=0.6, logger=logger)
+        record = retry(_op, retries=3, base_delay=0.6, logger=logger)
+        handle.last_error = None
+        return record
     except Exception as exc:  # pragma: no cover - network failure path
         if handle.in_memory:
             return handle.table.create(payload)
@@ -352,7 +375,9 @@ def _safe_update(handle: TableHandle, record_id: str, fields: Dict[str, Any]) ->
         return handle.table.update(record_id, payload)
 
     try:
-        return retry(_op, retries=3, base_delay=0.6, logger=logger)
+        record = retry(_op, retries=3, base_delay=0.6, logger=logger)
+        handle.last_error = None
+        return record
     except Exception as exc:  # pragma: no cover - network failure path
         if handle.in_memory:
             return handle.table.update(record_id, payload)

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Iterable, Optional, TypeVar
@@ -12,6 +13,19 @@ T = TypeVar("T")
 
 _LOGGING_CONFIGURED = False
 _DIGIT_PATTERN = re.compile(r"\d+")
+_GLOBAL_HOOK_INSTALLED = False
+_CORE_ENV_LOGGED = False
+
+
+def _mask_env_value(value: Optional[str]) -> str:
+    if not value:
+        return "<missing>"
+    trimmed = value.strip()
+    if len(trimmed) <= 4:
+        return "*" * len(trimmed)
+    if len(trimmed) <= 8:
+        return f"{trimmed[:2]}...{trimmed[-2:]}"
+    return f"{trimmed[:4]}...{trimmed[-4:]}"
 
 
 def _normalise_level(value: int | str | None) -> int:
@@ -41,6 +55,7 @@ def configure_logging(level: int | str | None = None) -> None:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
     _LOGGING_CONFIGURED = True
+    _log_core_env()
 
 
 def get_logger(name: str = "sms") -> logging.Logger:
@@ -49,6 +64,35 @@ def get_logger(name: str = "sms") -> logging.Logger:
     if not _LOGGING_CONFIGURED:
         configure_logging()
     return logging.getLogger(name)
+
+
+def install_global_exception_hook() -> None:
+    global _GLOBAL_HOOK_INSTALLED
+    if _GLOBAL_HOOK_INSTALLED:
+        return
+
+    def _hook(exc_type, exc, tb):
+        logger = get_logger("uncaught")
+        logger.error("Uncaught exception (%s): %s", exc_type.__name__, exc, exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = _hook
+    _GLOBAL_HOOK_INSTALLED = True
+    _log_core_env()
+
+
+def _log_core_env() -> None:
+    global _CORE_ENV_LOGGED
+    if _CORE_ENV_LOGGED:
+        return
+    logger = get_logger("env")
+    logger.info(
+        "Core env: AIRTABLE_API_KEY=%s, LEADS_CONVOS_BASE=%s, PERFORMANCE_BASE=%s, TEST_MODE=%s",
+        _mask_env_value(os.getenv("AIRTABLE_API_KEY")),
+        os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID") or "<missing>",
+        os.getenv("PERFORMANCE_BASE") or "<missing>",
+        os.getenv("TEST_MODE", "false"),
+    )
+    _CORE_ENV_LOGGED = True
 
 
 def utc_now() -> datetime:
@@ -148,3 +192,5 @@ async def retry_async(
             await asyncio.sleep(delay)
             attempt += 1
 
+
+install_global_exception_hook()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -471,9 +472,10 @@ def _schedule_campaign(
     quiet: QuietHours,
 ) -> Tuple[int, int]:
     fields = campaign.get("fields", {}) or {}
+    campaign_id = campaign.get("id")
     market = _campaign_market(fields)
     if not market:
-        logger.info("Skipping campaign %s – missing market", campaign.get("id"))
+        logger.info("Skipping campaign %s – missing market", campaign_id)
         return 0, 0
 
     start_time = _apply_quiet_hours(_campaign_start(fields), quiet)
@@ -481,20 +483,49 @@ def _schedule_campaign(
     skipped = 0
     for prospect in prospects:
         pf = prospect.get("fields", {}) or {}
-        if _prospect_market(pf) != market:
+        prospect_id = prospect.get("id")
+        prospect_market = _prospect_market(pf)
+        if prospect_market != market:
+            logger.debug(
+                "Skipping prospect %s for campaign %s due to market mismatch (%s != %s)",
+                prospect_id,
+                campaign_id,
+                prospect_market,
+                market,
+            )
             continue
         if not _matches_segment(pf, fields):
+            logger.debug(
+                "Skipping prospect %s for campaign %s due to segment/view mismatch",
+                prospect_id,
+                campaign_id,
+            )
             continue
         phone = _prospect_phone(pf)
         if not phone:
+            logger.debug(
+                "Skipping prospect %s for campaign %s due to missing phone",
+                prospect_id,
+                campaign_id,
+            )
             skipped += 1
             continue
         digits = last_10_digits(phone)
         if not digits:
+            logger.debug(
+                "Skipping prospect %s for campaign %s due to invalid digits",
+                prospect_id,
+                campaign_id,
+            )
             skipped += 1
             continue
         key = (campaign["id"], digits)
         if key in existing_pairs:
+            logger.debug(
+                "Skipping prospect %s for campaign %s because phone already queued",
+                prospect_id,
+                campaign_id,
+            )
             skipped += 1
             continue
 
@@ -520,8 +551,8 @@ def _schedule_campaign(
         else:
             logger.error(
                 "Failed to create drip queue record for campaign=%s prospect=%s (phone=%s)",
-                campaign.get("id"),
-                prospect.get("id"),
+                campaign_id,
+                prospect_id,
                 phone,
             )
             skipped += 1
@@ -570,6 +601,30 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
 
     campaigns = list_records(campaigns_handle)
     prospects = list_records(prospects_handle)
+    if (
+        not TEST_MODE
+        and not prospects
+        and prospects_handle.last_error
+        and isinstance(prospects_handle.last_error, dict)
+        and prospects_handle.last_error.get("status")
+    ):
+        try:
+            status_code = int(prospects_handle.last_error.get("status", 0))
+        except (TypeError, ValueError):
+            status_code = None
+        if status_code and 500 <= status_code < 600:
+            logger.warning(
+                "Prospects fetch failed with status %s, retrying once after backoff",
+                status_code,
+            )
+            time.sleep(2)
+            prospects_handle.last_error = None
+            prospects = list_records(prospects_handle)
+            if prospects_handle.last_error:
+                logger.error(
+                    "Prospects retry failed: %s",
+                    prospects_handle.last_error,
+                )
     existing_drip = list_records(drip_handle)
 
     quiet = _quiet_hours()
@@ -583,6 +638,11 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
         fields = campaign.get("fields", {}) or {}
         status = str(fields.get(CAMPAIGN_STATUS_FIELD) or "").strip().lower()
         if status != "scheduled":
+            logger.debug(
+                "Skipping campaign %s due to status '%s'",
+                campaign.get("id"),
+                status,
+            )
             continue
 
         try:
@@ -599,6 +659,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
             logger.exception("Campaign scheduling failed for %s", campaign.get("id"))
             summary["errors"].append({"campaign": campaign.get("id"), "error": str(exc)})
 
+    summary["ok"] = not summary["errors"]
     logger.info("Campaign scheduler finished: %s queued entries", summary["queued"])
     return summary
 
