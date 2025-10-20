@@ -1,139 +1,53 @@
-<<<<<<< HEAD
-# sms/workers/intent_worker.py
-import os, time
-from datetime import datetime, timedelta, timezone
-from sms.tables import get_table
-
-DRIP_DELAYS = {
-    "Interest": timedelta(hours=1),
-    "Delay":    timedelta(hours=24),
-    "Negative": timedelta(days=7),
-    "Neutral":  timedelta(hours=6),
-    "Wrong Number": None,
-    "Opt Out": None,
-}
-
-intent_map = {
-    "interest": "Interest",
-    "opt_out":  "Opt Out",
-    "negative": "Negative",
-    "delay":    "Delay",
-    "wrong_number": "Wrong Number",
-    "neutral":  "Neutral",
-}
-status_map = {
-    "interest": "PROCESSED-YES",
-    "opt_out":  "PROCESSED-OPTOUT",
-    "negative": "PROCESSED-NO",
-    "delay":    "PROCESSED-LATER",
-    "wrong_number": "PROCESSED-WRONG",
-    "neutral":  "RECEIVED",
-}
-keywords = {
-    "interest": ["yes","yeah","yep","sure","ok","okay","interested","offer","price","cash","maybe","send it","run numbers","how much","what price","would consider","make me an offer","potentially","open to","let’s talk"],
-    "opt_out": ["stop","unsubscribe","remove","opt out","don’t text","no more","quit","take me off","leave me alone","wrong person","do not contact"],
-    "negative": ["no","not interested","never","don’t bother","don’t want","no thanks","already sold","not selling","no longer own"],
-    "delay": ["busy","later","not now","next week","follow up","another time","call me later","in a few days","reach out later","not ready"],
-    "wrong_number": ["wrong number","who is this","not the owner","wrong person","don’t own","not me","no idea","mistake"],
-}
-
-def classify(msg: str) -> str:
-    t = (msg or "").lower()
-    for label, words in keywords.items():
-        if any(w in t for w in words):
-            return label
-    return "neutral"
-
-def iso_now(): return datetime.now(timezone.utc).isoformat()
-
-def next_send(label: str):
-    delay = DRIP_DELAYS.get(label)
-    return (datetime.now(timezone.utc) + delay).isoformat() if delay else None
-
-def process_conversation(rec: dict) -> dict | None:
-    f = rec.get("fields", {})
-    body = f.get("message") or f.get("Body") or ""
-    if not body: return None
-
-    label_key = classify(body)
-    intent_label = intent_map[label_key]
-    status_label = status_map[label_key]
-
-    patch = {}
-    if f.get("intent_detected") != intent_label:
-        patch["intent_detected"] = intent_label
-    if f.get("status") != status_label:
-        patch["status"] = status_label
-    if not f.get("processed_at"):
-        patch["processed_at"] = iso_now()
-
-    # drip logic
-    if intent_label in ("Opt Out","Wrong Number"):
-        patch.update({"drip_status":"STOPPED","drip_stage":"N/A","next_send_date":None})
-    else:
-        if f.get("drip_status") in (None,"","PENDING","QUEUED"):
-            patch["drip_status"] = "QUEUED"
-            patch["drip_stage"] = intent_label
-            n = next_send(intent_label)
-            if n: patch["next_send_date"] = n
-
-    return patch or None
-
-def run_batch():
-    C = get_table("AIRTABLE_API_KEY","LEADS_CONVOS_BASE","CONVERSATIONS_TABLE","Conversations")
-    rows = C.all()
-    updated = 0
-    for r in rows:
-        patch = process_conversation(r)
-        if patch:
-            try:
-                C.update(r["id"], patch)
-                updated += 1
-                time.sleep(0.1)
-            except Exception as e:
-                print("⚠️", r["id"], e)
-    print(f"[intent] updated={updated}")
-
-if __name__ == "__main__":
-    run_batch()
-=======
-"""Batch classifier for inbound conversations."""
+"""Classify inbound conversations using the autoresponder's intent detector."""
 
 from __future__ import annotations
 
 from typing import Dict, Optional
 
-from .. import autoresponder, spec
-from ..datastore import CONNECTOR, update_conversation
+from sms.autoresponder import STAGE_MAP, classify_intent
+from sms.airtable_schema import CONVERSATIONS_TABLE, conversations_field_map
+from sms.datastore import CONNECTOR, update_record
+from sms.runtime import get_logger
+
+logger = get_logger(__name__)
+
+CONV_FIELDS = conversations_field_map()
+CONV_FIELD_NAMES = CONVERSATIONS_TABLE.field_names()
+
+CONV_DIRECTION_FIELD = CONV_FIELDS["DIRECTION"]
+CONV_BODY_FIELD = CONV_FIELDS["BODY"]
+CONV_INTENT_FIELD = CONV_FIELDS["INTENT"]
+CONV_STAGE_FIELD = CONV_FIELD_NAMES.get("STAGE", "Stage")
+CONV_PROCESSED_AT_FIELD = CONV_FIELD_NAMES.get("PROCESSED_AT", "Processed Time")
 
 
 def run(limit: Optional[int] = None) -> Dict[str, int]:
     handle = CONNECTOR.conversations()
-    records = handle.table.all()
+    records = handle.table.all()  # type: ignore[attr-defined]
     classified = 0
     for record in records:
-        fields = record.get("fields", {})
-        if fields.get(spec.CONVERSATION_FIELDS.direction) != "INBOUND":
+        fields = record.get("fields", {}) or {}
+        if str(fields.get(CONV_DIRECTION_FIELD) or "").upper() not in {"IN", "INBOUND"}:
             continue
-        body = fields.get(spec.CONVERSATION_FIELDS.message_body)
+        body = fields.get(CONV_BODY_FIELD)
         if not body:
             continue
-        classification = autoresponder.classify_intent(str(body))
+        intent = classify_intent(str(body))
+        stage = STAGE_MAP.get(intent)
         updates = {
-            spec.CONVERSATION_FIELDS.intent_detected: classification.intent_detected,
-            spec.CONVERSATION_FIELDS.ai_intent: classification.ai_intent,
-            spec.CONVERSATION_FIELDS.message_summary: classification.summary,
+            CONV_INTENT_FIELD: intent,
         }
-        if classification.stage:
-            updates[spec.CONVERSATION_FIELDS.stage] = classification.stage
-        update_conversation(record["id"], updates)
-        classified += 1
-        if limit is not None and classified >= limit:
-            break
+        if stage:
+            updates[CONV_STAGE_FIELD] = stage
+        if updates:
+            update_record(handle, record["id"], updates)
+            classified += 1
+            if limit is not None and classified >= limit:
+                break
+
+    logger.info("Intent worker classified %s conversations", classified)
     return {"classified": classified}
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - manual run helper
     print(run())
-
->>>>>>> codex-refactor-test

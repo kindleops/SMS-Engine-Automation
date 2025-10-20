@@ -1,76 +1,20 @@
-<<<<<<< HEAD
-# sms/workers/ai_enrichment.py
-import time, statistics, re
-from datetime import datetime, timezone
-from sms.tables import get_table
-
-def iso_now(): return datetime.now(timezone.utc).isoformat()
-def to_int(v, default=0):
-    try: 
-        return int(float(v))
-    except (ValueError, TypeError):
-        return default
-
-def score_row(f: dict) -> tuple[int,str,str]:
-    """Returns (MotivationScore 0–100, DistressTier, NextAction) using simple rules."""
-    score = 0
-    # recency / activity
-    if f.get("Last Inbound"): score += 15
-    if to_int(f.get("Reply Count")) >= 2: score += 10
-    # property signals (absentee, equity, year built)
-    if (f.get("Absentee Owner") or "").lower() in ("absentee","out of state","true","yes"): score += 10
-    score += min(20, max(0, to_int(f.get("Equity Percent"))//5))  # up to +20
-    yb = to_int(f.get("Year Built"))
-    if yb and yb < 1980: score += 10
-    # language signals captured by autoresponder
-    intent = f.get("Intent Last Detected") or f.get("intent_detected") or ""
-    if intent in ("Interest","Delay"): score += 20
-    if intent == "Negative": score -= 10
-    if (f.get("Owner Verified") or "").lower() == "yes": score += 10
-
-    # tier & next action
-    tier = "COLD"
-    if score >= 80: tier = "HOT"
-    elif score >= 60: tier = "WARM"
-
-    next_action = "Awaiting Reply"
-    if intent == "Interest": next_action = "Ask Price / Condition"
-    elif intent == "Delay": next_action = "Schedule Follow-Up"
-    elif intent in ("Wrong Number","Opt Out"): next_action = "Stop / Clean Data"
-
-    return max(0, min(100, score)), tier, next_action
-
-def run():
-    P = get_table("AIRTABLE_API_KEY","LEADS_CONVOS_BASE","PROSPECTS_TABLE","Prospects")
-    rows = P.all()
-    updated = 0
-    for r in rows:
-        f = r.get("fields", {})
-        score, tier, action = score_row(f)
-        patch = {}
-        if f.get("Motivation Score") != score: patch["Motivation Score"] = score
-        if f.get("Distress Tier") != tier:     patch["Distress Tier"] = tier
-        if f.get("Next Action") != action:     patch["Next Action"] = action
-        if patch:
-            try:
-                P.update(r["id"], patch)
-                updated += 1
-                time.sleep(0.1)
-            except Exception as e:
-                print("⚠️", r["id"], e)
-    print(f"[ai_enrichment] updated={updated} ts={iso_now()}")
-
-if __name__ == "__main__":
-    run()
-=======
-"""Worker that enriches conversations with lightweight AI summaries."""
+"""Generate lightweight message summaries for Conversations lacking AI output."""
 
 from __future__ import annotations
 
 from typing import Dict, Optional
 
-from .. import spec
-from ..datastore import CONNECTOR, update_conversation
+from sms.airtable_schema import CONVERSATIONS_TABLE, conversations_field_map
+from sms.datastore import CONNECTOR, update_record
+from sms.runtime import get_logger
+
+logger = get_logger(__name__)
+
+CONV_FIELDS = conversations_field_map()
+CONV_FIELD_NAMES = CONVERSATIONS_TABLE.field_names()
+
+CONV_BODY_FIELD = CONV_FIELDS["BODY"]
+CONV_SUMMARY_FIELD = CONV_FIELD_NAMES.get("MESSAGE_SUMMARY", "Message Summary (AI)")
 
 
 def _summarise(body: str) -> str:
@@ -82,23 +26,23 @@ def _summarise(body: str) -> str:
 
 def run(limit: Optional[int] = None) -> Dict[str, int]:
     handle = CONNECTOR.conversations()
-    records = handle.table.all()
+    records = handle.table.all()  # type: ignore[attr-defined]
     enriched = 0
     for record in records:
-        fields = record.get("fields", {})
-        message = fields.get(spec.CONVERSATION_FIELDS.message_body)
-        summary = fields.get(spec.CONVERSATION_FIELDS.message_summary)
-        if not message or summary:
+        fields = record.get("fields", {}) or {}
+        message = fields.get(CONV_BODY_FIELD)
+        if not message:
             continue
-        new_summary = _summarise(str(message))
-        update_conversation(record["id"], {spec.CONVERSATION_FIELDS.message_summary: new_summary})
+        if fields.get(CONV_SUMMARY_FIELD):
+            continue
+        update_record(handle, record["id"], {CONV_SUMMARY_FIELD: _summarise(str(message))})
         enriched += 1
         if limit is not None and enriched >= limit:
             break
+
+    logger.info("AI enrichment summarised %s conversations", enriched)
     return {"enriched": enriched}
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - manual helper
     print(run())
-
->>>>>>> codex-refactor-test
