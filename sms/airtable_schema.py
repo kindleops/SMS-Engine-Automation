@@ -2962,3 +2962,490 @@ def devops_deployments_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[
         definition = DEVOPS_DEPLOYMENTS_TABLE.fields[key]
         results[key] = definition.candidates()
     return results
+
+
+# ---------------------------------------------------------------------------
+# DevOps — System Logs table
+# ---------------------------------------------------------------------------
+
+
+class DevOpsLogSeverity(str, Enum):
+    INFO = "Info"
+    WARNING = "Warning"
+    CRITICAL = "Critical"
+    DEBUG = "Debug"
+
+
+class DevOpsLogEventType(str, Enum):
+    HEALTH_CHECK = "Health Check"
+    ERROR = "Error"
+    CAMPAIGN_RUN = "Campaign Run"
+    AI = "AI"
+    DEPLOYMENT = "Deployment"
+    INTEGRATION_EVENT = "Integration Event"
+    CUSTOM = "Custom"
+
+
+DEVOPS_SYSTEM_LOGS_TABLE = TableDefinition(
+    default="System Logs",
+    env_vars=("DEVOPS_SYSTEM_LOGS_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="User Triggered",
+            env_vars=("DEVOPS_LOG_PRIMARY_FIELD",),
+            fallbacks=("User Triggered", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("DEVOPS_LOG_NAME_FIELD",),
+            fallbacks=("name",),
+        ),
+        "SEVERITY": FieldDefinition(
+            default="Severity Level",
+            env_vars=("DEVOPS_LOG_SEVERITY_FIELD",),
+            options=tuple(severity.value for severity in DevOpsLogSeverity),
+            fallbacks=("severity_level",),
+        ),
+        "EVENT_TYPE": FieldDefinition(
+            default="Event Type",
+            env_vars=("DEVOPS_LOG_EVENT_TYPE_FIELD",),
+            options=tuple(event.value for event in DevOpsLogEventType),
+            fallbacks=("event_type",),
+        ),
+        "SYSTEM_METRIC": FieldDefinition(
+            default="System Metric Value",
+            env_vars=("DEVOPS_LOG_SYSTEM_METRIC_FIELD",),
+            fallbacks=("system_metric_value",),
+        ),
+        "SERVICE_STATUS": FieldDefinition(
+            default="Service Status at Log Time",
+            env_vars=("DEVOPS_LOG_SERVICE_STATUS_FIELD",),
+            fallbacks=("service_status_log_time",),
+        ),
+        "SERVICE_CATEGORY": FieldDefinition(
+            default="Service Category",
+            env_vars=("DEVOPS_LOG_SERVICE_CATEGORY_FIELD",),
+            fallbacks=("service_category",),
+        ),
+        "DEPLOYMENT_STATUS": FieldDefinition(
+            default="Deployment Status",
+            env_vars=("DEVOPS_LOG_DEPLOYMENT_STATUS_FIELD",),
+            fallbacks=("deployment_status",),
+        ),
+        "RECOMMENDED_ACTION": FieldDefinition(
+            default="Recommended Action (AI)",
+            env_vars=("DEVOPS_LOG_RECOMMENDED_ACTION_FIELD",),
+            fallbacks=("recommended_action_ai",),
+        ),
+        "LOG_SUMMARY": FieldDefinition(
+            default="Log Summary (AI)",
+            env_vars=("DEVOPS_LOG_SUMMARY_FIELD",),
+            fallbacks=("log_summary_ai",),
+        ),
+        "LOG_MESSAGE": FieldDefinition(
+            default="Log Message",
+            env_vars=("DEVOPS_LOG_MESSAGE_FIELD",),
+            fallbacks=("log_message",),
+        ),
+        "SOURCE_SERVICE": FieldDefinition(
+            default="Source Service",
+            env_vars=("DEVOPS_LOG_SOURCE_SERVICE_FIELD",),
+            fallbacks=("source_service",),
+        ),
+        "RELATED_DEPLOYMENT": FieldDefinition(
+            default="Related Deployment",
+            env_vars=("DEVOPS_LOG_DEPLOYMENT_LINK_FIELD",),
+            fallbacks=("Related Deployment",),
+        ),
+        "TIME_SINCE_LAST_LOG": FieldDefinition(
+            default="Time Since Last Log (min)",
+            env_vars=("DEVOPS_LOG_TIME_SINCE_FIELD",),
+            fallbacks=("time_since_last_log_min",),
+        ),
+        "IS_CRITICAL": FieldDefinition(
+            default="Is Critical Error",
+            env_vars=("DEVOPS_LOG_CRITICAL_FIELD",),
+            fallbacks=("is_critical_error",),
+        ),
+        "TIMESTAMP": FieldDefinition(
+            default="Timestamp",
+            env_vars=("DEVOPS_LOG_TIMESTAMP_FIELD",),
+            fallbacks=("timestamp",),
+        ),
+    },
+)
+
+
+def devops_system_logs_field_map() -> Dict[str, str]:
+    fields = DEVOPS_SYSTEM_LOGS_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def devops_system_logs_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = DEVOPS_SYSTEM_LOGS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# DevOps — Integrations table
+# ---------------------------------------------------------------------------
+
+
+class IntegrationType(str, Enum):
+    API = "API"
+    WEBHOOK = "Webhook"
+    PLUGIN = "Plugin"
+    SDK = "SDK"
+    DATABASE = "Database"
+    ANALYTICS = "Analytics"
+    MESSAGING = "Messaging"
+    OTHER = "Other"
+
+
+class IntegrationStatus(str, Enum):
+    ACTIVE = "Active"
+    INACTIVE = "Inactive"
+    ERROR = "Error"
+    PENDING = "Pending"
+
+
+class IntegrationAuthMethod(str, Enum):
+    API_KEY = "API Key"
+    OAUTH = "OAuth"
+    BASIC_AUTH = "Basic Auth"
+    NONE = "None"
+    CUSTOM = "Custom"
+
+
+DEVOPS_INTEGRATIONS_TABLE = TableDefinition(
+    default="Integrations",
+    env_vars=("DEVOPS_INTEGRATIONS_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Integration Name",
+            env_vars=("DEVOPS_INTEGRATION_PRIMARY_FIELD",),
+            fallbacks=("Integration Name", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("DEVOPS_INTEGRATION_NAME_FIELD",),
+            fallbacks=("name",),
+        ),
+        "TYPE": FieldDefinition(
+            default="Integration Type",
+            env_vars=("DEVOPS_INTEGRATION_TYPE_FIELD",),
+            options=tuple(t.value for t in IntegrationType),
+            fallbacks=("integration_type",),
+        ),
+        "STATUS": FieldDefinition(
+            default="Integration Status",
+            env_vars=("DEVOPS_INTEGRATION_STATUS_FIELD",),
+            options=tuple(s.value for s in IntegrationStatus),
+            fallbacks=("integration_status",),
+        ),
+        "AUTH_METHOD": FieldDefinition(
+            default="Authentication Method",
+            env_vars=("DEVOPS_INTEGRATION_AUTH_FIELD",),
+            options=tuple(m.value for m in IntegrationAuthMethod),
+            fallbacks=("authentication_method",),
+        ),
+        "PROVIDER": FieldDefinition(
+            default="Provider",
+            env_vars=("DEVOPS_INTEGRATION_PROVIDER_FIELD",),
+            fallbacks=("provider",),
+        ),
+        "DOCUMENTATION_URL": FieldDefinition(
+            default="Documentation URL",
+            env_vars=("DEVOPS_INTEGRATION_DOC_URL_FIELD",),
+            fallbacks=("documentation_url",),
+        ),
+        "LAST_ERROR_MESSAGE": FieldDefinition(
+            default="Last Error Message",
+            env_vars=("DEVOPS_INTEGRATION_LAST_ERROR_FIELD",),
+            fallbacks=("last_error_message",),
+        ),
+        "ACTIVE_ERROR_COUNT": FieldDefinition(
+            default="Active Error Count (Last 30d)",
+            env_vars=("DEVOPS_INTEGRATION_ACTIVE_ERROR_COUNT_FIELD",),
+            fallbacks=("active_error_count_30d",),
+        ),
+        "API_BASE_URL": FieldDefinition(
+            default="API Base URL",
+            env_vars=("DEVOPS_INTEGRATION_API_BASE_FIELD",),
+            fallbacks=("api_base_url",),
+        ),
+        "SETUP_NOTES": FieldDefinition(
+            default="Setup Notes",
+            env_vars=("DEVOPS_INTEGRATION_SETUP_NOTES_FIELD",),
+            fallbacks=("setup_notes",),
+        ),
+        "INTEGRATION_SUMMARY": FieldDefinition(
+            default="Integration Summary (AI)",
+            env_vars=("DEVOPS_INTEGRATION_SUMMARY_FIELD",),
+            fallbacks=("integration_summary_ai",),
+        ),
+        "INTEGRATION_HEALTH": FieldDefinition(
+            default="Integration Health Insights (AI)",
+            env_vars=("DEVOPS_INTEGRATION_HEALTH_FIELD",),
+            fallbacks=("integration_health_insights",),
+        ),
+        "ERROR_LOG": FieldDefinition(
+            default="Error Log",
+            env_vars=("DEVOPS_INTEGRATION_ERROR_LOG_FIELD",),
+            fallbacks=("error_log",),
+        ),
+        "SYSTEM_LOGS": FieldDefinition(
+            default="System Logs",
+            env_vars=("DEVOPS_INTEGRATION_SYSTEM_LOGS_FIELD",),
+            fallbacks=("System Logs",),
+        ),
+        "CONNECTED_SERVICES": FieldDefinition(
+            default="Connected Services",
+            env_vars=("DEVOPS_INTEGRATION_SERVICES_FIELD",),
+            fallbacks=("Connected Services",),
+        ),
+        "API_RATE_LIMITED": FieldDefinition(
+            default="Is API Rate Limited?",
+            env_vars=("DEVOPS_INTEGRATION_RATE_LIMIT_FIELD",),
+            fallbacks=("is_api_rate_limited",),
+        ),
+        "LAST_SYNC_DATE": FieldDefinition(
+            default="Last Sync Date",
+            env_vars=("DEVOPS_INTEGRATION_LAST_SYNC_FIELD",),
+            fallbacks=("last_sync_date",),
+        ),
+        "RELATED_SERVICES_COUNT": FieldDefinition(
+            default="# of Linked Services",
+            env_vars=("DEVOPS_INTEGRATION_SERVICE_COUNT_FIELD",),
+            fallbacks=("linked_services_count",),
+        ),
+        "INTEGRATION_LOG": FieldDefinition(
+            default="Integration Logs",
+            env_vars=("DEVOPS_INTEGRATION_LOG_FIELD",),
+            fallbacks=("integration_logs",),
+        ),
+    },
+)
+
+
+def devops_integrations_field_map() -> Dict[str, str]:
+    fields = DEVOPS_INTEGRATIONS_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def devops_integrations_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = DEVOPS_INTEGRATIONS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# DevOps — Health Checks table
+# ---------------------------------------------------------------------------
+
+
+class HealthStatus(str, Enum):
+    CONNECTED = "Connected"
+    TIMEOUT = "Timeout"
+
+
+DEVOPS_HEALTH_CHECKS_TABLE = TableDefinition(
+    default="Health Checks",
+    env_vars=("DEVOPS_HEALTH_CHECKS_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="ID",
+            env_vars=("DEVOPS_HEALTH_PRIMARY_FIELD",),
+            fallbacks=("ID", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("DEVOPS_HEALTH_NAME_FIELD",),
+            fallbacks=("name",),
+        ),
+        "REDIS_STATUS": FieldDefinition(
+            default="Redis Status",
+            env_vars=("DEVOPS_HEALTH_REDIS_STATUS_FIELD",),
+            options=tuple(status.value for status in HealthStatus),
+            fallbacks=("redis_status",),
+        ),
+        "STATUS_CODE": FieldDefinition(
+            default="Status Code",
+            env_vars=("DEVOPS_HEALTH_STATUS_CODE_FIELD",),
+            fallbacks=("status_code",),
+        ),
+        "RESPONSE_TIME_MS": FieldDefinition(
+            default="Response Time (ms)",
+            env_vars=("DEVOPS_HEALTH_RESPONSE_TIME_FIELD",),
+            fallbacks=("response_time_ms",),
+        ),
+        "ERRORS_LAST_HOUR": FieldDefinition(
+            default="Errors in Last Hour",
+            env_vars=("DEVOPS_HEALTH_ERRORS_LAST_HOUR_FIELD",),
+            fallbacks=("errors_last_hour",),
+        ),
+        "SERVICE_LINK": FieldDefinition(
+            default="Service",
+            env_vars=("DEVOPS_HEALTH_SERVICE_FIELD",),
+            fallbacks=("Service",),
+        ),
+        "STATUS": FieldDefinition(
+            default="Status",
+            env_vars=("DEVOPS_HEALTH_STATUS_FIELD",),
+            fallbacks=("status",),
+        ),
+        "TIMESTAMP": FieldDefinition(
+            default="Timestamp",
+            env_vars=("DEVOPS_HEALTH_TIMESTAMP_FIELD",),
+            fallbacks=("timestamp",),
+        ),
+    },
+)
+
+
+def devops_health_checks_field_map() -> Dict[str, str]:
+    fields = DEVOPS_HEALTH_CHECKS_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def devops_health_checks_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = DEVOPS_HEALTH_CHECKS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# DevOps — Metrics table
+# ---------------------------------------------------------------------------
+
+
+DEVOPS_METRICS_TABLE = TableDefinition(
+    default="Metrics",
+    env_vars=("DEVOPS_METRICS_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Metric",
+            env_vars=("DEVOPS_METRIC_PRIMARY_FIELD",),
+            fallbacks=("Metric", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("DEVOPS_METRIC_NAME_FIELD",),
+            fallbacks=("name",),
+        ),
+        "VALUE": FieldDefinition(
+            default="Value",
+            env_vars=("DEVOPS_METRIC_VALUE_FIELD",),
+            fallbacks=("value",),
+        ),
+        "SOURCE_LOG": FieldDefinition(
+            default="Source Log ID",
+            env_vars=("DEVOPS_METRIC_SOURCE_LOG_FIELD",),
+            fallbacks=("Source Log ID",),
+        ),
+        "SERVICE": FieldDefinition(
+            default="Service",
+            env_vars=("DEVOPS_METRIC_SERVICE_FIELD",),
+            fallbacks=("Service",),
+        ),
+        "TREND": FieldDefinition(
+            default="Trend (7d)",
+            env_vars=("DEVOPS_METRIC_TREND_FIELD",),
+            fallbacks=("trend_7d",),
+        ),
+        "DATE": FieldDefinition(
+            default="Date",
+            env_vars=("DEVOPS_METRIC_DATE_FIELD",),
+            fallbacks=("date",),
+        ),
+    },
+)
+
+
+def devops_metrics_field_map() -> Dict[str, str]:
+    fields = DEVOPS_METRICS_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def devops_metrics_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = DEVOPS_METRICS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# DevOps — Redis Metrics table
+# ---------------------------------------------------------------------------
+
+
+class RedisMetricType(str, Enum):
+    QUOTA = "Quota"
+    COOLDOWN = "Cooldown"
+    TOKEN = "Token"
+    CACHE = "Cache"
+
+
+DEVOPS_REDIS_METRICS_TABLE = TableDefinition(
+    default="Redis Metrics",
+    env_vars=("DEVOPS_REDIS_METRICS_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Key",
+            env_vars=("DEVOPS_REDIS_PRIMARY_FIELD",),
+            fallbacks=("Key", "Name"),
+        ),
+        "NAME": FieldDefinition(
+            default="Name",
+            env_vars=("DEVOPS_REDIS_NAME_FIELD",),
+            fallbacks=("name",),
+        ),
+        "TYPE": FieldDefinition(
+            default="Type",
+            env_vars=("DEVOPS_REDIS_TYPE_FIELD",),
+            options=tuple(t.value for t in RedisMetricType),
+            fallbacks=("type",),
+        ),
+        "VALUE": FieldDefinition(
+            default="Value",
+            env_vars=("DEVOPS_REDIS_VALUE_FIELD",),
+            fallbacks=("value",),
+        ),
+        "TTL": FieldDefinition(
+            default="TTL (sec)",
+            env_vars=("DEVOPS_REDIS_TTL_FIELD",),
+            fallbacks=("ttl_sec",),
+        ),
+        "LAST_UPDATED": FieldDefinition(
+            default="Last Updated",
+            env_vars=("DEVOPS_REDIS_LAST_UPDATED_FIELD",),
+            fallbacks=("last_updated",),
+        ),
+        "TIMESTAMP": FieldDefinition(
+            default="Timestamp",
+            env_vars=("DEVOPS_REDIS_TIMESTAMP_FIELD",),
+            fallbacks=("timestamp",),
+        ),
+    },
+)
+
+
+def devops_redis_metrics_field_map() -> Dict[str, str]:
+    fields = DEVOPS_REDIS_METRICS_TABLE.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def devops_redis_metrics_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = DEVOPS_REDIS_METRICS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results

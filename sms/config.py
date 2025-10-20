@@ -21,6 +21,12 @@ from sms.airtable_schema import (
     MARKETS_TABLE,
     LOGS_TABLE,
     KPIS_TABLE_DEF,
+    DEVOPS_SERVICES_TABLE,
+    DEVOPS_DEPLOYMENTS_TABLE,
+    DEVOPS_SYSTEM_LOGS_TABLE,
+    DEVOPS_INTEGRATIONS_TABLE,
+    DEVOPS_HEALTH_CHECKS_TABLE,
+    DEVOPS_METRICS_TABLE,
     conversations_field_map,
     leads_field_map,
     campaign_field_map,
@@ -34,6 +40,12 @@ from sms.airtable_schema import (
     markets_field_map,
     logs_field_map,
     kpi_field_map,
+    devops_services_field_map,
+    devops_deployments_field_map,
+    devops_system_logs_field_map,
+    devops_integrations_field_map,
+    devops_health_checks_field_map,
+    devops_metrics_field_map,
 )
 
 # .env loader (safe if missing)
@@ -138,6 +150,30 @@ LOG_FIELD_MAP = logs_field_map()
 KPI_FIELDS = KPIS_TABLE_DEF.field_names()
 KPI_FIELD_CANDIDATES = KPIS_TABLE_DEF.field_candidates()
 KPI_FIELD_MAP = kpi_field_map()
+
+DEVOPS_SERVICE_FIELDS = DEVOPS_SERVICES_TABLE.field_names()
+DEVOPS_SERVICE_FIELD_CANDIDATES = DEVOPS_SERVICES_TABLE.field_candidates()
+DEVOPS_SERVICE_FIELD_MAP = devops_services_field_map()
+
+DEVOPS_DEPLOYMENT_FIELDS = DEVOPS_DEPLOYMENTS_TABLE.field_names()
+DEVOPS_DEPLOYMENT_FIELD_CANDIDATES = DEVOPS_DEPLOYMENTS_TABLE.field_candidates()
+DEVOPS_DEPLOYMENT_FIELD_MAP = devops_deployments_field_map()
+
+DEVOPS_SYSTEM_LOG_FIELDS = DEVOPS_SYSTEM_LOGS_TABLE.field_names()
+DEVOPS_SYSTEM_LOG_FIELD_CANDIDATES = DEVOPS_SYSTEM_LOGS_TABLE.field_candidates()
+DEVOPS_SYSTEM_LOG_FIELD_MAP = devops_system_logs_field_map()
+
+DEVOPS_INTEGRATION_FIELDS = DEVOPS_INTEGRATIONS_TABLE.field_names()
+DEVOPS_INTEGRATION_FIELD_CANDIDATES = DEVOPS_INTEGRATIONS_TABLE.field_candidates()
+DEVOPS_INTEGRATION_FIELD_MAP = devops_integrations_field_map()
+
+DEVOPS_HEALTH_FIELDS = DEVOPS_HEALTH_CHECKS_TABLE.field_names()
+DEVOPS_HEALTH_FIELD_CANDIDATES = DEVOPS_HEALTH_CHECKS_TABLE.field_candidates()
+DEVOPS_HEALTH_FIELD_MAP = devops_health_checks_field_map()
+
+DEVOPS_METRIC_FIELDS = DEVOPS_METRICS_TABLE.field_names()
+DEVOPS_METRIC_FIELD_CANDIDATES = DEVOPS_METRICS_TABLE.field_candidates()
+DEVOPS_METRIC_FIELD_MAP = devops_metrics_field_map()
 PHONE_FIELDS = [
     "phone",
     "Phone",
@@ -183,6 +219,12 @@ class Settings:
     MARKETS_TABLE: str
     LOGS_TABLE: str
     KPIS_TABLE: str
+    DEVOPS_SERVICES_TABLE: str
+    DEVOPS_DEPLOYMENTS_TABLE: str
+    DEVOPS_SYSTEM_LOGS_TABLE: str
+    DEVOPS_INTEGRATIONS_TABLE: str
+    DEVOPS_HEALTH_CHECKS_TABLE: str
+    DEVOPS_METRICS_TABLE: str
     DEALS_TABLE: str
 
     # Tables (control base)
@@ -238,6 +280,12 @@ def settings() -> Settings:
         MARKETS_TABLE=env_str("MARKETS_TABLE", "Markets"),
         LOGS_TABLE=env_str("RUNS_TABLE", "Runs/Logs"),
         KPIS_TABLE=env_str("KPIS_TABLE", "KPIs"),
+        DEVOPS_SERVICES_TABLE=env_str("DEVOPS_SERVICES_TABLE", "Services"),
+        DEVOPS_DEPLOYMENTS_TABLE=env_str("DEVOPS_DEPLOYMENTS_TABLE", "Deployments"),
+        DEVOPS_SYSTEM_LOGS_TABLE=env_str("DEVOPS_SYSTEM_LOGS_TABLE", "System Logs"),
+        DEVOPS_INTEGRATIONS_TABLE=env_str("DEVOPS_INTEGRATIONS_TABLE", "Integrations"),
+        DEVOPS_HEALTH_CHECKS_TABLE=env_str("DEVOPS_HEALTH_CHECKS_TABLE", "Health Checks"),
+        DEVOPS_METRICS_TABLE=env_str("DEVOPS_METRICS_TABLE", "Metrics"),
         DEALS_TABLE=env_str("DEALS_TABLE", "Deals"),
         NUMBERS_TABLE=env_str("NUMBERS_TABLE", "Numbers"),
         DAILY_LIMIT_DEFAULT=env_int("DAILY_LIMIT", 750),
