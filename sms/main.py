@@ -348,6 +348,32 @@ async def run_campaigns_endpoint(
         log_error("run_campaigns (normal hours)", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/schedule-campaigns")
+async def schedule_campaigns_endpoint(
+    request: Request,
+    x_cron_token: Optional[str] = Header(None),
+    x_webhook_token: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, description="Optional cap on scheduled campaigns to process."),
+):
+    """
+    Hydrate Drip Queue entries for campaigns marked as Scheduled and activate them.
+    """
+
+    _require_token(request, token, x_webhook_token, x_cron_token)
+    if TEST_MODE:
+        return {"ok": True, "status": "mock_scheduler", "limit": limit}
+
+    try:
+        from sms.scheduler import run_scheduler
+
+        return run_scheduler(limit=limit)
+    except Exception as e:
+        log_error("schedule_campaigns", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─────────────── Manual Campaign Controls ───────────────
 def _safe_update(tbl, rid: str, patch: Dict[str, Any]):
     if not (tbl and rid and patch): return None

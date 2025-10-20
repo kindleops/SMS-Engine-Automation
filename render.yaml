@@ -177,6 +177,14 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  - name: schedule-campaigns
+    schedule: "*/15 * * * *"
+    command: >
+      curl --fail --silent --show-error
+      -X POST "https://rei-sms-engine.onrender.com/schedule-campaigns"
+      -H "Authorization: Bearer ${CRON_TOKEN}"
+      -H "x-cron-token: ${CRON_TOKEN}"
+
   - name: sms-retry-runner
     schedule: "*/30 * * * *"
     command: >
