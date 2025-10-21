@@ -347,12 +347,59 @@ SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
 
 
 def _get_linked_prospects(fields: Dict[str, Any]) -> List[str]:
-    linked = fields.get(CAMPAIGN_FIELDS.get("PROSPECTS_LINK"))
+    linked_field = CAMPAIGN_FIELDS.get("PROSPECTS_LINK")
+    linked = fields.get(linked_field)
     if isinstance(linked, list):
         return [str(item) for item in linked if item]
     if isinstance(linked, str) and linked.strip():
         return [linked.strip()]
     return []
+
+
+def _escape_formula_value(value: str) -> str:
+    return value.replace("'", "\\'")
+
+
+def _fetch_linked_prospect_records(prospects_handle, campaign_id: str, prospect_ids: List[str]) -> List[Dict[str, Any]]:
+    if not prospect_ids:
+        return []
+    table = prospects_handle.table
+    records: List[Dict[str, Any]] = []
+    for start in range(0, len(prospect_ids), 100):
+        chunk = prospect_ids[start : start + 100]
+        formula = "OR(" + ",".join(
+            [f"RECORD_ID()='{_escape_formula_value(rid)}'" for rid in chunk]
+        ) + ")"
+        try:
+            for record in table.iterate(page_size=100, filterByFormula=formula):
+                records.append(record)
+            time.sleep(0.25)
+        except requests.RequestException as exc:
+            logger.error(
+                "Failed to fetch prospects chunk for campaign %s: %s",
+                campaign_id,
+                exc,
+                exc_info=True,
+            )
+        except Exception as exc:
+            logger.error(
+                "Unexpected error fetching prospects chunk for campaign %s: %s",
+                campaign_id,
+                exc,
+                exc_info=True,
+            )
+    logger.info("Fetched %s linked prospects for campaign %s", len(records), campaign_id)
+    if records:
+        sample = [
+            (
+                rec.get("id"),
+                _prospect_market(rec.get("fields", {}) or {})[0],
+                type((rec.get("fields", {}) or {}).get(PROSPECT_MARKET_FIELD)).__name__,
+            )
+            for rec in records[:5]
+        ]
+        logger.debug("Sample fetched prospects for %s: %s", campaign_id, sample)
+    return records
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
@@ -494,7 +541,7 @@ def _existing_pairs(drip_records: List[Dict[str, Any]]) -> Set[Tuple[str, str]]:
 
 def _schedule_campaign(
     campaign: Dict[str, Any],
-    prospect_index: Dict[str, Dict[str, Any]],
+    prospects_handle,
     drip_handle,
     existing_pairs: Set[Tuple[str, str]],
     quiet: QuietHours,
@@ -512,10 +559,10 @@ def _schedule_campaign(
         logger.info("Skipping campaign %s – no linked prospects", campaign_id)
         return 0, 0, 0, {}
 
-    linked_prospects = [prospect_index[pid] for pid in linked_ids if pid in prospect_index]
+    linked_prospects = _fetch_linked_prospect_records(prospects_handle, campaign_id, linked_ids)
     logger.info("📎 Campaign %s using %s linked prospects", campaign_id, len(linked_prospects))
     if not linked_prospects:
-        logger.warning("Linked prospects missing in index for campaign %s", campaign_id)
+        logger.warning("No linked prospect records fetched for campaign %s", campaign_id)
         return 0, 0, 0, {}
 
     start_time = _apply_quiet_hours(_campaign_start(fields), quiet)
@@ -699,12 +746,11 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
             summary["ok"] = False
             return summary
 
-        prospects, prospects_failed = _list_with_retry(prospects_handle, "Prospects")
-        if prospects_failed:
-            summary["errors"].append("Failed to load prospects after retries")
-            summary["ok"] = False
-            return summary
+        existing_drip, drip_failed = _list_with_retry(drip_handle, "Drip Queue")
+        pairs = _existing_pairs(existing_drip) if not drip_failed else None
 
+        quiet = _quiet_hours()
+        processed = 0
         sample_campaign_markets = [
             (
                 _campaign_market(c.get("fields", {}) or {})[0],
@@ -712,22 +758,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
             )
             for c in campaigns[:5]
         ]
-        sample_prospect_markets = [
-            (
-                _prospect_market(p.get("fields", {}) or {})[0],
-                type((p.get("fields", {}) or {}).get(PROSPECT_MARKET_FIELD)).__name__,
-            )
-            for p in prospects[:5]
-        ]
         logger.debug("Sample campaign markets (raw, type): %s", sample_campaign_markets)
-        logger.debug("Sample prospect markets (raw, type): %s", sample_prospect_markets)
-
-        existing_drip, drip_failed = _list_with_retry(drip_handle, "Drip Queue")
-        pairs = _existing_pairs(existing_drip) if not drip_failed else None
-
-        quiet = _quiet_hours()
-        processed = 0
-        prospect_index = {prospect["id"]: prospect for prospect in prospects}
 
         for campaign in campaigns:
             if limit is not None and processed >= limit:
@@ -754,7 +785,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     continue
 
                 queued, skipped, processed_count, skip_summary = _schedule_campaign(
-                    campaign, prospect_index, drip_handle, pairs, quiet
+                    campaign, prospects_handle, drip_handle, pairs, quiet
                 )
                 summary["campaigns"][campaign["id"]] = {
                     "queued": queued,
