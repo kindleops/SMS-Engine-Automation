@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -256,17 +257,18 @@ def _fetch_textgrid_number(campaign_fields: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _resolve_template_message(fields: Dict[str, Any], templates_handle, campaign_id: str) -> Tuple[Optional[str], Optional[str]]:
+def _resolve_template_messages(fields: Dict[str, Any], templates_handle, campaign_id: str) -> List[Tuple[str, str]]:
     template_ids = _extract_record_ids(fields.get(CAMPAIGN_FIELDS.get("TEMPLATES_LINK")))
     if not template_ids:
-        return None, None
+        return []
     records = _fetch_linked_records(templates_handle, template_ids, 100, "templates", campaign_id)
+    out: List[Tuple[str, str]] = []
     for record in records:
         tf = record.get("fields", {}) or {}
         message = tf.get(TEMPLATE_MESSAGE_FIELD)
         if message and str(message).strip():
-            return str(message).strip(), record.get("id")
-    return None, None
+            out.append((record.get("id"), str(message).strip()))
+    return out
 
 # =====================================================================
 # TIME, MARKET, PHONE HELPERS
@@ -409,8 +411,8 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 continue
             logger.info("🧭 Using TextGrid number %s for campaign %s", from_number, campaign_id)
 
-            message_text, template_link_id = _resolve_template_message(fields, templates_handle, campaign_id)
-            if not message_text:
+            template_choices = _resolve_template_messages(fields, templates_handle, campaign_id)
+            if not template_choices:
                 logger.warning("⚠️ Skipping campaign %s: no linked template message found", campaign_id)
                 summary["campaigns"][campaign_id] = {
                     "queued": 0,
@@ -438,6 +440,8 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     skipped += 1
                     continue
 
+                template_id, message_text = random.choice(template_choices)
+
                 payload = {
                     DRIP_STATUS_FIELD: "QUEUED",
                     DRIP_MARKET_FIELD: _campaign_market(fields)[0],
@@ -457,8 +461,8 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     pid = pf.get(PROSPECT_PROPERTY_ID_FIELD)
                     if pid:
                         payload[DRIP_PROPERTY_ID_FIELD] = pid
-                if template_link_id and DRIP_TEMPLATE_LINK_FIELD:
-                    payload[DRIP_TEMPLATE_LINK_FIELD] = [template_link_id]
+                if template_id and DRIP_TEMPLATE_LINK_FIELD:
+                    payload[DRIP_TEMPLATE_LINK_FIELD] = [template_id]
 
                 if create_record(drip_handle, payload):
                     existing_pairs.add((campaign_id, digits))
@@ -481,7 +485,6 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 "processed": processed,
                 "skip_reasons": dict(skip_reasons),
                 "from_number": from_number,
-                "template_id": template_link_id,
             }
 
             logger.info("✅ Queued %s messages for campaign %s", queued, campaign_id)
