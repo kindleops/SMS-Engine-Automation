@@ -264,8 +264,9 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
         drip_handle = CONNECTOR.drip_queue()
         prospects_handle = CONNECTOR.prospects()
 
-        campaigns = list_records(campaigns_handle, max_records=100, page_size=100)
-        existing_drip = list_records(drip_handle, max_records=100, page_size=100)
+        # ✅ Load *all* campaigns (no limit)
+        campaigns = list_records(campaigns_handle, page_size=100)
+        existing_drip = list_records(drip_handle, page_size=100)
         existing_pairs = {
             (str(f["fields"].get(DRIP_CAMPAIGN_LINK_FIELD, [None])[0]), last_10_digits(f["fields"].get(DRIP_SELLER_PHONE_FIELD)))
             for f in existing_drip if f.get("fields")
@@ -283,8 +284,16 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 logger.info("Skipping campaign %s (no linked prospects)", campaign_id)
                 continue
 
-            linked_prospects = _fetch_linked_prospect_records(prospects_handle, campaign_id, linked_ids)
+            # ✅ Fetch ALL linked prospects, not just first chunk
+            linked_prospects = []
+            for i in range(0, len(linked_ids), 100):
+                subset = linked_ids[i : i + 100]
+                batch = _fetch_linked_prospect_records(prospects_handle, campaign_id, subset)
+                linked_prospects.extend(batch)
+                time.sleep(0.2)
+
             if not linked_prospects:
+                logger.warning("No linked prospect records fetched for campaign %s", campaign_id)
                 continue
 
             start_time = _apply_quiet_hours(_campaign_start(fields), quiet)
@@ -327,6 +336,12 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     skipped += 1
                     skip_reasons["create_failed"] += 1
 
+            # ✅ Always mark campaign as Active once processed
+            update_record(campaigns_handle, campaign_id, {
+                CAMPAIGN_STATUS_FIELD: "Active",
+                CAMPAIGN_LAST_RUN_FIELD: iso_now(),
+            })
+
             summary["queued"] += queued
             summary["campaigns"][campaign_id] = {
                 "queued": queued,
@@ -334,14 +349,11 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 "processed": processed,
                 "skip_reasons": dict(skip_reasons),
             }
-            if queued:
-                update_record(campaigns_handle, campaign_id, {
-                    CAMPAIGN_STATUS_FIELD: "Active",
-                    CAMPAIGN_LAST_RUN_FIELD: iso_now(),
-                })
+
+            logger.info("✅ Campaign %s: processed=%s queued=%s skipped=%s", campaign_id, processed, queued, skipped)
 
         summary["ok"] = not summary["errors"]
-        logger.info("✅ Campaign scheduler finished: %s queued", summary["queued"])
+        logger.info("🏁 Campaign scheduler finished: %s queued", summary["queued"])
         return summary
 
     except Exception as exc:
@@ -349,5 +361,3 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
         summary["ok"] = False
         summary["errors"].append(str(exc))
         return summary
-
-__all__ = ["run_scheduler"]
