@@ -346,6 +346,15 @@ if PROSPECT_MARKET_FIELD is None:
 SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
 
 
+def _get_linked_prospects(fields: Dict[str, Any]) -> List[str]:
+    linked = fields.get(CAMPAIGN_FIELDS.get("PROSPECTS_LINK"))
+    if isinstance(linked, list):
+        return [str(item) for item in linked if item]
+    if isinstance(linked, str) and linked.strip():
+        return [linked.strip()]
+    return []
+
+
 def _parse_datetime(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -429,20 +438,6 @@ def _prospect_phone(fields: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _matches_segment(prospect_fields: Dict[str, Any], campaign_fields: Dict[str, Any]) -> bool:
-    view = (campaign_fields.get(CAMPAIGN_VIEW_FIELD) or "").strip() if CAMPAIGN_VIEW_FIELD else ""
-    if not view:
-        return True
-    prospect_lists = prospect_fields.get(PROSPECT_SOURCE_LIST_FIELD)
-    if not prospect_lists:
-        return False
-    if isinstance(prospect_lists, list):
-        values = prospect_lists
-    else:
-        values = [prospect_lists]
-    return any(str(v).strip() == view for v in values)
-
-
 market_counts = defaultdict(int)
 
 
@@ -499,7 +494,7 @@ def _existing_pairs(drip_records: List[Dict[str, Any]]) -> Set[Tuple[str, str]]:
 
 def _schedule_campaign(
     campaign: Dict[str, Any],
-    prospects: List[Dict[str, Any]],
+    prospect_index: Dict[str, Dict[str, Any]],
     drip_handle,
     existing_pairs: Set[Tuple[str, str]],
     quiet: QuietHours,
@@ -512,6 +507,17 @@ def _schedule_campaign(
         logger.info("Skipping campaign %s – missing market", campaign_id)
         return 0, 0, 0, {}
 
+    linked_ids = _get_linked_prospects(fields)
+    if not linked_ids:
+        logger.info("Skipping campaign %s – no linked prospects", campaign_id)
+        return 0, 0, 0, {}
+
+    linked_prospects = [prospect_index[pid] for pid in linked_ids if pid in prospect_index]
+    logger.info("📎 Campaign %s using %s linked prospects", campaign_id, len(linked_prospects))
+    if not linked_prospects:
+        logger.warning("Linked prospects missing in index for campaign %s", campaign_id)
+        return 0, 0, 0, {}
+
     start_time = _apply_quiet_hours(_campaign_start(fields), quiet)
     queued = 0
     skipped = 0
@@ -522,7 +528,7 @@ def _schedule_campaign(
 
     local_market_counts = defaultdict(int)
 
-    for prospect in prospects:
+    for prospect in linked_prospects:
         processed += 1
         pf = prospect.get("fields", {}) or {}
         prospect_id = prospect.get("id")
@@ -552,10 +558,6 @@ def _schedule_campaign(
                 prospect_id,
                 campaign_id,
             )
-
-        if not _matches_segment(pf, fields):
-            skip_reasons["segment_mismatch"] += 1
-            continue
 
         phone = _prospect_phone(pf)
         if not phone:
@@ -704,11 +706,17 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
             return summary
 
         sample_campaign_markets = [
-            (_campaign_market(c.get("fields", {}) or {})[0], type((c.get("fields", {}) or {}).get(CAMPAIGN_MARKET_FIELD)).__name__)
+            (
+                _campaign_market(c.get("fields", {}) or {})[0],
+                type((c.get("fields", {}) or {}).get(CAMPAIGN_MARKET_FIELD)).__name__,
+            )
             for c in campaigns[:5]
         ]
         sample_prospect_markets = [
-            (_prospect_market(p.get("fields", {}) or {})[0], type((p.get("fields", {}) or {}).get(PROSPECT_MARKET_FIELD)).__name__)
+            (
+                _prospect_market(p.get("fields", {}) or {})[0],
+                type((p.get("fields", {}) or {}).get(PROSPECT_MARKET_FIELD)).__name__,
+            )
             for p in prospects[:5]
         ]
         logger.debug("Sample campaign markets (raw, type): %s", sample_campaign_markets)
@@ -719,6 +727,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
 
         quiet = _quiet_hours()
         processed = 0
+        prospect_index = {prospect["id"]: prospect for prospect in prospects}
 
         for campaign in campaigns:
             if limit is not None and processed >= limit:
@@ -745,7 +754,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     continue
 
                 queued, skipped, processed_count, skip_summary = _schedule_campaign(
-                    campaign, prospects, drip_handle, pairs, quiet
+                    campaign, prospect_index, drip_handle, pairs, quiet
                 )
                 summary["campaigns"][campaign["id"]] = {
                     "queued": queued,
