@@ -22,7 +22,6 @@ except Exception:
 from sms.airtable_schema import (
     campaign_field_map,
     drip_field_map,
-    numbers_field_map,
     prospects_field_map,
     template_field_map,
 )
@@ -132,11 +131,6 @@ SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
 
 TEXTGRID_NUMBER_FIELD = os.getenv("CAMPAIGN_TEXTGRID_NUMBER_FIELD", "TextGrid Phone Number")
 TEXTGRID_NUMBER_FALLBACK_FIELD = os.getenv("CAMPAIGN_TEXTGRID_NUMBER_FALLBACK_FIELD", "TextGrid Number")
-
-NUMBER_FIELDS = numbers_field_map()
-NUMBER_PRIMARY_FIELD = NUMBER_FIELDS["PRIMARY"]
-NUMBER_NAME_FIELD = NUMBER_FIELDS.get("NAME", "Name")
-NUMBER_FRIENDLY_FIELD = NUMBER_FIELDS.get("FRIENDLY_NAME", "Friendly Name")
 
 TEMPLATE_FIELDS = template_field_map()
 TEMPLATE_MESSAGE_FIELD = TEMPLATE_FIELDS["MESSAGE"]
@@ -250,18 +244,15 @@ def _fetch_linked_records(table_handle, record_ids: List[str], chunk_size: int, 
     return records
 
 
-def _resolve_campaign_number(fields: Dict[str, Any], numbers_handle, campaign_id: str) -> Optional[str]:
-    linked_ids = _extract_record_ids(
-        fields.get(TEXTGRID_NUMBER_FIELD) or fields.get(TEXTGRID_NUMBER_FALLBACK_FIELD)
-    )
-    if not linked_ids:
-        return None
-    records = _fetch_linked_records(numbers_handle, linked_ids, 100, "numbers", campaign_id)
-    for record in records:
-        nf = record.get("fields", {}) or {}
-        raw = nf.get(NUMBER_PRIMARY_FIELD) or nf.get(NUMBER_NAME_FIELD) or nf.get(NUMBER_FRIENDLY_FIELD)
-        if raw and str(raw).strip():
-            return str(raw).strip()
+def _fetch_textgrid_number(campaign_fields: Dict[str, Any]) -> Optional[str]:
+    """Return the TextGrid sending number stored directly on the campaign record."""
+    number = campaign_fields.get(TEXTGRID_NUMBER_FIELD) or campaign_fields.get(TEXTGRID_NUMBER_FALLBACK_FIELD)
+    if number:
+        text = str(number).strip()
+        if text:
+            logger.info("🧭 Found TextGrid number %s", text)
+            return text
+    logger.warning("⚠️ No TextGrid number found in campaign fields.")
     return None
 
 
@@ -370,7 +361,6 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
         campaigns_handle = CONNECTOR.campaigns()
         drip_handle = CONNECTOR.drip_queue()
         prospects_handle = CONNECTOR.prospects()
-        numbers_handle = CONNECTOR.numbers()
         templates_handle = CONNECTOR.templates()
 
         # ✅ Load *all* campaigns (no limit)
@@ -407,9 +397,9 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 logger.warning("No linked prospect records fetched for campaign %s", campaign_id)
                 continue
 
-            from_number = _resolve_campaign_number(fields, numbers_handle, campaign_id)
+            from_number = _fetch_textgrid_number(fields)
             if not from_number:
-                logger.warning("⚠️ Skipping campaign %s: no linked TextGrid number found", campaign_id)
+                logger.warning("⚠️ Skipping campaign %s: no TextGrid number found", campaign_id)
                 summary["campaigns"][campaign_id] = {
                     "queued": 0,
                     "skipped": 0,
@@ -417,6 +407,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     "skip_reasons": {"missing_textgrid_number": len(linked_prospects)},
                 }
                 continue
+            logger.info("🧭 Using TextGrid number %s for campaign %s", from_number, campaign_id)
 
             message_text, template_link_id = _resolve_template_message(fields, templates_handle, campaign_id)
             if not message_text:
@@ -493,6 +484,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 "template_id": template_link_id,
             }
 
+            logger.info("✅ Queued %s messages for campaign %s", queued, campaign_id)
             logger.info("✅ Campaign %s: processed=%s queued=%s skipped=%s", campaign_id, processed, queued, skipped)
 
         summary["market_counts"] = dict(market_counts)
