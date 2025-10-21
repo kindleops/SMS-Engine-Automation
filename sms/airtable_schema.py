@@ -880,10 +880,12 @@ DRIP_QUEUE_TABLE = TableDefinition(
             env_vars=("DRIP_SELLER_PHONE_FIELD",),
             fallbacks=("phone", "Phone"),
         ),
-        "FROM_NUMBER": FieldDefinition(
-            default="from_number",
-            env_vars=("DRIP_FROM_NUMBER_FIELD",),
-            fallbacks=("From Number",),
+        "TextGrid Phone Number": FieldDefinition(
+            default="TextGrid Phone Number",
+            env_vars=("DRIP_TEXTGRID_PHONE_FIELD",),
+            fallbacks=("TextGrid Phone Number",),
+            env_vars=("DRIP_TEXTGRID_PHONE_FIELD",),
+            fallbacks=("textgrid_phone_number", "TextGrid Phone Number"),
         ),
         "PROPERTY_ID": FieldDefinition(
             default="Property ID",
