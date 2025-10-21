@@ -19,7 +19,13 @@ try:
 except Exception:
     ZoneInfo = None  # type: ignore
 
-from sms.airtable_schema import campaign_field_map, drip_field_map, prospects_field_map
+from sms.airtable_schema import (
+    campaign_field_map,
+    drip_field_map,
+    numbers_field_map,
+    prospects_field_map,
+    template_field_map,
+)
 from sms.config import settings
 from sms.datastore import CONNECTOR, create_record, list_records, update_record
 from sms.runtime import get_logger, iso_now, last_10_digits, normalize_phone
@@ -124,16 +130,44 @@ PROSPECT_PHONE_FIELDS = [
 
 SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
 
+TEXTGRID_NUMBER_FIELD = os.getenv("CAMPAIGN_TEXTGRID_NUMBER_FIELD", "TextGrid Phone Number")
+TEXTGRID_NUMBER_FALLBACK_FIELD = os.getenv("CAMPAIGN_TEXTGRID_NUMBER_FALLBACK_FIELD", "TextGrid Number")
+
+NUMBER_FIELDS = numbers_field_map()
+NUMBER_PRIMARY_FIELD = NUMBER_FIELDS["PRIMARY"]
+NUMBER_NAME_FIELD = NUMBER_FIELDS.get("NAME", "Name")
+NUMBER_FRIENDLY_FIELD = NUMBER_FIELDS.get("FRIENDLY_NAME", "Friendly Name")
+
+TEMPLATE_FIELDS = template_field_map()
+TEMPLATE_MESSAGE_FIELD = TEMPLATE_FIELDS["MESSAGE"]
+TEMPLATE_NAME_FIELD = TEMPLATE_FIELDS.get("NAME", "Name")
+
 # =====================================================================
 # LINKED PROSPECTS FETCHING (FIXED + PAGINATED)
 # =====================================================================
 
+def _extract_record_ids(value: Any) -> List[str]:
+    ids: List[str] = []
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                ids.append(item.strip())
+            elif isinstance(item, dict):
+                rid = item.get("id") or item.get("record_id") or item.get("Record ID")
+                if isinstance(rid, str) and rid.strip():
+                    ids.append(rid.strip())
+    elif isinstance(value, dict):
+        rid = value.get("id") or value.get("record_id") or value.get("Record ID")
+        if isinstance(rid, str) and rid.strip():
+            ids.append(rid.strip())
+    elif isinstance(value, str) and value.strip():
+        ids.append(value.strip())
+    return ids
+
+
 def _get_linked_prospects(fields: Dict[str, Any]) -> List[str]:
     linked_field = CAMPAIGN_FIELDS.get("PROSPECTS_LINK")
-    linked = fields.get(linked_field)
-    if isinstance(linked, list):
-        return [str(i) for i in linked if i]
-    return [linked.strip()] if isinstance(linked, str) and linked.strip() else []
+    return _extract_record_ids(fields.get(linked_field))
 
 def _escape_formula_value(value: str) -> str:
     return value.replace("'", "\\'")
@@ -152,7 +186,7 @@ def _fetch_linked_prospect_records(prospects_handle, campaign_id: str, prospect_
         ) + ")"
         offset = None
         while True:
-            params = {"pageSize": 100, "formula": formula}  # ✅ modern param
+            params = {"pageSize": 100, "filterByFormula": formula}
             if offset:
                 params["offset"] = offset
             try:
@@ -169,6 +203,79 @@ def _fetch_linked_prospect_records(prospects_handle, campaign_id: str, prospect_
 
     logger.info("✅ Fetched %s linked prospects for campaign %s", len(records), campaign_id)
     return records
+
+
+def _fetch_linked_records(table_handle, record_ids: List[str], chunk_size: int, label: str, campaign_id: str) -> List[Dict[str, Any]]:
+    if not record_ids:
+        return []
+    table = table_handle.table
+    records: List[Dict[str, Any]] = []
+    for start in range(0, len(record_ids), chunk_size):
+        chunk = record_ids[start : start + chunk_size]
+        formula = "OR(" + ",".join(
+            [f"RECORD_ID()='{_escape_formula_value(rid)}'" for rid in chunk]
+        ) + ")"
+        offset = None
+        while True:
+            params = {"pageSize": chunk_size, "filterByFormula": formula}
+            if offset:
+                params["offset"] = offset
+            try:
+                response = table.api.request("get", table.url, params=params)
+            except requests.RequestException as exc:
+                logger.error(
+                    "Failed to fetch %s chunk for campaign %s: %s",
+                    label,
+                    campaign_id,
+                    exc,
+                    exc_info=True,
+                )
+                break
+            except Exception as exc:
+                logger.error(
+                    "Unexpected error fetching %s chunk for campaign %s: %s",
+                    label,
+                    campaign_id,
+                    exc,
+                    exc_info=True,
+                )
+                break
+            chunk_records = response.get("records", [])
+            records.extend(chunk_records)
+            offset = response.get("offset")
+            if not offset:
+                break
+            time.sleep(0.25)
+    logger.info("Fetched %s linked %s for campaign %s", len(records), label.lower(), campaign_id)
+    return records
+
+
+def _resolve_campaign_number(fields: Dict[str, Any], numbers_handle, campaign_id: str) -> Optional[str]:
+    linked_ids = _extract_record_ids(
+        fields.get(TEXTGRID_NUMBER_FIELD) or fields.get(TEXTGRID_NUMBER_FALLBACK_FIELD)
+    )
+    if not linked_ids:
+        return None
+    records = _fetch_linked_records(numbers_handle, linked_ids, 100, "numbers", campaign_id)
+    for record in records:
+        nf = record.get("fields", {}) or {}
+        raw = nf.get(NUMBER_PRIMARY_FIELD) or nf.get(NUMBER_NAME_FIELD) or nf.get(NUMBER_FRIENDLY_FIELD)
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    return None
+
+
+def _resolve_template_message(fields: Dict[str, Any], templates_handle, campaign_id: str) -> Tuple[Optional[str], Optional[str]]:
+    template_ids = _extract_record_ids(fields.get(CAMPAIGN_FIELDS.get("TEMPLATES_LINK")))
+    if not template_ids:
+        return None, None
+    records = _fetch_linked_records(templates_handle, template_ids, 100, "templates", campaign_id)
+    for record in records:
+        tf = record.get("fields", {}) or {}
+        message = tf.get(TEMPLATE_MESSAGE_FIELD)
+        if message and str(message).strip():
+            return str(message).strip(), record.get("id")
+    return None, None
 
 # =====================================================================
 # TIME, MARKET, PHONE HELPERS
@@ -263,13 +370,23 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
         campaigns_handle = CONNECTOR.campaigns()
         drip_handle = CONNECTOR.drip_queue()
         prospects_handle = CONNECTOR.prospects()
+        numbers_handle = CONNECTOR.numbers()
+        templates_handle = CONNECTOR.templates()
 
         # ✅ Load *all* campaigns (no limit)
         campaigns = list_records(campaigns_handle, page_size=100)
         existing_drip = list_records(drip_handle, page_size=100)
         existing_pairs = {
-            (str(f["fields"].get(DRIP_CAMPAIGN_LINK_FIELD, [None])[0]), last_10_digits(f["fields"].get(DRIP_SELLER_PHONE_FIELD)))
-            for f in existing_drip if f.get("fields")
+            (cid, digits)
+            for f in existing_drip
+            if f.get("fields")
+            for cid, digits in [
+                (
+                    str((f.get("fields") or {}).get(DRIP_CAMPAIGN_LINK_FIELD, [None])[0]),
+                    last_10_digits((f.get("fields") or {}).get(DRIP_SELLER_PHONE_FIELD)),
+                )
+            ]
+            if cid and digits
         }
 
         quiet = _quiet_hours()
@@ -285,15 +402,31 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 continue
 
             # ✅ Fetch ALL linked prospects, not just first chunk
-            linked_prospects = []
-            for i in range(0, len(linked_ids), 100):
-                subset = linked_ids[i : i + 100]
-                batch = _fetch_linked_prospect_records(prospects_handle, campaign_id, subset)
-                linked_prospects.extend(batch)
-                time.sleep(0.2)
-
+            linked_prospects = _fetch_linked_prospect_records(prospects_handle, campaign_id, linked_ids)
             if not linked_prospects:
                 logger.warning("No linked prospect records fetched for campaign %s", campaign_id)
+                continue
+
+            from_number = _resolve_campaign_number(fields, numbers_handle, campaign_id)
+            if not from_number:
+                logger.warning("⚠️ Skipping campaign %s: no linked TextGrid number found", campaign_id)
+                summary["campaigns"][campaign_id] = {
+                    "queued": 0,
+                    "skipped": 0,
+                    "processed": 0,
+                    "skip_reasons": {"missing_textgrid_number": len(linked_prospects)},
+                }
+                continue
+
+            message_text, template_link_id = _resolve_template_message(fields, templates_handle, campaign_id)
+            if not message_text:
+                logger.warning("⚠️ Skipping campaign %s: no linked template message found", campaign_id)
+                summary["campaigns"][campaign_id] = {
+                    "queued": 0,
+                    "skipped": 0,
+                    "processed": 0,
+                    "skip_reasons": {"missing_template": len(linked_prospects)},
+                }
                 continue
 
             start_time = _apply_quiet_hours(_campaign_start(fields), quiet)
@@ -310,7 +443,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     continue
                 digits = last_10_digits(phone)
                 if (campaign_id, digits) in existing_pairs:
-                    skip_reasons["duplicate"] += 1
+                    skip_reasons["duplicate_phone"] += 1
                     skipped += 1
                     continue
 
@@ -323,11 +456,18 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     DRIP_CAMPAIGN_LINK_FIELD: [campaign_id],
                     DRIP_UI_FIELD: "⏳",
                     DRIP_PROSPECT_LINK_FIELD: [prospect["id"]],
+                    DRIP_MESSAGE_FIELD: message_text,
+                    "Message": message_text,
+                    "Message Preview": message_text,
                 }
+                if DRIP_FROM_NUMBER_FIELD:
+                    payload[DRIP_FROM_NUMBER_FIELD] = from_number
                 if PROSPECT_PROPERTY_ID_FIELD and DRIP_PROPERTY_ID_FIELD:
                     pid = pf.get(PROSPECT_PROPERTY_ID_FIELD)
                     if pid:
                         payload[DRIP_PROPERTY_ID_FIELD] = pid
+                if template_link_id and DRIP_TEMPLATE_LINK_FIELD:
+                    payload[DRIP_TEMPLATE_LINK_FIELD] = [template_link_id]
 
                 if create_record(drip_handle, payload):
                     existing_pairs.add((campaign_id, digits))
@@ -337,10 +477,11 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     skip_reasons["create_failed"] += 1
 
             # ✅ Always mark campaign as Active once processed
-            update_record(campaigns_handle, campaign_id, {
-                CAMPAIGN_STATUS_FIELD: "Active",
-                CAMPAIGN_LAST_RUN_FIELD: iso_now(),
-            })
+            if queued > 0:
+                update_record(campaigns_handle, campaign_id, {
+                    CAMPAIGN_STATUS_FIELD: "Active",
+                    CAMPAIGN_LAST_RUN_FIELD: iso_now(),
+                })
 
             summary["queued"] += queued
             summary["campaigns"][campaign_id] = {
@@ -348,11 +489,18 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 "skipped": skipped,
                 "processed": processed,
                 "skip_reasons": dict(skip_reasons),
+                "from_number": from_number,
+                "template_id": template_link_id,
             }
 
             logger.info("✅ Campaign %s: processed=%s queued=%s skipped=%s", campaign_id, processed, queued, skipped)
 
+        summary["market_counts"] = dict(market_counts)
         summary["ok"] = not summary["errors"]
+        if market_counts:
+            logger.info("🏙 Global market prospect summary:")
+            for mkt, count in market_counts.items():
+                logger.info("   %s → %s prospects", mkt, count)
         logger.info("🏁 Campaign scheduler finished: %s queued", summary["queued"])
         return summary
 
