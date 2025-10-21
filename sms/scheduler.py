@@ -246,14 +246,28 @@ def _fetch_linked_records(table_handle, record_ids: List[str], chunk_size: int, 
 
 
 def _fetch_textgrid_number(campaign_fields: Dict[str, Any]) -> Optional[str]:
-    """Return the TextGrid sending number stored directly on the campaign record."""
-    number = campaign_fields.get(TEXTGRID_NUMBER_FIELD) or campaign_fields.get(TEXTGRID_NUMBER_FALLBACK_FIELD)
-    if number:
-        text = str(number).strip()
-        if text:
-            logger.info("🧭 Found TextGrid number %s", text)
-            return text
-    logger.warning("⚠️ No TextGrid number found in campaign fields.")
+    """
+    Fetch the TextGrid number directly from the Campaign record.
+    This field is NOT a linked record — it’s a plain text field in Airtable.
+    """
+    # Try all possible variations of the field name for safety
+    possible_fields = [
+        "TextGrid Phone Number",
+        "Textgrid Phone Number",
+        "TextGrid Number",
+        "Textgrid Number",
+        TEXTGRID_NUMBER_FIELD,
+        TEXTGRID_NUMBER_FALLBACK_FIELD,
+    ]
+    
+    for field_name in possible_fields:
+        if field_name in campaign_fields and campaign_fields[field_name]:
+            value = str(campaign_fields[field_name]).strip()
+            if value:
+                logger.info(f"🧭 Found TextGrid number '{value}' in field '{field_name}'")
+                return value
+    
+    logger.warning("⚠️ No valid TextGrid number found in campaign fields.")
     return None
 
 
