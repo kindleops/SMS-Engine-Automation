@@ -61,21 +61,21 @@ DRIP_FIELDS = drip_field_map()
 PROSPECT_FIELDS = prospects_field_map()
 TEMPLATE_FIELDS = template_field_map()
 
-# Important field constants
-CAMPAIGN_STATUS_FIELD = CAMPAIGN_FIELDS["Status, Status"]
-CAMPAIGN_MARKET_FIELD = CAMPAIGN_FIELDS["Market, Market"]
-CAMPAIGN_START_FIELD = CAMPAIGN_FIELDS.get("Start Time, Start Time")
-CAMPAIGN_LAST_RUN_FIELD = CAMPAIGN_FIELDS.get("Last Run At, Last Run At")
+# Important field constants (safe fallbacks)
+CAMPAIGN_STATUS_FIELD = CAMPAIGN_FIELDS.get("Status", "Status")
+CAMPAIGN_MARKET_FIELD = CAMPAIGN_FIELDS.get("Market", "Market")
+CAMPAIGN_START_FIELD = CAMPAIGN_FIELDS.get("Start Time", "Start Time")
+CAMPAIGN_LAST_RUN_FIELD = CAMPAIGN_FIELDS.get("Last Run At", "Last Run At")
 
-DRIP_STATUS_FIELD = DRIP_FIELDS["Status, Status"]
+DRIP_STATUS_FIELD = DRIP_FIELDS.get("Status", "Status")
 DRIP_MARKET_FIELD = DRIP_FIELDS.get("Market", "Market")
 DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS.get("Seller Phone Number", "Seller Phone Number")
 DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS.get("TextGrid Phone Number", "TextGrid Phone Number")
-DRIP_PROSPECT_LINK_FIELD = DRIP_FIELDS.get("PROSPECT_LINK", "Prospect")
-DRIP_CAMPAIGN_LINK_FIELD = DRIP_FIELDS.get("CAMPAIGN_LINK", "Campaign")
-DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS.get("NEXT_SEND_DATE", "Next Send Date")
+DRIP_PROSPECT_LINK_FIELD = DRIP_FIELDS.get("Prospect", "Prospect")
+DRIP_CAMPAIGN_LINK_FIELD = DRIP_FIELDS.get("Campaign", "Campaign")
+DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS.get("Next Send Date", "Next Send Date")
 DRIP_UI_FIELD = DRIP_FIELDS.get("UI", "UI")
-DRIP_PROCESSOR_FIELD = DRIP_FIELDS.get("PROCESSOR", "Processor")
+DRIP_PROCESSOR_FIELD = DRIP_FIELDS.get("Processor", "Processor")
 
 SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
 
