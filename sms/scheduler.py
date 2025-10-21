@@ -370,24 +370,35 @@ def _fetch_linked_prospect_records(prospects_handle, campaign_id: str, prospect_
         formula = "OR(" + ",".join(
             [f"RECORD_ID()='{_escape_formula_value(rid)}'" for rid in chunk]
         ) + ")"
-        try:
-            for record in table.iterate(page_size=100, filterByFormula=formula):
-                records.append(record)
+        offset = None
+        while True:
+            params = {"pageSize": 100, "filterByFormula": formula}
+            if offset:
+                params["offset"] = offset
+            try:
+                response = table.api.request("get", table.url, params=params)
+            except requests.RequestException as exc:
+                logger.error(
+                    "Failed to fetch prospects chunk for campaign %s: %s",
+                    campaign_id,
+                    exc,
+                    exc_info=True,
+                )
+                break
+            except Exception as exc:
+                logger.error(
+                    "Unexpected error fetching prospects chunk for campaign %s: %s",
+                    campaign_id,
+                    exc,
+                    exc_info=True,
+                )
+                break
+            chunk_records = response.get("records", [])
+            records.extend(chunk_records)
+            offset = response.get("offset")
+            if not offset:
+                break
             time.sleep(0.25)
-        except requests.RequestException as exc:
-            logger.error(
-                "Failed to fetch prospects chunk for campaign %s: %s",
-                campaign_id,
-                exc,
-                exc_info=True,
-            )
-        except Exception as exc:
-            logger.error(
-                "Unexpected error fetching prospects chunk for campaign %s: %s",
-                campaign_id,
-                exc,
-                exc_info=True,
-            )
     logger.info("Fetched %s linked prospects for campaign %s", len(records), campaign_id)
     if records:
         sample = [
