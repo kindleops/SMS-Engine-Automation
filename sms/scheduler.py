@@ -306,7 +306,6 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     DRIP_CAMPAIGN_LINK_FIELD: [campaign_id],
                     DRIP_PROSPECT_LINK_FIELD: [prospect["id"]],
                     DRIP_UI_FIELD: "⏳",
-                    "Message": message_text,
                     "Message Preview": message_text,
                 }
 
