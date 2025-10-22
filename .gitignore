@@ -1,5 +1,6 @@
-<<<<<<< HEAD
-# Python
+# ======================================================
+# PYTHON BUILD / CACHE
+# ======================================================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -21,44 +22,39 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environments
+# ======================================================
+# ENVIRONMENTS
+# ======================================================
 .venv/
 venv/
 ENV/
 env/
+.env
+.env.local
+.env.*
+*.env
 
-# IDEs
+# ======================================================
+# IDE / EDITOR
+# ======================================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Environment
-*.env
-.env.local
-
-# Testing
+# ======================================================
+# TESTING / COVERAGE
+# ======================================================
 .coverage
+coverage.xml
 htmlcov/
 .tox/
 .pytest_cache/
-coverage.xml
 *.cover
 
-# macOS
+# ======================================================
+# SYSTEM / MISC
+# ======================================================
 .DS_Store
-
-# Misc
 *.log
-=======
-.venv/
-.env
-.DS_Store
-__pycache__/
-.coverage
-*.pyc
-
->>>>>>> codex-refactor-test
-.venv/
-.venv/
