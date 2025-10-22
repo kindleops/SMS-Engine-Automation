@@ -124,17 +124,21 @@ def _coerce_market(value: Any) -> str:
 def _campaign_market(fields: Dict[str, Any]) -> str:
     return _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
 
-# ───────────────────────────────────────────────────────────────────────────────
-# NUMBERS LOOKUP / ROTATION
-# ───────────────────────────────────────────────────────────────────────────────
+# ======================================================
+# NUMBERS LOOKUP (CROSS-BASE) with Rotation
+# ======================================================
 _numbers_cache: Dict[str, List[str]] = {}
 _rotation_index: Dict[str, int] = {}
 
-def _market_key(m: str) -> str:
+def _market_key(m: Optional[str]) -> str:
+    """Normalize market key to lowercase string."""
     return (m or "").strip().lower()
 
 def _choose_rotating(market: str, numbers: List[str]) -> str:
+    """Round-robin rotation across numbers for consistent load balancing."""
     k = _market_key(market)
+    if not numbers:
+        return None
     idx = _rotation_index.get(k, 0)
     chosen = numbers[idx % len(numbers)]
     _rotation_index[k] = idx + 1
@@ -143,18 +147,24 @@ def _choose_rotating(market: str, numbers: List[str]) -> str:
 def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str]:
     """
     Fetch all active TextGrid numbers for a given market from the Numbers table.
-    Randomly rotates across available ones every call (no stale cache).
+    Uses true round-robin rotation across available numbers.
     """
     if not market_raw:
         return None
 
-    market_key = str(market_raw).strip().lower()
+    market_key = _market_key(market_raw)
     if not market_key:
         return None
 
+    # Cache hit → reuse local list for rotation
+    if market_key in _numbers_cache and _numbers_cache[market_key]:
+        chosen = _choose_rotating(market_key, _numbers_cache[market_key])
+        logger.info("🔁 Rotating (cached) TextGrid number %s for %s", chosen, market_raw)
+        return chosen
+
     url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{quote(NUMBERS_TABLE, safe='')}"
-    # Flexible match: allows "Los Angeles" to match "Los Angeles, CA"
-    formula = f"AND(SEARCH(LOWER('{market_key}'), LOWER({{{NUMBERS_MARKET_FIELD}}})), {{{NUMBERS_ACTIVE_FIELD}}}=TRUE(), {{{NUMBERS_STATUS_FIELD}}}='Active')"
+    # Partial match allows “Los Angeles” to match “Los Angeles, CA”
+    formula = f"SEARCH(LOWER('{market_key}'), LOWER({{{NUMBERS_MARKET_FIELD}}}))"
     params = {"pageSize": 100}
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
 
@@ -178,8 +188,10 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
             logger.warning("⚠️ No active TextGrid numbers found for %s", market_raw)
             return None
 
-        chosen = random.choice(numbers)
-        logger.info("📞 Rotating TextGrid number %s for market %s (pool size=%d)", chosen, market_raw, len(numbers))
+        # Cache the full list for rotation
+        _numbers_cache[market_key] = numbers
+        chosen = _choose_rotating(market_key, numbers)
+        logger.info("📞 Using TextGrid number %s for %s (pool size=%d)", chosen, market_raw, len(numbers))
         return chosen
 
     except Exception as exc:
