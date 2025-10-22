@@ -156,8 +156,9 @@ def _choose_rotating_number(market: str, numbers: List[str]) -> Optional[str]:
 
 def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str]:
     """
-    Fetches TextGrid numbers from the Numbers table.
-    Always uses the correct market and rotates across all active numbers.
+    Fetch TextGrid numbers from Airtable Numbers table.
+    Works with single-select, multi-select, or text Market fields.
+    Rotates across all active numbers for that market.
     """
     if not market_raw:
         logger.warning("⚠️ Missing market input for number fetch.")
@@ -167,21 +168,27 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
     if not market_key:
         return None
 
-    # Cached → rotate locally
+    # Cached → reuse for rotation
     if market_key in _numbers_cache and _numbers_cache[market_key]:
         chosen = _choose_rotating_number(market_key, _numbers_cache[market_key])
         logger.info("🔁 (Cache) Using %s for market %s", chosen, market_raw)
         return chosen
 
     url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{quote(NUMBERS_TABLE, safe='')}"
-    # Fuzzy match (handles "Miami" vs "Miami, FL")
+
+    # ✅ FIX: handle single select fields by wrapping in VALUE()
+    # Airtable converts single select internally, so we normalize both sides and allow partial matches
     formula = (
         f"AND("
-        f"SEARCH(LOWER('{market_key}'), LOWER({{{NUMBERS_MARKET_FIELD}}})),"
+        f"OR("
+        f"SEARCH(LOWER('{market_key}'), LOWER(VALUE({{{NUMBERS_MARKET_FIELD}}}))),"
+        f"SEARCH(LOWER(VALUE({{{NUMBERS_MARKET_FIELD}}})), LOWER('{market_key}'))"
+        f"),"
         f"{{{NUMBERS_ACTIVE_FIELD}}}=1,"
         f"LOWER({{{NUMBERS_STATUS_FIELD}}})='active'"
         f")"
     )
+
     params = {"pageSize": 100, "filterByFormula": formula}
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
 
@@ -194,7 +201,7 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
 
         data = resp.json().get("records", [])
         if not data:
-            logger.warning("⚠️ No numbers found for market '%s'", market_raw)
+            logger.warning("⚠️ No matching TextGrid numbers found for market '%s'", market_raw)
             return None
 
         numbers: List[str] = []
@@ -213,7 +220,7 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
             logger.warning("⚠️ No active TextGrid numbers found for '%s'", market_raw)
             return None
 
-        # Cache & rotate
+        # Cache and rotate
         _numbers_cache[market_key] = numbers
         chosen = _choose_rotating_number(market_key, numbers)
         logger.info("📞 Using %s for market %s (pool=%d)",
@@ -224,7 +231,6 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
         logger.error("❌ Error fetching TextGrid numbers for %s: %s",
                      market_raw, exc, exc_info=True)
         return None
-
 # ───────────────────────────────────────────────────────────────────────────────
 # MAIN SCHEDULER
 # ───────────────────────────────────────────────────────────────────────────────
