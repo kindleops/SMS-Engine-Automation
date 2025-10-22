@@ -131,8 +131,9 @@ def _campaign_market(fields: Dict[str, Any]) -> str:
 _numbers_cache: Dict[str, List[str]] = {}
 _rotation_index: Dict[str, int] = {}
 
+
 def _normalize_market_key(raw: Optional[str]) -> str:
-    """Lowercase + trim + strip punctuation for stable key matching."""
+    """Normalize market name: lowercase, trim punctuation and spacing."""
     if not raw:
         return ""
     return (
@@ -144,6 +145,7 @@ def _normalize_market_key(raw: Optional[str]) -> str:
         .replace("  ", " ")
     )
 
+
 def _choose_rotating_number(market: str, numbers: List[str]) -> Optional[str]:
     """Rotate sequentially through available numbers for this market."""
     if not numbers:
@@ -154,11 +156,12 @@ def _choose_rotating_number(market: str, numbers: List[str]) -> Optional[str]:
     _rotation_index[key] = idx + 1
     return chosen
 
+
 def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str]:
     """
-    Fetch TextGrid numbers from Airtable Numbers table.
+    Fetch active TextGrid numbers from the Numbers table for the given market.
     Works with single-select, multi-select, or text Market fields.
-    Rotates across all active numbers for that market.
+    Rotates numbers per call for balanced distribution.
     """
     if not market_raw:
         logger.warning("⚠️ Missing market input for number fetch.")
@@ -168,7 +171,7 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
     if not market_key:
         return None
 
-    # Cached → reuse for rotation
+    # Cached → use rotation
     if market_key in _numbers_cache and _numbers_cache[market_key]:
         chosen = _choose_rotating_number(market_key, _numbers_cache[market_key])
         logger.info("🔁 (Cache) Using %s for market %s", chosen, market_raw)
@@ -176,21 +179,23 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
 
     url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{quote(NUMBERS_TABLE, safe='')}"
 
-    # ✅ FIX: handle single select fields by wrapping in VALUE()
-    # Airtable converts single select internally, so we normalize both sides and allow partial matches
+    # ✅ Universal formula: handles "Miami" vs "Miami, FL", single-select, multi-select, or text
     formula = (
         f"AND("
         f"OR("
-        f"SEARCH(LOWER('{market_key}'), LOWER(VALUE({{{NUMBERS_MARKET_FIELD}}}))),"
-        f"SEARCH(LOWER(VALUE({{{NUMBERS_MARKET_FIELD}}})), LOWER('{market_key}'))"
+        f"SEARCH(LOWER('{market_key}'), LOWER(ARRAYJOIN(VALUE({{{NUMBERS_MARKET_FIELD}}}), ','))),"
+        f"SEARCH(LOWER(ARRAYJOIN(VALUE({{{NUMBERS_MARKET_FIELD}}}), ',')), LOWER('{market_key}'))"
         f"),"
-        f"{{{NUMBERS_ACTIVE_FIELD}}}=1,"
+        f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1, {{{NUMBERS_ACTIVE_FIELD}}}='true'),"
         f"LOWER({{{NUMBERS_STATUS_FIELD}}})='active'"
         f")"
     )
 
     params = {"pageSize": 100, "filterByFormula": formula}
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+
+    # Log the exact query for transparency
+    logger.info(f"🔎 Fetching numbers for market '{market_raw}' with formula:\n{formula}")
 
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
@@ -199,9 +204,9 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
                            market_raw, resp.status_code, resp.text[:200])
             return None
 
-        data = resp.json().get("records", [])
+        data = (resp.json() or {}).get("records", [])
         if not data:
-            logger.warning("⚠️ No matching TextGrid numbers found for market '%s'", market_raw)
+            logger.warning("⚠️ No matching numbers found for '%s'", market_raw)
             return None
 
         numbers: List[str] = []
@@ -213,7 +218,9 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
                 or f.get("Phone")
                 or f.get("Number")
             )
-            if isinstance(num, str) and num.strip():
+            active = f.get(NUMBERS_ACTIVE_FIELD)
+            status = str(f.get(NUMBERS_STATUS_FIELD, "")).strip().lower()
+            if isinstance(num, str) and num.strip() and active and status == "active":
                 numbers.append(num.strip())
 
         if not numbers:
@@ -231,6 +238,7 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
         logger.error("❌ Error fetching TextGrid numbers for %s: %s",
                      market_raw, exc, exc_info=True)
         return None
+
 # ───────────────────────────────────────────────────────────────────────────────
 # MAIN SCHEDULER
 # ───────────────────────────────────────────────────────────────────────────────
