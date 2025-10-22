@@ -9,12 +9,11 @@ import requests
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import quote
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from collections import defaultdict
 from dotenv import load_dotenv
 
-# Internal
+# Internal Imports
 from sms.airtable_schema import (
     campaign_field_map,
     drip_field_map,
@@ -26,9 +25,9 @@ from sms.runtime import get_logger, iso_now, last_10_digits, normalize_phone
 
 logger = get_logger(__name__)
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────
 # ENV / BASE CONFIG
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT_DIR / ".env")
 
@@ -46,33 +45,32 @@ CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE", "appyhhWYmrM86H35a")
 PERFORMANCE_BASE = os.getenv("PERFORMANCE_BASE", "appzRWrpFggxlRBgL")
 DEVOPS_BASE = os.getenv("DEVOPS_BASE", "applqOU9LSAJ47gMy")
 
-# For backward compatibility
 CAMPAIGNS_BASE_ID = LEADS_CONVOS_BASE
 
-# Numbers table (matches your screenshot exactly)
+# Numbers table
 NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 NUMBERS_MARKET_FIELD = os.getenv("NUMBERS_MARKET_FIELD", "Market")
 NUMBERS_PHONE_FIELD = os.getenv("NUMBERS_PHONE_FIELD", "A Number")
 NUMBERS_STATUS_FIELD = os.getenv("NUMBERS_STATUS_FIELD", "Status")
 NUMBERS_ACTIVE_FIELD = os.getenv("NUMBERS_ACTIVE_FIELD", "Active")
 
-# ───────────────────────────────────────────────────────────────────────────────
-# FIELD MAPS (use your canonical names with safe fallbacks)
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────
+# FIELD MAPS
+# ───────────────────────────────────────────────────────────────
 CAMPAIGN_FIELDS = campaign_field_map()
 DRIP_FIELDS = drip_field_map()
 PROSPECT_FIELDS = prospects_field_map()
 TEMPLATE_FIELDS = template_field_map()
 
-# Campaigns
+# Campaign Fields
 CAMPAIGN_STATUS_FIELD     = CAMPAIGN_FIELDS.get("Status", "Status")
 CAMPAIGN_MARKET_FIELD     = CAMPAIGN_FIELDS.get("Market", "Market")
 CAMPAIGN_START_FIELD      = CAMPAIGN_FIELDS.get("Start Time", "Start Time")
 CAMPAIGN_LAST_RUN_FIELD   = CAMPAIGN_FIELDS.get("Last Run At", "Last Run At")
-CAMPAIGN_PROSPECTS_LINK   = CAMPAIGN_FIELDS.get("PROSPECTS_LINK", CAMPAIGN_FIELDS.get("Prospects", "Prospects"))
-CAMPAIGN_TEMPLATES_LINK   = CAMPAIGN_FIELDS.get("TEMPLATES_LINK", CAMPAIGN_FIELDS.get("Templates", "Templates"))
+CAMPAIGN_PROSPECTS_LINK   = CAMPAIGN_FIELDS.get("Prospects", "Prospects")
+CAMPAIGN_TEMPLATES_LINK   = CAMPAIGN_FIELDS.get("Templates", "Templates")
 
-# Drip Queue (NO "Message" field here)
+# Drip Fields
 DRIP_STATUS_FIELD         = DRIP_FIELDS.get("Status", "Status")
 DRIP_MARKET_FIELD         = DRIP_FIELDS.get("Market", "Market")
 DRIP_SELLER_PHONE_FIELD   = DRIP_FIELDS.get("Seller Phone Number", "Seller Phone Number")
@@ -86,11 +84,12 @@ DRIP_MESSAGE_PREVIEW_FIELD= DRIP_FIELDS.get("Message Preview", "Message Preview"
 
 SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────
 # HELPERS
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────
 def _parse_iso(value: Any) -> Optional[datetime]:
-    if not value: return None
+    if not value:
+        return None
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
@@ -100,7 +99,7 @@ def _campaign_start(fields: Dict[str, Any]) -> datetime:
     return _parse_iso(fields.get(CAMPAIGN_START_FIELD)) or datetime.now(timezone.utc)
 
 def _prospect_best_phone(fields: Dict[str, Any]) -> Optional[str]:
-    # Try primary/linked/secondary in a sensible order
+    """Return best normalized phone number."""
     candidates = [
         PROSPECT_FIELDS.get("PHONE_PRIMARY"),
         PROSPECT_FIELDS.get("PHONE_PRIMARY_LINKED"),
@@ -131,30 +130,58 @@ def _coerce_market(value: Any) -> str:
 def _campaign_market(fields: Dict[str, Any]) -> str:
     return _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
 
-# ======================================================
-# NUMBERS LOOKUP (CROSS-BASE, SINGLE-SELECT, FALLBACK) — FINAL FIXED VERSION
-# ======================================================
+# ───────────────────────────────────────────────────────────────
+# MESSAGE PLACEHOLDER RENDERING (FINALIZED FIELD MAPPING)
+# ───────────────────────────────────────────────────────────────
+def _render_message(template: str, pf: Dict[str, Any]) -> str:
+    """Render placeholders with correct field names and clean first names."""
+    # Extract first name from "Phone 1 Name (Primary) (from Linked Owner)"
+    raw_name = pf.get("Phone 1 Name (Primary) (from Linked Owner)") or ""
+    first_name = ""
+    if isinstance(raw_name, str):
+        # Split by space or period, drop middle initials
+        parts = raw_name.strip().split(" ")
+        if parts:
+            first_name = parts[0].strip().replace(".", "")
 
+    # Handle single-select or list for address and city
+    prop_address = ""
+    addr_field = pf.get("Property Address")
+    if isinstance(addr_field, list) and addr_field:
+        prop_address = addr_field[0]
+    elif isinstance(addr_field, str):
+        prop_address = addr_field.strip()
+
+    prop_city = ""
+    city_field = pf.get("Property City")
+    if isinstance(city_field, list) and city_field:
+        prop_city = city_field[0]
+    elif isinstance(city_field, str):
+        prop_city = city_field.strip()
+
+    mapping = {
+        "First": first_name,
+        "Address": prop_address,
+        "Property City": prop_city,
+    }
+
+    result = template
+    for key, val in mapping.items():
+        result = result.replace(f"{{{key}}}", str(val or "").strip())
+    return result.strip()
+
+# ======================================================
+# NUMBERS LOOKUP (SINGLE-SELECT SAFE, PER-MARKET ROTATION)
+# ======================================================
 _numbers_cache: Dict[str, List[str]] = {}
 _rotation_index: Dict[str, int] = {}
 
-
 def _normalize_market_key(raw: Optional[str]) -> str:
-    """Normalize market name for fuzzy matching."""
     if not raw:
         return ""
-    return (
-        str(raw)
-        .strip()
-        .lower()
-        .replace(",", "")
-        .replace(".", "")
-        .replace("  ", " ")
-    )
-
+    return str(raw).strip().lower().replace(",", "").replace(".", "").replace("  ", " ")
 
 def _choose_rotating_number(market: str, numbers: List[str]) -> Optional[str]:
-    """Round-robin rotation through available numbers per market."""
     if not numbers:
         return None
     key = _normalize_market_key(market)
@@ -163,14 +190,8 @@ def _choose_rotating_number(market: str, numbers: List[str]) -> Optional[str]:
     _rotation_index[key] = idx + 1
     return chosen
 
-
 def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str]:
-    """
-    Fetch a TextGrid number from the Numbers table (Campaign Control base).
-    - Works with single-select, linked record, or text fields.
-    - Matches fuzzy market names like "Jacksonville" ↔ "Jacksonville, FL".
-    - Falls back to any active number if no local match found.
-    """
+    """Fetch per-market TextGrid number from Campaign Control base."""
     if not market_raw:
         logger.warning("⚠️ Missing market input for number fetch.")
         return None
@@ -179,86 +200,71 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
     if not market_key:
         return None
 
-    # ✅ Cached reuse
+    # Cache hit
     if market_key in _numbers_cache and _numbers_cache[market_key]:
         chosen = _choose_rotating_number(market_key, _numbers_cache[market_key])
-        logger.info("🔁 (Cache) Using %s for market %s", chosen, market_raw)
+        logger.info("🔁 (Cache) Using %s for %s", chosen, market_raw)
         return chosen
 
-    base_url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{quote(NUMBERS_TABLE, safe='')}"
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-
-    # 1️⃣ Try fuzzy match — case insensitive + contains (for single select or text)
+    url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{quote(NUMBERS_TABLE, safe='')}"
+    # ✅ Reliable single-select equality match
     formula = (
         f"AND("
-        f"FIND(LOWER('{market_key}'), LOWER({{{NUMBERS_MARKET_FIELD}}}))>0,"
-        f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1, {{{NUMBERS_ACTIVE_FIELD}}}='true'),"
+        f"LOWER({{{NUMBERS_MARKET_FIELD}}}&'')=LOWER('{market_key}'),"
+        f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1, LOWER({{{NUMBERS_ACTIVE_FIELD}}})='true'),"
         f"LOWER({{{NUMBERS_STATUS_FIELD}}})='active'"
         f")"
     )
 
-    logger.info(f"🔍 Searching Numbers table in Campaign Control base for market '{market_raw}'")
-    logger.info(f"🧩 Airtable filter formula:\n{formula}")
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+    params = {"pageSize": 100, "filterByFormula": formula}
 
     try:
-        resp = requests.get(base_url, headers=headers, params={"filterByFormula": formula, "pageSize": 100}, timeout=10)
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
         data = (resp.json() or {}).get("records", [])
-
         numbers: List[str] = []
+
         for rec in data:
-            fields = rec.get("fields", {}) or {}
-            num = (
-                fields.get(NUMBERS_PHONE_FIELD)
-                or fields.get("A Number")
-                or fields.get("TextGrid Phone Number")
-                or fields.get("Number")
-            )
-            active = fields.get(NUMBERS_ACTIVE_FIELD)
-            status = str(fields.get(NUMBERS_STATUS_FIELD, "")).lower()
+            f = rec.get("fields", {}) or {}
+            num = f.get(NUMBERS_PHONE_FIELD) or f.get("A Number") or f.get("Phone") or f.get("Number")
+            active = f.get(NUMBERS_ACTIVE_FIELD)
+            status = str(f.get(NUMBERS_STATUS_FIELD, "")).lower()
             if isinstance(num, str) and num.strip() and active and status == "active":
                 numbers.append(num.strip())
 
-        # 2️⃣ If no market match → fallback to any active number globally
         if not numbers:
-            logger.warning(f"⚠️ No numbers matched '{market_raw}' — using global active pool instead.")
-            fallback_formula = (
+            logger.warning("⚠️ No numbers matched '%s' — using global active pool", market_raw)
+            formula_global = (
                 f"AND("
-                f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1, {{{NUMBERS_ACTIVE_FIELD}}}='true'),"
+                f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1, LOWER({{{NUMBERS_ACTIVE_FIELD}}})='true'),"
                 f"LOWER({{{NUMBERS_STATUS_FIELD}}})='active'"
                 f")"
             )
-            resp = requests.get(base_url, headers=headers, params={"filterByFormula": fallback_formula, "pageSize": 100}, timeout=10)
-            data = (resp.json() or {}).get("records", [])
-            for rec in data:
-                fields = rec.get("fields", {}) or {}
-                num = (
-                    fields.get(NUMBERS_PHONE_FIELD)
-                    or fields.get("A Number")
-                    or fields.get("TextGrid Phone Number")
-                    or fields.get("Number")
-                )
-                active = fields.get(NUMBERS_ACTIVE_FIELD)
-                status = str(fields.get(NUMBERS_STATUS_FIELD, "")).lower()
+            resp = requests.get(url, headers=headers, params={"filterByFormula": formula_global}, timeout=10)
+            for rec in (resp.json() or {}).get("records", []):
+                f = rec.get("fields", {}) or {}
+                num = f.get(NUMBERS_PHONE_FIELD) or f.get("A Number")
+                active = f.get(NUMBERS_ACTIVE_FIELD)
+                status = str(f.get(NUMBERS_STATUS_FIELD, "")).lower()
                 if isinstance(num, str) and num.strip() and active and status == "active":
                     numbers.append(num.strip())
 
         if not numbers:
-            logger.error("🚫 No active TextGrid numbers found in any market.")
+            logger.error("🚫 No active TextGrid numbers found at all.")
             return None
 
-        # Cache and rotate
         _numbers_cache[market_key] = numbers
         chosen = _choose_rotating_number(market_key, numbers)
-        logger.info("📞 Selected %s for market %s (pool=%d)", chosen, market_raw, len(numbers))
+        logger.info("📞 Using %s for %s (pool=%d)", chosen, market_raw, len(numbers))
         return chosen
 
     except Exception as exc:
         logger.error("❌ Error fetching numbers for %s: %s", market_raw, exc, exc_info=True)
         return None
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────
 # MAIN SCHEDULER
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────
 def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
     logger.info("🚀 Scheduler start")
     summary: Dict[str, Any] = {"queued": 0, "campaigns": {}, "errors": [], "ok": True}
@@ -268,20 +274,19 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
         return summary
 
     try:
-        # Handles
         campaigns_h = CONNECTOR.campaigns()
         prospects_h = CONNECTOR.prospects()
         drip_h = CONNECTOR.drip_queue()
         templates_h = CONNECTOR.templates()
 
-        # Pull campaigns (paginated internally)
         campaigns = list_records(campaigns_h, page_size=100)
-
-        # Build de-dupe set from existing drip
         existing = list_records(drip_h, page_size=100)
+
         existing_pairs = {
-            ( (f.get("fields", {}) or {}).get(DRIP_CAMPAIGN_LINK_FIELD, [None])[0],
-              last_10_digits((f.get("fields", {}) or {}).get(DRIP_SELLER_PHONE_FIELD)) )
+            (
+                (f.get("fields", {}) or {}).get(DRIP_CAMPAIGN_LINK_FIELD, [None])[0],
+                last_10_digits((f.get("fields", {}) or {}).get(DRIP_SELLER_PHONE_FIELD)),
+            )
             for f in existing if f.get("fields")
         }
 
@@ -297,11 +302,9 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 logger.warning("⚠️ Campaign %s missing Market; skipping", campaign_id)
                 continue
 
-            # templates
             template_ids = cfields.get(CAMPAIGN_TEMPLATES_LINK) or []
             messages: List[str] = []
             if template_ids:
-                # fetch exact records by RECORD_ID()
                 for tid in template_ids:
                     resp = templates_h.table.api.request(
                         "get",
@@ -313,19 +316,16 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                         if isinstance(msg, str) and msg.strip():
                             messages.append(msg.strip())
             if not messages:
-                logger.warning("⚠️ Campaign %s has no template messages; skipping", campaign_id)
+                logger.warning("⚠️ Campaign %s has no templates; skipping", campaign_id)
                 continue
 
-            # prospects (linked IDs)
             linked = cfields.get(CAMPAIGN_PROSPECTS_LINK) or []
             if not linked:
                 logger.info("⏭️ Campaign %s has no linked prospects; skipping", campaign_id)
                 continue
 
-            # get a sending number for THIS market (rotates per call)
             from_number = _fetch_textgrid_number_for_market(market)
             if not from_number:
-                logger.warning("⚠️ Campaign %s: no active TextGrid number for market '%s'", campaign_id, market)
                 summary["campaigns"][campaign_id] = {
                     "queued": 0, "skipped": len(linked), "processed": 0,
                     "skip_reasons": {"missing_textgrid_number": len(linked)},
@@ -333,30 +333,25 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 }
                 continue
 
-            # hydrate prospects by chunks of 100
             prospects: List[Dict[str, Any]] = []
             for i in range(0, len(linked), 100):
                 chunk = linked[i:i+100]
                 formula = "OR(" + ",".join([f"RECORD_ID()='{rid}'" for rid in chunk]) + ")"
                 resp = prospects_h.table.api.request("get", prospects_h.table.url, params={"filterByFormula": formula})
                 prospects.extend((resp or {}).get("records", []))
-                time.sleep(0.12)  # be nice to API
+                time.sleep(0.12)
 
             start_time = _campaign_start(cfields)
-
             queued = skipped = processed = 0
             skip_reasons: Dict[str, int] = defaultdict(int)
 
-            # Optional pacing: spread by random seconds to avoid burst
             def _next_send(j: int) -> str:
-                # jitter 0–90s per record
                 ts = start_time.timestamp() + random.randint(0, 90)
                 return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
             for idx, pr in enumerate(prospects):
                 processed += 1
                 pf = pr.get("fields", {}) or {}
-
                 phone = _prospect_best_phone(pf)
                 if not phone:
                     skipped += 1; skip_reasons["missing_phone"] = skip_reasons.get("missing_phone", 0) + 1
@@ -368,6 +363,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     continue
 
                 message_text = random.choice(messages)
+                rendered = _render_message(message_text, pf)
 
                 payload = {
                     DRIP_STATUS_FIELD: "QUEUED",
@@ -379,7 +375,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     DRIP_CAMPAIGN_LINK_FIELD: [campaign_id],
                     DRIP_PROSPECT_LINK_FIELD: [pr["id"]],
                     DRIP_UI_FIELD: "⏳",
-                    DRIP_MESSAGE_PREVIEW_FIELD: message_text,  # ✅ preview only; NOT the actual send field
+                    DRIP_MESSAGE_PREVIEW_FIELD: rendered,
                 }
 
                 try:
@@ -393,7 +389,6 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     logger.warning("Create failed for %s: %s", digits, exc)
                     skipped += 1; skip_reasons["create_failed"] = skip_reasons.get("create_failed", 0) + 1
 
-            # update campaign status if anything queued
             if queued:
                 try:
                     update_record(campaigns_h, campaign_id, {
@@ -405,11 +400,8 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
 
             summary["queued"] += queued
             summary["campaigns"][campaign_id] = {
-                "queued": queued,
-                "skipped": skipped,
-                "processed": processed,
-                "skip_reasons": dict(skip_reasons),
-                "from_number": from_number,
+                "queued": queued, "skipped": skipped, "processed": processed,
+                "skip_reasons": dict(skip_reasons), "from_number": from_number,
             }
             logger.info("✅ Campaign %s queued=%d skipped=%d processed=%d", campaign_id, queued, skipped, processed)
 
