@@ -125,7 +125,7 @@ def _campaign_market(fields: Dict[str, Any]) -> str:
     return _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
 
 # ======================================================
-# NUMBERS LOOKUP (CROSS-BASE) — FINAL PRODUCTION VERSION
+# NUMBERS LOOKUP (CROSS-BASE) — GUARANTEED PRODUCTION VERSION
 # ======================================================
 
 _numbers_cache: Dict[str, List[str]] = {}
@@ -159,9 +159,10 @@ def _choose_rotating_number(market: str, numbers: List[str]) -> Optional[str]:
 
 def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str]:
     """
-    Fetch active TextGrid numbers from the Numbers table for the given market.
-    Works with single-select, multi-select, or text Market fields.
-    Rotates numbers per call for balanced distribution.
+    Fetch all active TextGrid numbers for a given market from the Numbers table.
+    Works with text, single-select, or multi-select fields.
+    Supports partial matches (“Miami” ↔ “Miami, FL”).
+    Uses round-robin rotation across all valid numbers.
     """
     if not market_raw:
         logger.warning("⚠️ Missing market input for number fetch.")
@@ -177,9 +178,10 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
         logger.info("🔁 (Cache) Using %s for market %s", chosen, market_raw)
         return chosen
 
+    # Airtable request
     url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{quote(NUMBERS_TABLE, safe='')}"
 
-    # ✅ Universal formula: handles "Miami" vs "Miami, FL", single-select, multi-select, or text
+    # ✅ Formula: handles "Jacksonville" ↔ "Jacksonville, FL", active checks, and single-select values
     formula = (
         f"AND("
         f"OR("
@@ -194,23 +196,25 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
     params = {"pageSize": 100, "filterByFormula": formula}
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
 
-    # Log the exact query for transparency
-    logger.info(f"🔎 Fetching numbers for market '{market_raw}' with formula:\n{formula}")
+    logger.info(f"🔎 Fetching numbers for '{market_raw}' using formula:\n{formula}")
 
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
         if resp.status_code != 200:
-            logger.warning("⚠️ Number fetch failed for %s: %s %s",
-                           market_raw, resp.status_code, resp.text[:200])
+            logger.warning(
+                "⚠️ Number fetch failed for %s: %s %s",
+                market_raw, resp.status_code, resp.text[:200],
+            )
             return None
 
-        data = (resp.json() or {}).get("records", [])
-        if not data:
-            logger.warning("⚠️ No matching numbers found for '%s'", market_raw)
+        payload = resp.json()
+        records = (payload or {}).get("records", [])
+        if not records:
+            logger.warning("⚠️ No matching records returned for '%s'", market_raw)
             return None
 
         numbers: List[str] = []
-        for rec in data:
+        for rec in records:
             f = rec.get("fields", {}) or {}
             num = (
                 f.get(NUMBERS_PHONE_FIELD)
@@ -220,23 +224,21 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
             )
             active = f.get(NUMBERS_ACTIVE_FIELD)
             status = str(f.get(NUMBERS_STATUS_FIELD, "")).strip().lower()
+
             if isinstance(num, str) and num.strip() and active and status == "active":
                 numbers.append(num.strip())
 
         if not numbers:
-            logger.warning("⚠️ No active TextGrid numbers found for '%s'", market_raw)
+            logger.warning("⚠️ Found records but none active for '%s'", market_raw)
             return None
 
-        # Cache and rotate
         _numbers_cache[market_key] = numbers
         chosen = _choose_rotating_number(market_key, numbers)
-        logger.info("📞 Using %s for market %s (pool=%d)",
-                    chosen, market_raw, len(numbers))
+        logger.info("📞 Using %s for market %s (pool=%d)", chosen, market_raw, len(numbers))
         return chosen
 
     except Exception as exc:
-        logger.error("❌ Error fetching TextGrid numbers for %s: %s",
-                     market_raw, exc, exc_info=True)
+        logger.error("❌ Error fetching TextGrid numbers for %s: %s", market_raw, exc, exc_info=True)
         return None
 
 # ───────────────────────────────────────────────────────────────────────────────
