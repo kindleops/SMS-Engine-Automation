@@ -1001,8 +1001,11 @@ class TemplateStage(str, Enum):
     STAGE_5_MOTIVATION_TIMELINE = ConversationStage.STAGE_5_MOTIVATION_TIMELINE.value
     STAGE_6_OFFER_FOLLOW_UP = ConversationStage.STAGE_6_OFFER_FOLLOW_UP.value
     STAGE_7_CONTRACT_READY = ConversationStage.STAGE_7_CONTRACT_READY.value
-    STAGE_8_CONTRACT_SENT = ConversationStage.STAGE_8_CONTRACT_SENT.value
+    STAGE_8_NEGOTIATION = ConversationStage.STAGE_8_NEGOTIATION.value
     STAGE_9_CONTRACT_FOLLOW_UP = ConversationStage.STAGE_9_CONTRACT_FOLLOW_UP.value
+    STAGE_10_CONTRACT_FOLLOW_UP = ConversationStage.STAGE_10_CONTRACT_FOLLOW_UP.value
+    OPT_OUT = ConversationStage.OPT_OUT.value
+    DNC = ConversationStage.DNC.value
     OTHER = "Other"
 
 
