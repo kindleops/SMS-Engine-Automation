@@ -38,9 +38,16 @@ if not AIRTABLE_API_KEY:
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() in {"1", "true", "yes"}
 
-# Bases
-CAMPAIGNS_BASE_ID = os.getenv("CAMPAIGNS_BASE_ID", "appMn2MKocaJ9I3rW")
+# =========================
+# Airtable Bases
+# =========================
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE", "appMn2MKocaJ9I3rW")
 CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE", "appyhhWYmrM86H35a")
+PERFORMANCE_BASE = os.getenv("PERFORMANCE_BASE", "appzRWrpFggxlRBgL")
+DEVOPS_BASE = os.getenv("DEVOPS_BASE", "applqOU9LSAJ47gMy")
+
+# For backward compatibility
+CAMPAIGNS_BASE_ID = LEADS_CONVOS_BASE
 
 # Numbers table (matches your screenshot exactly)
 NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
