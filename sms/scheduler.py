@@ -125,7 +125,7 @@ def _campaign_market(fields: Dict[str, Any]) -> str:
     return _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
 
 # ======================================================
-# NUMBERS LOOKUP (CROSS-BASE) — GUARANTEED PRODUCTION VERSION
+# NUMBERS LOOKUP (CROSS-BASE, SINGLE-SELECT, FALLBACK) — FINAL FIXED VERSION
 # ======================================================
 
 _numbers_cache: Dict[str, List[str]] = {}
@@ -133,7 +133,7 @@ _rotation_index: Dict[str, int] = {}
 
 
 def _normalize_market_key(raw: Optional[str]) -> str:
-    """Normalize market name: lowercase, trim punctuation and spacing."""
+    """Normalize market name for fuzzy matching."""
     if not raw:
         return ""
     return (
@@ -147,7 +147,7 @@ def _normalize_market_key(raw: Optional[str]) -> str:
 
 
 def _choose_rotating_number(market: str, numbers: List[str]) -> Optional[str]:
-    """Rotate sequentially through available numbers for this market."""
+    """Round-robin rotation through available numbers per market."""
     if not numbers:
         return None
     key = _normalize_market_key(market)
@@ -159,10 +159,10 @@ def _choose_rotating_number(market: str, numbers: List[str]) -> Optional[str]:
 
 def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str]:
     """
-    Fetch all active TextGrid numbers for a given market from the Numbers table.
-    Works with text, single-select, or multi-select fields.
-    Supports partial matches (“Miami” ↔ “Miami, FL”).
-    Uses round-robin rotation across all valid numbers.
+    Fetch a TextGrid number from the Numbers table (Campaign Control base).
+    - Works with single-select, linked record, or text fields.
+    - Matches fuzzy market names like "Jacksonville" ↔ "Jacksonville, FL".
+    - Falls back to any active number if no local match found.
     """
     if not market_raw:
         logger.warning("⚠️ Missing market input for number fetch.")
@@ -172,73 +172,81 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
     if not market_key:
         return None
 
-    # Cached → use rotation
+    # ✅ Cached reuse
     if market_key in _numbers_cache and _numbers_cache[market_key]:
         chosen = _choose_rotating_number(market_key, _numbers_cache[market_key])
         logger.info("🔁 (Cache) Using %s for market %s", chosen, market_raw)
         return chosen
 
-    # Airtable request
-    url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{quote(NUMBERS_TABLE, safe='')}"
+    base_url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{quote(NUMBERS_TABLE, safe='')}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
 
-    # ✅ Formula: handles "Jacksonville" ↔ "Jacksonville, FL", active checks, and single-select values
+    # 1️⃣ Try fuzzy match — case insensitive + contains (for single select or text)
     formula = (
         f"AND("
-        f"OR("
-        f"SEARCH(LOWER('{market_key}'), LOWER(ARRAYJOIN(VALUE({{{NUMBERS_MARKET_FIELD}}}), ','))),"
-        f"SEARCH(LOWER(ARRAYJOIN(VALUE({{{NUMBERS_MARKET_FIELD}}}), ',')), LOWER('{market_key}'))"
-        f"),"
+        f"FIND(LOWER('{market_key}'), LOWER({{{NUMBERS_MARKET_FIELD}}}))>0,"
         f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1, {{{NUMBERS_ACTIVE_FIELD}}}='true'),"
         f"LOWER({{{NUMBERS_STATUS_FIELD}}})='active'"
         f")"
     )
 
-    params = {"pageSize": 100, "filterByFormula": formula}
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-
-    logger.info(f"🔎 Fetching numbers for '{market_raw}' using formula:\n{formula}")
+    logger.info(f"🔍 Searching Numbers table in Campaign Control base for market '{market_raw}'")
+    logger.info(f"🧩 Airtable filter formula:\n{formula}")
 
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
-        if resp.status_code != 200:
-            logger.warning(
-                "⚠️ Number fetch failed for %s: %s %s",
-                market_raw, resp.status_code, resp.text[:200],
-            )
-            return None
-
-        payload = resp.json()
-        records = (payload or {}).get("records", [])
-        if not records:
-            logger.warning("⚠️ No matching records returned for '%s'", market_raw)
-            return None
+        resp = requests.get(base_url, headers=headers, params={"filterByFormula": formula, "pageSize": 100}, timeout=10)
+        data = (resp.json() or {}).get("records", [])
 
         numbers: List[str] = []
-        for rec in records:
-            f = rec.get("fields", {}) or {}
+        for rec in data:
+            fields = rec.get("fields", {}) or {}
             num = (
-                f.get(NUMBERS_PHONE_FIELD)
-                or f.get("TextGrid Phone Number")
-                or f.get("Phone")
-                or f.get("Number")
+                fields.get(NUMBERS_PHONE_FIELD)
+                or fields.get("A Number")
+                or fields.get("TextGrid Phone Number")
+                or fields.get("Number")
             )
-            active = f.get(NUMBERS_ACTIVE_FIELD)
-            status = str(f.get(NUMBERS_STATUS_FIELD, "")).strip().lower()
-
+            active = fields.get(NUMBERS_ACTIVE_FIELD)
+            status = str(fields.get(NUMBERS_STATUS_FIELD, "")).lower()
             if isinstance(num, str) and num.strip() and active and status == "active":
                 numbers.append(num.strip())
 
+        # 2️⃣ If no market match → fallback to any active number globally
         if not numbers:
-            logger.warning("⚠️ Found records but none active for '%s'", market_raw)
+            logger.warning(f"⚠️ No numbers matched '{market_raw}' — using global active pool instead.")
+            fallback_formula = (
+                f"AND("
+                f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1, {{{NUMBERS_ACTIVE_FIELD}}}='true'),"
+                f"LOWER({{{NUMBERS_STATUS_FIELD}}})='active'"
+                f")"
+            )
+            resp = requests.get(base_url, headers=headers, params={"filterByFormula": fallback_formula, "pageSize": 100}, timeout=10)
+            data = (resp.json() or {}).get("records", [])
+            for rec in data:
+                fields = rec.get("fields", {}) or {}
+                num = (
+                    fields.get(NUMBERS_PHONE_FIELD)
+                    or fields.get("A Number")
+                    or fields.get("TextGrid Phone Number")
+                    or fields.get("Number")
+                )
+                active = fields.get(NUMBERS_ACTIVE_FIELD)
+                status = str(fields.get(NUMBERS_STATUS_FIELD, "")).lower()
+                if isinstance(num, str) and num.strip() and active and status == "active":
+                    numbers.append(num.strip())
+
+        if not numbers:
+            logger.error("🚫 No active TextGrid numbers found in any market.")
             return None
 
+        # Cache and rotate
         _numbers_cache[market_key] = numbers
         chosen = _choose_rotating_number(market_key, numbers)
-        logger.info("📞 Using %s for market %s (pool=%d)", chosen, market_raw, len(numbers))
+        logger.info("📞 Selected %s for market %s (pool=%d)", chosen, market_raw, len(numbers))
         return chosen
 
     except Exception as exc:
-        logger.error("❌ Error fetching TextGrid numbers for %s: %s", market_raw, exc, exc_info=True)
+        logger.error("❌ Error fetching numbers for %s: %s", market_raw, exc, exc_info=True)
         return None
 
 # ───────────────────────────────────────────────────────────────────────────────
