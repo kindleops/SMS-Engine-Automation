@@ -50,7 +50,7 @@ CAMPAIGNS_BASE_ID = LEADS_CONVOS_BASE
 # Numbers table
 NUMBERS_TABLE = os.getenv("NUMBERS_TABLE", "Numbers")
 NUMBERS_MARKET_FIELD = os.getenv("NUMBERS_MARKET_FIELD", "Market")
-NUMBERS_PHONE_FIELD = os.getenv("NUMBERS_PHONE_FIELD", "A Number")
+NUMBERS_PHONE_FIELD = os.getenv("NUMBERS_PHONE_FIELD", "Number")
 NUMBERS_STATUS_FIELD = os.getenv("NUMBERS_STATUS_FIELD", "Status")
 NUMBERS_ACTIVE_FIELD = os.getenv("NUMBERS_ACTIVE_FIELD", "Active")
 
@@ -226,7 +226,7 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
 
         for rec in data:
             f = rec.get("fields", {}) or {}
-            num = f.get(NUMBERS_PHONE_FIELD) or f.get("A Number") or f.get("Phone") or f.get("Number")
+            num = f.get(NUMBERS_PHONE_FIELD) or f.get("Number") or f.get("Phone") or f.get("Number")
             active = f.get(NUMBERS_ACTIVE_FIELD)
             status = str(f.get(NUMBERS_STATUS_FIELD, "")).lower()
             if isinstance(num, str) and num.strip() and active and status == "active":
@@ -243,7 +243,7 @@ def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str
             resp = requests.get(url, headers=headers, params={"filterByFormula": formula_global}, timeout=10)
             for rec in (resp.json() or {}).get("records", []):
                 f = rec.get("fields", {}) or {}
-                num = f.get(NUMBERS_PHONE_FIELD) or f.get("A Number")
+                num = f.get(NUMBERS_PHONE_FIELD) or f.get("Number")
                 active = f.get(NUMBERS_ACTIVE_FIELD)
                 status = str(f.get(NUMBERS_STATUS_FIELD, "")).lower()
                 if isinstance(num, str) and num.strip() and active and status == "active":
