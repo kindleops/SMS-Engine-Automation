@@ -150,9 +150,9 @@ def _ensure_did(from_number: Optional[str], market: Optional[str]) -> str:
 
 
 def send_message(
-    to: str,
+    to: str,  # seller phone number
     body: str,
-    from_number: Optional[str] = None,
+    from_number: Optional[str] = None,  # your TextGrid number
     market: Optional[str] = None,
     lead_id: Optional[str] = None,
     property_id: Optional[str] = None,
@@ -163,40 +163,47 @@ def send_message(
     timeout: int = 10,
 ) -> Dict[str, Any]:
     """
-    Send an SMS/MMS via TextGrid and log it to the Conversations table.
-
-    Returns a dict with keys:
-        status: "sent" | "failed"
-        sid: provider message id (if any)
-        to: destination phone
-        from: sending DID
-        conversation_id: Airtable record id (if logging succeeded)
-        error: optional error string when failed
+    Send an SMS/MMS via TextGrid and log it properly (From=TextGrid DID, To=Seller).
     """
 
+    # Basic guards
     if not to or not body:
         return {"status": "failed", "error": "missing to/body", "to": to, "from": from_number}
+
+    if not str(to).startswith("+1"):
+        logger.warning("Skipping non-US number: %s", to)
+        return {"status": "skipped", "error": "non_us_number", "to": to, "from": from_number}
 
     if not (ACCOUNT_SID and AUTH_TOKEN and BASE_URL):
         return {"status": "failed", "error": "TextGrid credentials not configured", "to": to, "from": from_number}
 
     sender = _ensure_did(from_number, market)
-
     if not lead_id:
         lead_id, property_id = promote_to_lead(to, source=DEFAULT_PROCESSED_BY, conversation_fields=None)
 
-    data: Dict[str, Any] = {"To": to, "From": sender, "Body": body}
+    # ✅ Correct mapping
+    data: Dict[str, Any] = {
+        "To": to,                             # Seller Phone Number
+        "From": sender,                       # TextGrid Number (our DID)
+        "Body": body,
+        "CampaignId": campaign_id or os.getenv("TEXTGRID_CAMPAIGN_ID"),
+    }
+
     if media_urls:
-        for index, media in enumerate(media_urls):
-            key = "MediaUrl" if index == 0 else f"MediaUrl{index + 1}"
-            data[key] = media
+        for i, url in enumerate(media_urls):
+            data["MediaUrl" if i == 0 else f"MediaUrl{i+1}"] = url
+
+    # Debug output
+    logger.info("📤 TextGrid SEND DEBUG → %s", {k: v for k, v in data.items() if k != "Body"})
 
     try:
         response = _send_with_retry(BASE_URL, data=data, timeout=timeout, retries=retries)
         sid = response.get("sid") or response.get("message_sid") or response.get("id")
+
+        # ✅ Log correctly: From = TextGrid DID, To = Seller Phone
         convo_id = _log_conversation(
-            to,
-            sender,
+            sender,       # FROM
+            to,           # TO
             body,
             message_sid=sid,
             lead_id=lead_id,
@@ -204,14 +211,22 @@ def send_message(
             campaign_id=campaign_id,
             status=ConversationDeliveryStatus.SENT.value,
         )
+
         if lead_id:
-            touch_lead(lead_id, body=body, direction=ConversationDirection.OUTBOUND.value, status=ConversationDeliveryStatus.SENT.value)
+            touch_lead(
+                lead_id,
+                body=body,
+                direction=ConversationDirection.OUTBOUND.value,
+                status=ConversationDeliveryStatus.SENT.value,
+            )
+
         return {"status": "sent", "sid": sid, "to": to, "from": sender, "conversation_id": convo_id}
+
     except Exception as exc:
         logger.exception("TextGrid send failed for %s", to)
         convo_id = _log_conversation(
-            to,
-            sender,
+            sender,       # FROM
+            to,           # TO
             body,
             message_sid=None,
             lead_id=lead_id,
@@ -220,5 +235,10 @@ def send_message(
             status=ConversationDeliveryStatus.FAILED.value,
         )
         if lead_id:
-            touch_lead(lead_id, body=body, direction=ConversationDirection.OUTBOUND.value, status=ConversationDeliveryStatus.FAILED.value)
+            touch_lead(
+                lead_id,
+                body=body,
+                direction=ConversationDirection.OUTBOUND.value,
+                status=ConversationDeliveryStatus.FAILED.value,
+            )
         return {"status": "failed", "error": str(exc), "to": to, "from": sender, "conversation_id": convo_id}
