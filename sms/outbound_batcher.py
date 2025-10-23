@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
 from sms.airtable_schema import DripStatus
+
 # -------------------------------
 # pyairtable compatibility layer
 # -------------------------------
@@ -47,19 +48,20 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
 # =========================
 # ENV / CONFIG
 # =========================
-LEADS_BASE_ENV = "LEADS_CONVOS_BASE"  # Drip Queue base
-PERF_BASE_ENV = "PERFORMANCE_BASE"  # KPIs / Runs
+LEADS_BASE_ENV = "LEADS_CONVOS_BASE"   # Drip Queue base
+PERF_BASE_ENV = "PERFORMANCE_BASE"     # KPIs / Runs
 CONTROL_BASE_ENV = "CAMPAIGN_CONTROL_BASE"  # Numbers base
 
 DRIP_TABLE_NAME = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 NUMBERS_TABLE_NAME = os.getenv("NUMBERS_TABLE", "Numbers")
 CAMPAIGNS_TABLE_NAME = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
 
-# ---- Back-compat constants expected by tests / older code
+# Back-compat constants (some code expects these names)
 DRIP_QUEUE_TABLE = DRIP_TABLE_NAME
 NUMBERS_TABLE = NUMBERS_TABLE_NAME
 CAMPAIGNS_TABLE = CAMPAIGNS_TABLE_NAME
 
+# Canonical Drip field mappings (pulled from config.DRIP_FIELD_MAP)
 DRIP_STATUS_FIELD = DRIP_FIELDS["STATUS"]
 DRIP_CAMPAIGN_FIELD = DRIP_FIELDS["CAMPAIGN_LINK"]
 DRIP_TEMPLATE_FIELD = DRIP_FIELDS["TEMPLATE_LINK"]
@@ -95,11 +97,14 @@ UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 try:
-    import redis
+    import importlib
+    redis = importlib.import_module("redis")
 except Exception:
     redis = None
 try:
-    import requests
+    # use importlib again to avoid static import resolution errors for optional deps
+    import importlib as _importlib
+    requests = _importlib.import_module("requests")
 except Exception:
     requests = None
 
@@ -145,7 +150,6 @@ def _ct_tz():
         return policy.quiet_tz
     try:
         from zoneinfo import ZoneInfo  # type: ignore
-
         return ZoneInfo("America/Chicago")
     except Exception:
         return timezone.utc
@@ -164,7 +168,7 @@ def _parse_iso_maybe_ct(s: Any) -> Optional[datetime]:
     Accepts:
       - ISO with tz   → return as UTC
       - naive datetime string → interpret as Central and convert to UTC
-      - date-only 'YYYY-MM-DD' → interpret as that date at 09:00 Central (start of send window)
+      - date-only 'YYYY-MM-DD' → interpret as that date at quiet-end hour in Central
     """
     if not s:
         return None
@@ -200,13 +204,10 @@ def _first_env(*names: str) -> Optional[str]:
 def _api_key_for(base_env: str) -> Optional[str]:
     if base_env == PERF_BASE_ENV:
         return _first_env("AIRTABLE_REPORTING_KEY", "PERFORMANCE_KEY", "AIRTABLE_API_KEY")
-    # Leads/Convos
     if base_env == LEADS_BASE_ENV:
         return _first_env("AIRTABLE_ACQUISITIONS_KEY", "LEADS_CONVOS_KEY", "AIRTABLE_API_KEY")
-    # Campaign Control
     if base_env == CONTROL_BASE_ENV:
         return _first_env("AIRTABLE_COMPLIANCE_KEY", "CAMPAIGN_CONTROL_KEY", "AIRTABLE_API_KEY")
-    # default fallback
     return os.getenv("AIRTABLE_API_KEY")
 
 
@@ -608,18 +609,19 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         did = f.get(DRIP_FROM_NUMBER_FIELD)
         market = f.get(DRIP_MARKET_FIELD)
 
-        # Backfill DID
+        # Backfill DID if missing
         if not did and AUTO_BACKFILL_FROM_NUMBER:
             did, _num_id = pick_number_for_market(market)
             if did:
                 try:
-                    drip.update(rid, _remap_existing_only(drip, {"from_number": did, "From Number": did}))
+                    # Use the canonical field name; remap will align to actual column
+                    drip.update(rid, _remap_existing_only(drip, {DRIP_FROM_NUMBER_FIELD: did}))
                 except Exception:
                     traceback.print_exc()
 
         if not did:
             errors.append(f"No available number for {phone} (market={market})")
-            # push out a bit so we don't spin on it every loop
+            # Push out a bit so we don't spin every loop
             try:
                 new_time = (utcnow() + timedelta(seconds=NO_NUMBER_REQUEUE_SECONDS)).isoformat()
                 drip.update(rid, _remap_existing_only(drip, {DRIP_NEXT_SEND_DATE_FIELD: new_time}))
@@ -644,11 +646,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             traceback.print_exc()
 
         # Compose + send
-        body = (
-            f.get(DRIP_MESSAGE_PREVIEW_FIELD)
-            or f.get("message")
-            or ""
-        )
+        body = f.get(DRIP_MESSAGE_PREVIEW_FIELD) or f.get("message") or ""
         property_id = f.get(DRIP_PROPERTY_ID_FIELD)
 
         ok = False
@@ -657,7 +655,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             result = None
             if MessageProcessor:
                 try:
-                    # prefer signature that supports from_number
+                    # Prefer signature that supports from_number
                     result = MessageProcessor.send(
                         phone=phone,
                         body=body,
@@ -666,7 +664,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
                         direction="OUT",
                     )
                 except TypeError:
-                    # fallback to older signature
+                    # Fallback to older signature
                     result = MessageProcessor.send(
                         phone=phone,
                         body=body,
@@ -788,3 +786,4 @@ def reset_daily_quotas():
     Kept as a harmless stub so tests can monkeypatch it.
     """
     return {"ok": True, "note": "noop (stubbed in tests)"}
+
