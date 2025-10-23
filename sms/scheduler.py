@@ -337,11 +337,27 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
 
             # Fetch prospects in chunks of 100
             prospects: List[Dict[str, Any]] = []
-            for i in range(0, len(linked), 100):
-                chunk = linked[i:i+100]
+            for i in range(0, len(linked), 90):  # smaller chunk for safety
+                chunk = linked[i:i+90]
                 formula = "OR(" + ",".join([f"RECORD_ID()='{rid}'" for rid in chunk]) + ")"
-                resp = prospects_h.table.api.request("get", prospects_h.table.url, params={"filterByFormula": formula})
-                prospects.extend((resp or {}).get("records", []))
+
+                offset = None
+                while True:
+                    params = {"filterByFormula": formula, "pageSize": 100}
+                    if offset:
+                        params["offset"] = offset
+
+                    resp = prospects_h.table.api.request("get", prospects_h.table.url, params=params)
+                    if not resp:
+                        break
+
+                    records = (resp or {}).get("records", [])
+                    prospects.extend(records)
+
+                    offset = resp.get("offset")
+                    if not offset:
+                        break
+
                 time.sleep(CHUNK_SLEEP_SEC)
 
             # Telemetry holders (sample up to 10 ids per reason)
