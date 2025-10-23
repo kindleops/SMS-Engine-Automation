@@ -1,5 +1,5 @@
 # =====================================================
-#  REI SMS Engine — Full Render Deployment (Bulletproof)
+#  REI SMS Engine — Full Render Deployment (FINAL VERIFIED)
 # =====================================================
 
 services:
@@ -8,6 +8,7 @@ services:
     name: rei-sms-engine
     env: python
     plan: free
+    runtime: python3.11
     buildCommand: |
       pip install --upgrade pip setuptools wheel
       pip install --no-cache-dir -r requirements.txt
@@ -98,6 +99,7 @@ services:
     name: rei-sms-worker
     env: python
     plan: free
+    runtime: python3.11
     buildCommand: |
       pip install --upgrade pip setuptools wheel
       pip install --no-cache-dir -r requirements.txt
@@ -167,6 +169,7 @@ services:
     name: rei-autolinker
     env: python
     plan: free
+    runtime: python3.11
     buildCommand: |
       pip install --upgrade pip setuptools wheel
       pip install --no-cache-dir -r requirements.txt
@@ -191,7 +194,7 @@ services:
         value: "Leads"
 
 # =====================================================
-#  Cron Jobs — Scheduled API Orchestration
+#  Cron Jobs — Automated Engine Orchestration
 # =====================================================
 cronJobs:
   - name: run-autoresponder
