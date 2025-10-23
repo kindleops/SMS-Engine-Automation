@@ -166,32 +166,35 @@ services:
 
   # 🧠 AUTOLINKER — Airtable Relationship Sync
   - type: worker
-    name: rei-autolinker
-    env: python
-    plan: free
-    runtime: python3.11
-    buildCommand: |
-      pip install --upgrade pip setuptools wheel
-      pip install --no-cache-dir -r requirements.txt
-    startCommand: python -u -m sms.workers.autolinker_worker
-    autoDeploy: true
-    previews:
-      enabled: false
+    name: rei-sms-worker
+    env: docker
+    region: oregon
+    dockerfilePath: ./Dockerfile.sms
     envVars:
-      - key: AUTOLINKER_INTERVAL_SEC
-        value: "90"
-      - key: AUTOLINKER_BATCH
-        value: "200"
-      - key: AIRTABLE_API_KEY
-        sync: false
-      - key: LEADS_CONVOS_BASE
-        sync: false
-      - key: CONVERSATIONS_TABLE
-        value: "Conversations"
-      - key: PROSPECTS_TABLE
-        value: "Prospects"
-      - key: LEADS_TABLE
-        value: "Leads"
+    - key: SERVICE_CMD
+      value: python -m sms.worker
+    - key: WORKER_NAME
+      value: rei-sms-worker
+    - key: ENABLE_CAMPAIGNS
+      value: true
+    - key: ENABLE_SEND
+      value: true
+    - key: ENABLE_RETRY
+      value: true
+    - key: ENABLE_AUTORESPONDER
+      value: true
+    - key: ENABLE_METRICS
+      value: true
+    - key: REDIS_URL
+      sync: false
+    - key: AIRTABLE_API_KEY
+      sync: false
+    - key: TEXTGRID_API_KEY
+      sync: false
+    - key: LEADS_CONVOS_BASE
+      sync: false
+    - key: PERFORMANCE_BASE
+      sync: false
 
 # =====================================================
 #  Cron Jobs — Automated Engine Orchestration
