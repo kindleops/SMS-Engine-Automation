@@ -15,11 +15,6 @@ try:
 except Exception:
     _MP = None
 
-try:
-    from sms.textgrid_sender import send_message as _send_direct  # fallback
-except Exception:
-    _send_direct = None
-
 # ----------------- pyairtable compatibility -----------------
 _PyTable = None
 _PyApi = None
@@ -178,6 +173,10 @@ def _send(phone: str, body: str) -> None:
         if not res or res.get("status") != "sent":
             raise RuntimeError(res.get("error", "send_failed") if isinstance(res, dict) else "send_failed")
         return
+    try:
+        from sms.textgrid_sender import send_message as _send_direct
+    except Exception:
+        _send_direct = None
     if _send_direct:
         _send_direct(phone, body)
         return

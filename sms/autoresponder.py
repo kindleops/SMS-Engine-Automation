@@ -997,7 +997,7 @@ class Autoresponder:
             self.summary["errors"].append({"conversation": conv_id, "error": f"conversation update failed: {exc}"})
 
 
-def run_autoresponder(limit: int = 50, view: Optional[str] = None) -> Dict[str, Any]:
+def run_autoresponder(limit: int = 100, view: str | None = None) -> Dict[str, Any]:
     service = Autoresponder()
     return service.process(limit, view=view)
 
