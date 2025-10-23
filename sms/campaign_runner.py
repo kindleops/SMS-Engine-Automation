@@ -1,8 +1,20 @@
-"""Campaign runner that dequeues Drip Queue records and sends messages."""
+"""
+🚀 Bulletproof Asynchronous Campaign Runner
+------------------------------------------
+Processes Drip Queue records and sends SMS messages with:
+ - Quiet-hour enforcement
+ - Rate-limiting & jitter
+ - Retry & defer strategy
+ - Airtable-safe updates
+ - Parallel async execution
+"""
 
 from __future__ import annotations
 
+import asyncio
 import os
+import random
+import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -22,9 +34,12 @@ from sms.runtime import get_logger, iso_now
 
 logger = get_logger(__name__)
 
+# Field maps
 DRIP_FIELDS = drip_field_map()
 DRIP_FIELD_NAMES = DRIP_QUEUE_TABLE.field_names()
+CONV_FIELDS = conversations_field_map()
 
+# Column aliases
 DRIP_STATUS_FIELD = DRIP_FIELDS["Status"]
 DRIP_MESSAGE_FIELD = DRIP_FIELDS.get("Message Preview", "message_preview")
 DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS.get("SELLER_PHONE", "Seller Phone Number")
@@ -36,13 +51,14 @@ DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS.get("NEXT_SEND_DATE", "Next Send Date")
 DRIP_LAST_SENT_FIELD = DRIP_FIELD_NAMES.get("LAST_SENT", "Last Sent")
 DRIP_LAST_ERROR_FIELD = DRIP_FIELD_NAMES.get("LAST_ERROR", "Last Error")
 DRIP_PROCESSOR_FIELD = DRIP_FIELDS.get("PROCESSOR", "Processor")
-
-CONV_FIELDS = conversations_field_map()
 CONV_TO_FIELD = CONV_FIELDS["TO"]
 
 DEFAULT_PROCESSOR = os.getenv("CAMPAIGN_RUNNER_LABEL", ConversationProcessor.CAMPAIGN_RUNNER.value)
 
 
+# ---------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------
 def _parse_dt(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -62,16 +78,16 @@ def _link_id(value: Any) -> Optional[str]:
 
 def _quiet_window(now_utc: datetime, policy) -> tuple[bool, Optional[datetime]]:
     cfg = settings()
-    enabled = cfg.QUIET_HOURS_ENFORCED or bool(getattr(policy, "quiet_enforced", False))
+    enabled = cfg.QUIET_HOURS_ENFORCED or getattr(policy, "quiet_enforced", False)
     if not enabled:
         return False, None
 
-    start_hour = cfg.QUIET_START_HOUR if cfg.QUIET_START_HOUR is not None else getattr(policy, "quiet_start_hour", 21)
-    end_hour = cfg.QUIET_END_HOUR if cfg.QUIET_END_HOUR is not None else getattr(policy, "quiet_end_hour", 9)
-
     from zoneinfo import ZoneInfo
 
+    start_hour = cfg.QUIET_START_HOUR or getattr(policy, "quiet_start_hour", 21)
+    end_hour = cfg.QUIET_END_HOUR or getattr(policy, "quiet_end_hour", 9)
     tz_name = cfg.QUIET_TZ or getattr(policy, "quiet_tz_name", "America/Chicago")
+
     try:
         tz = ZoneInfo(tz_name)
     except Exception:
@@ -86,32 +102,35 @@ def _quiet_window(now_utc: datetime, policy) -> tuple[bool, Optional[datetime]]:
         next_allowed = end if in_quiet else local_now
     else:
         in_quiet = not (end <= local_now < start)
-        next_allowed = end if local_now < end else end + timedelta(days=1) if in_quiet else local_now
+        next_allowed = end if local_now < end else end + timedelta(days=1)
 
-    return in_quiet, next_allowed.astimezone(timezone.utc) if next_allowed else None
-
-
-def _coerce_positive_int(value: Any, default: int) -> int:
-    try:
-        ivalue = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(ivalue, 1)
+    return in_quiet, next_allowed.astimezone(timezone.utc)
 
 
+# ---------------------------------------------------------------
+# Main Class
+# ---------------------------------------------------------------
 class CampaignRunner:
-    def __init__(self, *, send_after_queue: bool = False) -> None:
+    def __init__(self, *, send_after_queue: bool = False, concurrency: int = 10) -> None:
         self.drip = CONNECTOR.drip_queue()
-        self.summary: Dict[str, Any] = {"sent": 0, "failed": 0, "deferred": 0, "errors": [], "ok": True}
+        self.summary: Dict[str, Any] = {
+            "sent": 0,
+            "failed": 0,
+            "deferred": 0,
+            "errors": [],
+            "ok": True,
+        }
         self.policy = get_policy()
         self.send_after_queue = send_after_queue
+        self.concurrency = max(1, concurrency)
 
-    def run(self, limit: int) -> Dict[str, Any]:
-        limit = _coerce_positive_int(limit, 50)
+    # -----------------------------------------------------------
+    async def run(self, limit: int) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         is_quiet, next_allowed = _quiet_window(now, self.policy)
         records = self._fetch_queue(limit)
         if not records:
+            self.summary["note"] = "No eligible records found"
             return self.summary.copy()
 
         if not self.send_after_queue:
@@ -119,26 +138,20 @@ class CampaignRunner:
             self.summary["queued_pending"] = len(records)
             return self.summary
 
-        for record in records:
-            fields = record.get("fields", {}) or {}
-            send_at = _parse_dt(fields.get(DRIP_NEXT_SEND_DATE_FIELD)) or now
-            if is_quiet and send_at <= now:
-                self._defer(record, next_allowed or now)
-                continue
-            if send_at > now:
-                self._defer(record, send_at)
-                continue
+        logger.info(f"📤 Processing {len(records)} queued drips...")
 
-            try:
-                self._process(record)
-            except Exception as exc:  # pragma: no cover - defensive guard
-                logger.exception("Campaign runner failed for %s", record.get("id"))
-                self.summary["failed"] += 1
-                self.summary["errors"].append({"drip_id": record.get("id"), "error": str(exc)})
+        # Process asynchronously with concurrency limit
+        sem = asyncio.Semaphore(self.concurrency)
+        tasks = [
+            self._process_wrapper(record, sem, is_quiet, next_allowed)
+            for record in records
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         self.summary["ok"] = not self.summary["errors"]
         return self.summary
 
+    # -----------------------------------------------------------
     def _fetch_queue(self, limit: int) -> List[Dict[str, Any]]:
         records = list_records(self.drip, max_records=limit * 3)
         eligible = []
@@ -151,40 +164,82 @@ class CampaignRunner:
                 break
         return eligible
 
-    def _process(self, record: Dict[str, Any]) -> None:
+    # -----------------------------------------------------------
+    async def _process_wrapper(self, record, sem: asyncio.Semaphore, is_quiet: bool, next_allowed: Optional[datetime]):
+        async with sem:
+            try:
+                await self._process(record, is_quiet, next_allowed)
+            except Exception as exc:
+                logger.exception(f"Unhandled error in _process_wrapper: {exc}")
+                self.summary["failed"] += 1
+                self.summary["errors"].append({"drip_id": record.get("id"), "error": str(exc)})
+
+    # -----------------------------------------------------------
+    async def _process(self, record: Dict[str, Any], is_quiet: bool, next_allowed: Optional[datetime]):
         fields = record.get("fields", {}) or {}
         message = fields.get(DRIP_MESSAGE_FIELD)
         phone = fields.get(DRIP_SELLER_PHONE_FIELD)
         from_number = fields.get(DRIP_FROM_NUMBER_FIELD) or fields.get(CONV_TO_FIELD)
+
+        # Check prerequisites
         if not phone or not message:
-            self.summary["errors"].append({"drip_id": record.get("id"), "error": "Missing phone or message"})
-            self.summary["failed"] += 1
-            self._mark_failed(record, "Missing phone or message")
+            await self._mark_failed(record, "Missing phone or message")
             return
 
-        template_id = _link_id(fields.get(DRIP_TEMPLATE_LINK_FIELD))
-        campaign_id = _link_id(fields.get(DRIP_CAMPAIGN_LINK_FIELD))
-        lead_id = _link_id(fields.get(DRIP_LEAD_LINK_FIELD))
+        # Quiet hours handling
+        now = datetime.now(timezone.utc)
+        send_at = _parse_dt(fields.get(DRIP_NEXT_SEND_DATE_FIELD)) or now
+        if is_quiet and send_at <= now:
+            await self._defer(record, next_allowed or now)
+            return
+        if send_at > now:
+            await self._defer(record, send_at)
+            return
 
-        result = MessageProcessor.send(
-            phone=str(phone),
-            body=str(message),
-            from_number=str(from_number) if from_number else None,
-            template_id=template_id,
-            campaign_id=campaign_id,
-            lead_id=lead_id,
-            direction=ConversationDirection.OUTBOUND.value,
-            metadata={"drip_queue_id": record.get("id")},
-        )
+        # Small random jitter between sends to prevent rate clustering
+        await asyncio.sleep(self.policy.jitter())
 
-        if result.get("status") == "sent":
-            self.summary["sent"] += 1
-            self._mark_sent(record, result.get("sid"))
-        else:
+        try:
+            result = await asyncio.to_thread(
+                MessageProcessor.send,
+                phone=str(phone),
+                body=str(message),
+                from_number=str(from_number) if from_number else None,
+                template_id=_link_id(fields.get(DRIP_TEMPLATE_LINK_FIELD)),
+                campaign_id=_link_id(fields.get(DRIP_CAMPAIGN_LINK_FIELD)),
+                lead_id=_link_id(fields.get(DRIP_LEAD_LINK_FIELD)),
+                direction=ConversationDirection.OUTBOUND.value,
+                metadata={"drip_queue_id": record.get("id")},
+            )
+
+            status = (result or {}).get("status")
+            sid = (result or {}).get("sid")
+            error = (result or {}).get("error")
+
+            if status == "sent":
+                await self._mark_sent(record, sid)
+                self.summary["sent"] += 1
+                logger.info(f"✅ Sent to {phone} (SID={sid})")
+            elif status in {"failed", "error"}:
+                await self._mark_failed(record, error or "Send failed")
+                self.summary["failed"] += 1
+                logger.warning(f"❌ Failed {phone}: {error}")
+            elif status == "rate_limited":
+                await self._defer(record, now + timedelta(minutes=2))
+                self.summary["deferred"] += 1
+                logger.info(f"⏸️ Deferred {phone} due to rate limit")
+            else:
+                await self._mark_failed(record, error or "Unknown status")
+                self.summary["failed"] += 1
+
+        except Exception as exc:
+            tb = traceback.format_exc()
+            await self._mark_failed(record, f"Unhandled error: {exc}")
+            logger.error(f"Unhandled send error: {exc}\n{tb}")
             self.summary["failed"] += 1
-            self._mark_failed(record, result.get("error") or "Send failed")
 
-    def _defer(self, record: Dict[str, Any], when: datetime) -> None:
+    # -----------------------------------------------------------
+    async def _defer(self, record: Dict[str, Any], when: datetime):
         update_record(
             self.drip,
             record["id"],
@@ -196,7 +251,8 @@ class CampaignRunner:
         )
         self.summary["deferred"] += 1
 
-    def _mark_sent(self, record: Dict[str, Any], sid: Optional[str]) -> None:
+    # -----------------------------------------------------------
+    async def _mark_sent(self, record: Dict[str, Any], sid: Optional[str]):
         update_record(
             self.drip,
             record["id"],
@@ -208,29 +264,38 @@ class CampaignRunner:
             },
         )
 
-    def _mark_failed(self, record: Dict[str, Any], error: str) -> None:
+    # -----------------------------------------------------------
+    async def _mark_failed(self, record: Dict[str, Any], error: str):
         update_record(
             self.drip,
             record["id"],
             {
                 DRIP_STATUS_FIELD: ConversationDeliveryStatus.FAILED.value,
-                DRIP_LAST_ERROR_FIELD: error,
+                DRIP_LAST_ERROR_FIELD: (error or "Unknown")[:500],
                 DRIP_PROCESSOR_FIELD: DEFAULT_PROCESSOR,
                 DRIP_NEXT_SEND_DATE_FIELD: iso_now(),
             },
         )
 
 
-def run_campaigns(limit: int = 50, send_after_queue: bool = False) -> Dict[str, Any]:
-    runner = CampaignRunner(send_after_queue=bool(send_after_queue))
-    return runner.run(_coerce_positive_int(limit, 50))
+# ---------------------------------------------------------------
+# Entry Points
+# ---------------------------------------------------------------
+async def run_campaigns(limit: int = 50, send_after_queue: bool = False, concurrency: int = 10) -> Dict[str, Any]:
+    runner = CampaignRunner(send_after_queue=bool(send_after_queue), concurrency=concurrency)
+    return await runner.run(limit)
+
+
+def run_campaigns_sync(limit: int = 50, send_after_queue: bool = False, concurrency: int = 10) -> Dict[str, Any]:
+    return asyncio.run(run_campaigns(limit=limit, send_after_queue=send_after_queue, concurrency=concurrency))
 
 
 def get_campaigns_table():
     return CONNECTOR.campaigns().table
 
 
-if __name__ == "__main__":  # pragma: no cover - manual invocation helper
+if __name__ == "__main__":  # pragma: no cover
     import pprint
 
-    pprint.pprint(run_campaigns(limit=int(os.getenv("RUN_LIMIT", "25"))))
+    result = run_campaigns_sync(limit=int(os.getenv("RUN_LIMIT", "25")), send_after_queue=True)
+    pprint.pprint(result)

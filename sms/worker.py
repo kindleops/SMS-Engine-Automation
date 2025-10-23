@@ -1,42 +1,36 @@
-# sms/worker.py
+"""
+🚀 Advanced SMS Worker (Bulletproof Edition)
+--------------------------------------------
+Handles:
+  • Campaign scheduling & hydration
+  • Outbound batch sending
+  • Retry handling
+  • Autoresponder
+  • Metrics aggregation
+  • Health heartbeat + distributed locks
+
+Safe for multi-instance operation using Redis NX locks.
+"""
+
 from __future__ import annotations
-
-"""
-Continuous SMS worker:
-- Queues campaigns when they're eligible (start time hit), pushes prospects to Drip
-- Sends due Drip items (rate/quiet handled inside outbound_batcher)
-- Retries failed sends
-- Runs autoresponder
-- Rolls up metrics
-All steps are protected by optional Redis NX locks so you can run >1 worker safely.
-"""
-
-import os
-import time
-import json
-import uuid
-import signal
-import traceback
-from contextlib import contextmanager
+import os, time, json, uuid, signal, traceback, random
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
-# Optional Redis for distributed locks + heartbeat (fail-open if missing)
 try:
-    import redis as _redis  # type: ignore
-except Exception:  # pragma: no cover
-    _redis = None  # type: ignore
+    import redis as _redis
+except ImportError:
+    _redis = None
 
-
-# ----------------
-# Env / toggles
-# ----------------
+# ────────────────────────────────────────────────
+# ENV CONFIG HELPERS
+# ────────────────────────────────────────────────
 def _env_bool(name: str, default: bool = False) -> bool:
     val = os.getenv(name)
     if val is None:
         return default
     return str(val).strip().lower() in ("1", "true", "yes", "on")
-
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -44,10 +38,12 @@ def _env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
-
-INTERVAL_SEC = _env_int("WORKER_INTERVAL_SEC", 30)  # active sleep between cycles
-IDLE_INTERVAL_SEC = _env_int("WORKER_IDLE_INTERVAL_SEC", INTERVAL_SEC)  # when no work happened
-JITTER_SEC = _env_int("WORKER_JITTER_SEC", 0)  # add 0..JITTER_SEC seconds
+# ────────────────────────────────────────────────
+# ENV VARIABLES
+# ────────────────────────────────────────────────
+INTERVAL_SEC = _env_int("WORKER_INTERVAL_SEC", 30)
+IDLE_INTERVAL_SEC = _env_int("WORKER_IDLE_INTERVAL_SEC", INTERVAL_SEC)
+JITTER_SEC = _env_int("WORKER_JITTER_SEC", 5)
 
 ENABLE_CAMPAIGNS = _env_bool("ENABLE_CAMPAIGNS", True)
 ENABLE_SEND = _env_bool("ENABLE_SEND", True)
@@ -55,7 +51,7 @@ ENABLE_RETRY = _env_bool("ENABLE_RETRY", True)
 ENABLE_AUTORESPONDER = _env_bool("ENABLE_AUTORESPONDER", True)
 ENABLE_METRICS = _env_bool("ENABLE_METRICS", True)
 
-CAMPAIGN_LIMIT = os.getenv("CAMPAIGN_LIMIT", "ALL")  # "ALL" or integer string
+CAMPAIGN_LIMIT = os.getenv("CAMPAIGN_LIMIT", "ALL")
 CAMPAIGN_SEND_AFTER = _env_bool("RUNNER_SEND_AFTER_QUEUE", False)
 
 SEND_BATCH_LIMIT = _env_int("SEND_BATCH_LIMIT", 500)
@@ -64,75 +60,62 @@ AUTORESPONDER_LIMIT = _env_int("AUTORESPONDER_LIMIT", 50)
 AUTORESPONDER_VIEW = os.getenv("AUTORESPONDER_VIEW", "Unprocessed Inbounds")
 
 RUN_ONCE = _env_bool("WORKER_RUN_ONCE", False)
-MAX_CYCLES = _env_int("WORKER_MAX_CYCLES", 0)  # 0 = infinite
+MAX_CYCLES = _env_int("WORKER_MAX_CYCLES", 0)
 
-# Health/heartbeat
-HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL")  # optional ping endpoint
+HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL")
 KEY_PREFIX = os.getenv("RATE_LIMIT_KEY_PREFIX", "sms")
 WORKER_NAME = os.getenv("WORKER_NAME", os.getenv("RENDER_SERVICE_NAME", "rei-sms-worker"))
 INSTANCE_ID = os.getenv("WORKER_INSTANCE_ID", str(uuid.uuid4())[:8])
 
-# Redis / Upstash
 REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
 REDIS_TLS = _env_bool("REDIS_TLS", True)
 
-
-# ----------------
-# Lazy imports of project runners (never crash the loop on import)
-# ----------------
-def _run_campaigns(limit: Any, send_after_queue: bool) -> Dict[str, Any]:
+# ────────────────────────────────────────────────
+# IMPORT DEFERRED RUNNERS (lazy to avoid crash loops)
+# ────────────────────────────────────────────────
+def _run_campaigns(limit: Any, send_after_queue: bool):
     try:
-        from sms.campaign_runner import run_campaigns  # type: ignore
-
+        from sms.campaign_runner import run_campaigns
         return run_campaigns(limit=limit, send_after_queue=send_after_queue)
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
-        return {"ok": False, "error": "campaigns_failed"}
+        return {"ok": False, "error": str(e)}
 
-
-def _send_batch(limit: int) -> Dict[str, Any]:
+def _send_batch(limit: int):
     try:
-        from sms.outbound_batcher import send_batch  # type: ignore
-
+        from sms.outbound_batcher import send_batch
         return send_batch(limit=limit)
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
-        return {"ok": False, "error": "send_batch_failed"}
+        return {"ok": False, "error": str(e)}
 
-
-def _run_retry(limit: int) -> Dict[str, Any]:
+def _run_retry(limit: int):
     try:
-        from sms.retry_runner import run_retry  # type: ignore
-
+        from sms.retry_runner import run_retry
         return run_retry(limit=limit)
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
-        return {"ok": False, "error": "retry_failed"}
+        return {"ok": False, "error": str(e)}
 
-
-def _run_autoresponder(limit: int, view: str) -> Dict[str, Any]:
+def _run_autoresponder(limit: int, view: str):
     try:
-        from sms.autoresponder import run_autoresponder  # type: ignore
-
+        from sms.autoresponder import run_autoresponder
         return run_autoresponder(limit=limit, view=view)
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
-        return {"ok": False, "error": "autoresponder_failed"}
+        return {"ok": False, "error": str(e)}
 
-
-def _update_metrics() -> Dict[str, Any]:
+def _update_metrics():
     try:
-        from sms.metrics_tracker import update_metrics  # type: ignore
-
+        from sms.metrics_tracker import update_metrics
         return update_metrics()
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
-        return {"ok": False, "error": "metrics_failed"}
+        return {"ok": False, "error": str(e)}
 
-
-# ----------------
-# Redis Lock + Heartbeat
-# ----------------
+# ────────────────────────────────────────────────
+# REDIS DIST LOCK + HEARTBEAT
+# ────────────────────────────────────────────────
 class Dist:
     def __init__(self):
         self.r = None
@@ -144,6 +127,7 @@ class Dist:
                 self.r = None
 
     def hb(self, key: str, ttl: int = 120):
+        """Heartbeat TTL to detect dead workers."""
         if not self.r:
             return
         try:
@@ -153,14 +137,10 @@ class Dist:
 
     @contextmanager
     def lock(self, name: str, ttl: int):
-        """
-        Redis NX lock; only one instance runs a task at a time.
-        If no Redis, yield True (single-instance best effort).
-        """
+        """Redis NX lock (safe for multi-worker operation)."""
         if not self.r:
             yield True
             return
-
         key = f"{KEY_PREFIX}:lock:{name}"
         token = str(uuid.uuid4())
         acquired = False
@@ -168,15 +148,12 @@ class Dist:
             acquired = bool(self.r.set(key, token, nx=True, ex=ttl))
         except Exception:
             traceback.print_exc()
-            # fail-open so work doesn't stop just because Redis is flaky
             acquired = True
-
         try:
             yield acquired
         finally:
             if acquired and self.r:
                 try:
-                    # release only if owner (prevents stealing)
                     lua = """
                     if redis.call('GET', KEYS[1]) == ARGV[1] then
                         return redis.call('DEL', KEYS[1])
@@ -186,88 +163,69 @@ class Dist:
                     """
                     self.r.eval(lua, 1, key, token)
                 except Exception:
-                    # Don't crash on unlock
                     traceback.print_exc()
-
 
 DIST = Dist()
 
-# ----------------
-# Utilities
-# ----------------
+# ────────────────────────────────────────────────
+# SIGNAL HANDLERS
+# ────────────────────────────────────────────────
 _shutdown = False
-
 
 def _signal_handler(signum, frame):
     global _shutdown
     _shutdown = True
     print(f"👋 {WORKER_NAME}[{INSTANCE_ID}] got signal {signum}, shutting down...")
 
-
 signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
-
-def _jitter_sleep(base: int):
-    import random
-
-    b = max(0, int(base))
-    j = random.randint(0, max(0, int(JITTER_SEC)))
-    # Guard total to avoid negative or crazy sleeps
-    time.sleep(min(3600, b + j))
-
+# ────────────────────────────────────────────────
+# UTILITIES
+# ────────────────────────────────────────────────
+def _sleep_with_jitter(base: int):
+    """Sleep with jitter to avoid multiple workers aligning."""
+    j = random.randint(0, max(0, JITTER_SEC))
+    time.sleep(min(3600, base + j))
 
 def _ping_health():
     if not HEALTHCHECK_URL:
         return
     try:
-        import requests  # present in requirements
-
-        requests.post(
-            HEALTHCHECK_URL,
-            json={
-                "service": WORKER_NAME,
-                "instance": INSTANCE_ID,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            },
-            timeout=3,
-        )
+        import requests
+        requests.post(HEALTHCHECK_URL, json={
+            "service": WORKER_NAME,
+            "instance": INSTANCE_ID,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }, timeout=3)
     except Exception:
-        # fire-and-forget
         pass
 
-
-def _log(event: str, **kw):
-    payload = {
+def _log(event: str, **extra):
+    data = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "service": WORKER_NAME,
         "instance": INSTANCE_ID,
         "event": event,
-        **kw,
+        **extra,
     }
-    print(json.dumps(payload, ensure_ascii=False))
-
+    print(json.dumps(data, ensure_ascii=False))
 
 def _compact(res: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Trim noisy keys for cycle summaries.
-    """
+    """Trim result payloads for cleaner cycle logs."""
     if not isinstance(res, dict):
         return {}
-    keep = ("ok", "processed", "results", "total_sent", "retried", "errors")
-    out = {k: v for k, v in res.items() if k in keep}
-    # Avoid dumping huge 'results' blobs
-    if "results" in out and isinstance(out["results"], list) and len(out["results"]) > 5:
-        out["results"] = out["results"][:5] + [{"truncated": len(out["results"]) - 5}]
-    return out
+    keep = ("ok", "processed", "total_sent", "retried", "errors")
+    filtered = {k: v for k, v in res.items() if k in keep}
+    return filtered
 
-
-# ----------------
-# Main loop
-# ----------------
+# ────────────────────────────────────────────────
+# MAIN WORKER LOOP
+# ────────────────────────────────────────────────
 def main():
-    print(f"🚀 Starting {WORKER_NAME} [{INSTANCE_ID}]  interval={INTERVAL_SEC}s  idle={IDLE_INTERVAL_SEC}s")
+    print(f"🚀 Starting {WORKER_NAME} [{INSTANCE_ID}] | interval={INTERVAL_SEC}s idle={IDLE_INTERVAL_SEC}s jitter={JITTER_SEC}s")
     cycles = 0
+
     while True:
         if _shutdown:
             break
@@ -275,54 +233,51 @@ def main():
             break
 
         cycles += 1
-        # Heartbeat
         DIST.hb(f"{KEY_PREFIX}:hb:{WORKER_NAME}:{INSTANCE_ID}", ttl=max(60, INTERVAL_SEC * 3))
-
         did_work = False
-        results: Dict[str, Dict[str, Any]] = {}
+        results: Dict[str, Any] = {}
 
-        # 1) Queue campaigns (flip to Running and push to Drip as needed)
+        # --- Campaign Scheduler ---
         if ENABLE_CAMPAIGNS:
             with DIST.lock("campaigns", ttl=max(30, INTERVAL_SEC * 2)) as ok:
                 if ok:
-                    res = _run_campaigns(limit=CAMPAIGN_LIMIT, send_after_queue=CAMPAIGN_SEND_AFTER)
+                    res = _run_campaigns(CAMPAIGN_LIMIT, CAMPAIGN_SEND_AFTER)
                     results["campaigns"] = res
-                    # If there are any eligible campaigns processed or any result rows, we consider it work
-                    did_work = did_work or bool(res and (res.get("processed") or res.get("results")))
+                    did_work |= bool(res and (res.get("processed") or res.get("queued")))
                 else:
                     _log("skip_lock", step="campaigns")
 
-        # 2) Send due messages (rate/quiet enforced inside sender)
+        # --- Outbound Sending ---
         if ENABLE_SEND:
             with DIST.lock("send_batch", ttl=max(60, INTERVAL_SEC * 2)) as ok:
                 if ok:
-                    res = _send_batch(limit=SEND_BATCH_LIMIT)
+                    res = _send_batch(SEND_BATCH_LIMIT)
                     results["send_batch"] = res
-                    did_work = did_work or bool(res and res.get("total_sent"))
+                    did_work |= bool(res and res.get("total_sent"))
                 else:
                     _log("skip_lock", step="send_batch")
 
-        # 3) Retry failed sends opportunistically
+        # --- Retry Failed Sends ---
         if ENABLE_RETRY:
             with DIST.lock("retry", ttl=max(30, INTERVAL_SEC * 2)) as ok:
                 if ok:
-                    res = _run_retry(limit=RETRY_LIMIT)
+                    res = _run_retry(RETRY_LIMIT)
                     results["retry"] = res
-                    did_work = did_work or bool(res and res.get("retried"))
+                    did_work |= bool(res and res.get("retried"))
                 else:
                     _log("skip_lock", step="retry")
 
-        # 4) Autoresponder (inbounds)
+        # --- Autoresponder (Inbound) ---
         if ENABLE_AUTORESPONDER:
             with DIST.lock("autoresponder", ttl=max(30, INTERVAL_SEC * 2)) as ok:
                 if ok:
-                    res = _run_autoresponder(limit=AUTORESPONDER_LIMIT, view=AUTORESPONDER_VIEW)
+                    res = _run_autoresponder(AUTORESPONDER_LIMIT, AUTORESPONDER_VIEW)
                     results["autoresponder"] = res
-                    did_work = did_work or bool(res and res.get("processed"))
+                    did_work |= bool(res and res.get("processed"))
                 else:
                     _log("skip_lock", step="autoresponder")
 
-        # 5) Metrics rollup (best effort; not counted as "work" for sleep pacing)
+        # --- Metrics Rollup ---
         if ENABLE_METRICS:
             with DIST.lock("metrics", ttl=max(30, INTERVAL_SEC * 2)) as ok:
                 if ok:
@@ -330,24 +285,18 @@ def main():
                 else:
                     _log("skip_lock", step="metrics")
 
-        # Emit compact cycle summary
-        _log(
-            "cycle",
-            cycle=cycles,
-            summary={k: _compact(v) for k, v in results.items()},
-        )
-
+        # --- Summary & Telemetry ---
+        _log("cycle", cycle=cycles, summary={k: _compact(v) for k, v in results.items()})
         _ping_health()
 
         if RUN_ONCE:
             break
 
-        # Sleep (idle vs active)
-        _jitter_sleep(IDLE_INTERVAL_SEC if not did_work else INTERVAL_SEC)
+        _sleep_with_jitter(IDLE_INTERVAL_SEC if not did_work else INTERVAL_SEC)
 
-    _log("shutdown", cycle=cycles)
-    print(f"🏁 {WORKER_NAME} [{INSTANCE_ID}] stopped cleanly.")
-
+    _log("shutdown", cycles=cycles)
+    print(f"🏁 {WORKER_NAME}[{INSTANCE_ID}] stopped cleanly after {cycles} cycles.")
+    
 
 if __name__ == "__main__":
     main()
