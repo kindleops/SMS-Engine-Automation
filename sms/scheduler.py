@@ -268,14 +268,14 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
         templates_h = CONNECTOR.templates()
 
         # Pull ALL campaigns, then process all with Status == Scheduled
-        campaigns = list_records(campaigns_h, page_size=1000)
+        campaigns = list_records(campaigns_h, page_size=100)
         # Sort by Start Time so multiple scheduled campaigns run predictably
         def _start(f): 
             return _parse_iso((f.get("fields") or {}).get(CAMPAIGN_START_FIELD)) or datetime.now(timezone.utc)
         campaigns_sorted = sorted(campaigns, key=_start)
 
         # Build de-dupe set from existing drip (campaign + last10)
-        existing = list_records(drip_h, page_size=1000)
+        existing = list_records(drip_h, page_size=100)
         existing_pairs = {
             (
                 ((f.get("fields") or {}).get(DRIP_CAMPAIGN_LINK_FIELD) or [None])[0],
