@@ -22,12 +22,6 @@ try:
 except Exception:
     _ATTable = None
 
-# Optional SMS (best effort)
-try:
-    from sms.textgrid_sender import send_message
-except Exception:
-    send_message = None
-
 # ───────────────────────────────────────── Alerts / thresholds ───────────────────────────────────
 ALERT_PHONE: str | None = os.getenv("ALERT_PHONE")
 ALERT_EMAIL_WEBHOOK: str | None = os.getenv("ALERT_EMAIL_WEBHOOK")  # must be http(s) to send
@@ -166,11 +160,16 @@ def _safe_len(x) -> int:
 def _notify(msg: str) -> None:
     print(f"🚨 ALERT: {msg}")
     # SMS alert (best effort)
-    if ALERT_PHONE and send_message:
+    if ALERT_PHONE:
         try:
-            send_message(ALERT_PHONE, msg)
-        except Exception as e:
-            print(f"❌ SMS alert failed: {e}")
+            from sms.textgrid_sender import send_message as _send_alert
+        except Exception:
+            _send_alert = None
+        if _send_alert:
+            try:
+                _send_alert(ALERT_PHONE, msg)
+            except Exception as e:
+                print(f"❌ SMS alert failed: {e}")
     # Webhook (Slack/Teams/email-gateway URL ONLY)
     if ALERT_EMAIL_WEBHOOK and str(ALERT_EMAIL_WEBHOOK).startswith(("http://", "https://")):
         try:

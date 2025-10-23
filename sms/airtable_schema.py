@@ -384,19 +384,20 @@ CONVERSATIONS_TABLE = TableDefinition(
 
 def conversations_field_map() -> Dict[str, str]:
     """
-    Convenience accessor mirroring the legacy CONV_FIELDS dict:
+    Convenience accessor mirroring the legacy CONV_FIELDS dict with the
+    correct directionality for TextGrid transports:
 
         {
-            "FROM": "Seller Phone Number",
-            "TO": "TextGrid Phone Number",
+            "FROM": "TextGrid Number",
+            "TO": "Seller Phone Number",
             ...
         }
     """
 
     fields = CONVERSATIONS_TABLE.fields
     return {
-        "FROM": fields["SELLER_PHONE"].resolve(),
-        "TO": fields["TEXTGRID_PHONE"].resolve(),
+        "FROM": fields["TEXTGRID_PHONE"].resolve(),
+        "TO": fields["SELLER_PHONE"].resolve(),
         "BODY": fields["MESSAGE"].resolve(),
         "STATUS": fields["STATUS"].resolve(),
         "DIRECTION": fields["DIRECTION"].resolve(),

@@ -11,9 +11,9 @@ Processes Drip Queue records and sends SMS messages with:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import random
+import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -39,23 +39,14 @@ DRIP_FIELDS = drip_field_map()
 DRIP_FIELD_NAMES = DRIP_QUEUE_TABLE.field_names()
 CONV_FIELDS = conversations_field_map()
 
-
-def _resolve_status_field() -> str:
-    """Return the active delivery status column for the drip queue."""
-
-    direct = DRIP_FIELDS.get("STATUS") or DRIP_FIELD_NAMES.get("STATUS")
-    if direct:
-        return direct
-
-    for value in list(DRIP_FIELDS.values()) + list(DRIP_FIELD_NAMES.values()):
-        if isinstance(value, str) and value.strip().lower() == "delivery status":
-            return value
-
-    return "Delivery Status"
-
-
 # Column aliases
-DRIP_STATUS_FIELD = _resolve_status_field()
+DRIP_STATUS_FIELD = (
+    DRIP_FIELDS.get("Status")
+    or DRIP_FIELDS.get("STATUS")
+    or DRIP_FIELDS.get("Delivery Status")
+    or DRIP_FIELDS.get("DELIVERY_STATUS")
+    or "Delivery Status"
+)
 DRIP_MESSAGE_FIELD = DRIP_FIELDS.get("Message Preview", "message_preview")
 DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS.get("SELLER_PHONE", "Seller Phone Number")
 DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS.get("TEXTGRID_PHONE_NUMBER", "TextGrid Phone Number")
@@ -140,7 +131,7 @@ class CampaignRunner:
         self.concurrency = max(1, concurrency)
 
     # -----------------------------------------------------------
-    async def run(self, limit: int) -> Dict[str, Any]:
+    def run(self, limit: int) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         is_quiet, next_allowed = _quiet_window(now, self.policy)
         records = self._fetch_queue(limit)
@@ -155,13 +146,16 @@ class CampaignRunner:
 
         logger.info(f"📤 Processing {len(records)} queued drips...")
 
-        # Process asynchronously with concurrency limit
-        sem = asyncio.Semaphore(self.concurrency)
-        tasks = [
-            self._process_wrapper(record, sem, is_quiet, next_allowed)
-            for record in records
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        for record in records:
+            try:
+                self._process(record, is_quiet, next_allowed)
+            except Exception as exc:
+                logger.exception(f"Unhandled error in run: {exc}")
+                self.summary["failed"] += 1
+                self.summary["errors"].append({
+                    "drip_id": record.get("id"),
+                    "error": str(exc),
+                })
 
         self.summary["ok"] = not self.summary["errors"]
         return self.summary
@@ -180,17 +174,7 @@ class CampaignRunner:
         return eligible
 
     # -----------------------------------------------------------
-    async def _process_wrapper(self, record, sem: asyncio.Semaphore, is_quiet: bool, next_allowed: Optional[datetime]):
-        async with sem:
-            try:
-                await self._process(record, is_quiet, next_allowed)
-            except Exception as exc:
-                logger.exception(f"Unhandled error in _process_wrapper: {exc}")
-                self.summary["failed"] += 1
-                self.summary["errors"].append({"drip_id": record.get("id"), "error": str(exc)})
-
-    # -----------------------------------------------------------
-    async def _process(self, record: Dict[str, Any], is_quiet: bool, next_allowed: Optional[datetime]):
+    def _process(self, record: Dict[str, Any], is_quiet: bool, next_allowed: Optional[datetime]):
         fields = record.get("fields", {}) or {}
         message = fields.get(DRIP_MESSAGE_FIELD)
         phone = fields.get(DRIP_SELLER_PHONE_FIELD)
@@ -198,25 +182,29 @@ class CampaignRunner:
 
         # Check prerequisites
         if not phone or not message:
-            await self._mark_failed(record, "Missing phone or message")
+            self._mark_failed(record, "Missing phone or message")
             return
 
         # Quiet hours handling
         now = datetime.now(timezone.utc)
         send_at = _parse_dt(fields.get(DRIP_NEXT_SEND_DATE_FIELD)) or now
         if is_quiet and send_at <= now:
-            await self._defer(record, next_allowed or now)
+            self._defer(record, next_allowed or now)
             return
         if send_at > now:
-            await self._defer(record, send_at)
+            self._defer(record, send_at)
             return
 
         # Small random jitter between sends to prevent rate clustering
-        await asyncio.sleep(self.policy.jitter())
+        try:
+            jitter = float(self.policy.jitter())
+        except Exception:
+            jitter = random.random()
+        if jitter > 0:
+            time.sleep(min(jitter, 5))
 
         try:
-            result = await asyncio.to_thread(
-                MessageProcessor.send,
+            result = MessageProcessor.send(
                 phone=str(phone),
                 body=str(message),
                 from_number=str(from_number) if from_number else None,
@@ -232,29 +220,29 @@ class CampaignRunner:
             error = (result or {}).get("error")
 
             if status == "sent":
-                await self._mark_sent(record, sid)
+                self._mark_sent(record, sid)
                 self.summary["sent"] += 1
                 logger.info(f"✅ Sent to {phone} (SID={sid})")
             elif status in {"failed", "error"}:
-                await self._mark_failed(record, error or "Send failed")
+                self._mark_failed(record, error or "Send failed")
                 self.summary["failed"] += 1
                 logger.warning(f"❌ Failed {phone}: {error}")
             elif status == "rate_limited":
-                await self._defer(record, now + timedelta(minutes=2))
+                self._defer(record, now + timedelta(minutes=2))
                 self.summary["deferred"] += 1
                 logger.info(f"⏸️ Deferred {phone} due to rate limit")
             else:
-                await self._mark_failed(record, error or "Unknown status")
+                self._mark_failed(record, error or "Unknown status")
                 self.summary["failed"] += 1
 
         except Exception as exc:
             tb = traceback.format_exc()
-            await self._mark_failed(record, f"Unhandled error: {exc}")
+            self._mark_failed(record, f"Unhandled error: {exc}")
             logger.error(f"Unhandled send error: {exc}\n{tb}")
             self.summary["failed"] += 1
 
     # -----------------------------------------------------------
-    async def _defer(self, record: Dict[str, Any], when: datetime):
+    def _defer(self, record: Dict[str, Any], when: datetime):
         update_record(
             self.drip,
             record["id"],
@@ -267,7 +255,7 @@ class CampaignRunner:
         self.summary["deferred"] += 1
 
     # -----------------------------------------------------------
-    async def _mark_sent(self, record: Dict[str, Any], sid: Optional[str]):
+    def _mark_sent(self, record: Dict[str, Any], sid: Optional[str]):
         update_record(
             self.drip,
             record["id"],
@@ -280,7 +268,7 @@ class CampaignRunner:
         )
 
     # -----------------------------------------------------------
-    async def _mark_failed(self, record: Dict[str, Any], error: str):
+    def _mark_failed(self, record: Dict[str, Any], error: str):
         update_record(
             self.drip,
             record["id"],
@@ -296,13 +284,13 @@ class CampaignRunner:
 # ---------------------------------------------------------------
 # Entry Points
 # ---------------------------------------------------------------
-async def run_campaigns(limit: int = 50, send_after_queue: bool = False, concurrency: int = 10) -> Dict[str, Any]:
+def run_campaigns(limit: int = 50, send_after_queue: bool = False, concurrency: int = 10) -> Dict[str, Any]:
     runner = CampaignRunner(send_after_queue=bool(send_after_queue), concurrency=concurrency)
-    return await runner.run(limit)
+    return runner.run(limit)
 
 
 def run_campaigns_sync(limit: int = 50, send_after_queue: bool = False, concurrency: int = 10) -> Dict[str, Any]:
-    return asyncio.run(run_campaigns(limit=limit, send_after_queue=send_after_queue, concurrency=concurrency))
+    return run_campaigns(limit=limit, send_after_queue=send_after_queue, concurrency=concurrency)
 
 
 def get_campaigns_table():
