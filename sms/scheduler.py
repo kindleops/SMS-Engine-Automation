@@ -171,107 +171,98 @@ def _render_message(template: str, pf: Dict[str, Any]) -> str:
     return result.strip()
 
 # ======================================================
-# NUMBERS LOOKUP (FINAL PRODUCTION VERSION — TABLE ID SAFE)
+# NUMBERS LOOKUP (MARKET-ISOLATED ROTATION — FINAL)
 # ======================================================
 
 _numbers_cache: Dict[str, List[str]] = {}
 _rotation_index: Dict[str, int] = {}
 
-
 def _normalize_market_key(raw: Optional[str]) -> str:
-    """Normalize market name for consistent lookup."""
+    """Lowercase + trim punctuation for stable dict keys."""
     if not raw:
         return ""
     return str(raw).strip().lower().replace(",", "").replace(".", "")
 
-
-def _choose_rotating_number(market: str, numbers: List[str]) -> Optional[str]:
-    """Round-robin rotation through available numbers per market."""
+def _choose_rotating_number(market_key: str, numbers: List[str]) -> Optional[str]:
+    """Rotate sequentially through a list of numbers for this market."""
     if not numbers:
         return None
-    key = _normalize_market_key(market)
-    idx = _rotation_index.get(key, 0)
+    idx = _rotation_index.get(market_key, 0)
     chosen = numbers[idx % len(numbers)]
-    _rotation_index[key] = idx + 1
+    _rotation_index[market_key] = idx + 1
     return chosen
-
 
 def _fetch_textgrid_number_for_market(market_raw: Optional[str]) -> Optional[str]:
     """
-    Fetch a TextGrid number from the Numbers table.
-    Works with single-select 'Market' field and falls back globally.
+    Retrieve active TextGrid numbers for the specified market.
+    Keeps rotation separate per market, and only uses global fallback
+    if absolutely no market-specific numbers exist.
     """
     if not market_raw:
         logger.warning("⚠️ Missing market input for number fetch.")
         return None
 
     market_key = _normalize_market_key(market_raw)
-    if not market_key:
-        return None
+    numbers_table_id = "tblWG3Z2bkZF6k16n"
+    url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{numbers_table_id}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}", "Content-Type": "application/json"}
 
-    # Cache shortcut
-    if market_key in _numbers_cache and _numbers_cache[market_key]:
-        chosen = _choose_rotating_number(market_key, _numbers_cache[market_key])
+    # ✅ Use cached market pool if available
+    cached_pool = _numbers_cache.get(market_key)
+    if cached_pool:
+        chosen = _choose_rotating_number(market_key, cached_pool)
         logger.info("🔁 (Cache) Using %s for market %s", chosen, market_raw)
         return chosen
 
-    # ✅ Use TABLE ID for absolute reliability
-    numbers_table_id = "tblWG3Z2bkZF6k16n"
-    url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{numbers_table_id}"
-    headers = {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    # Exact match for single select
-    formula = (
-        f"AND("
-        f"{{Market}}='{market_raw}',"
-        f"OR({{Active}}=1,{{Active}}='true'),"
-        f"LOWER({{Status}})='active'"
-        f")"
-    )
-
     try:
-        logger.info(f"🔍 Looking up TextGrid numbers for market: {market_raw}")
+        # 1️⃣ Query exact single-select match
+        formula = (
+            f"AND("
+            f"{{Market}}='{market_raw}',"
+            f"OR({{Active}}=1,{{Active}}='true'),"
+            f"LOWER({{Status}})='active'"
+            f")"
+        )
+        logger.info("🔍 Fetching TextGrid numbers for market '%s'", market_raw)
         resp = requests.get(url, headers=headers, params={"filterByFormula": formula, "pageSize": 100}, timeout=12)
-        data = (resp.json() or {}).get("records", [])
+        recs = (resp.json() or {}).get("records", [])
+        market_numbers = [
+            r["fields"]["Number"].strip()
+            for r in recs
+            if r.get("fields", {}).get("Number")
+            and r["fields"].get("Active")
+            and str(r["fields"].get("Status", "")).lower() == "active"
+        ]
 
-        numbers: List[str] = []
-        for rec in data:
-            fields = rec.get("fields", {})
-            num = fields.get("Number")
-            active = fields.get("Active")
-            status = str(fields.get("Status", "")).lower()
-            if isinstance(num, str) and num.strip() and active and status == "active":
-                numbers.append(num.strip())
+        # 2️⃣ If none, fall back to global pool (but don't cache globally!)
+        if not market_numbers:
+            logger.warning("⚠️ No numbers for '%s' — using global active pool.", market_raw)
+            fb_formula = "AND(OR({Active}=1,{Active}='true'),LOWER({Status})='active')"
+            fb_resp = requests.get(url, headers=headers, params={"filterByFormula": fb_formula, "pageSize": 100}, timeout=12)
+            fb_recs = (fb_resp.json() or {}).get("records", [])
+            global_numbers = [
+                r["fields"]["Number"].strip()
+                for r in fb_recs
+                if r.get("fields", {}).get("Number")
+                and r["fields"].get("Active")
+                and str(r["fields"].get("Status", "")).lower() == "active"
+            ]
+            if not global_numbers:
+                logger.error("🚫 No active TextGrid numbers found at all.")
+                return None
+            # ✅ Do NOT cache the global pool under this market — temporary use only
+            chosen = _choose_rotating_number("_global", global_numbers)
+            logger.info("📞 Selected %s from global pool (count=%d)", chosen, len(global_numbers))
+            return chosen
 
-        # 🧩 Fallback to global active pool if none found
-        if not numbers:
-            logger.warning(f"⚠️ No numbers matched '{market_raw}' — using global active pool.")
-            fallback_formula = "AND(OR({Active}=1,{Active}='true'),LOWER({Status})='active')"
-            resp = requests.get(url, headers=headers, params={"filterByFormula": fallback_formula, "pageSize": 100}, timeout=12)
-            data = (resp.json() or {}).get("records", [])
-            for rec in data:
-                fields = rec.get("fields", {})
-                num = fields.get("Number")
-                active = fields.get("Active")
-                status = str(fields.get("Status", "")).lower()
-                if isinstance(num, str) and num.strip() and active and status == "active":
-                    numbers.append(num.strip())
-
-        if not numbers:
-            logger.error("🚫 No active TextGrid numbers found in any market.")
-            return None
-
-        # Cache and rotate
-        _numbers_cache[market_key] = numbers
-        chosen = _choose_rotating_number(market_key, numbers)
-        logger.info("📞 Selected %s for market %s (pool=%d)", chosen, market_raw, len(numbers))
+        # 3️⃣ Cache & rotate this market’s pool
+        _numbers_cache[market_key] = market_numbers
+        chosen = _choose_rotating_number(market_key, market_numbers)
+        logger.info("📞 Selected %s for %s (pool=%d)", chosen, market_raw, len(market_numbers))
         return chosen
 
     except Exception as exc:
-        logger.error("❌ Error fetching TextGrid numbers for %s: %s", market_raw, exc, exc_info=True)
+        logger.error("❌ Error fetching numbers for %s: %s", market_raw, exc, exc_info=True)
         return None
 
 # ───────────────────────────────────────────────────────────────
