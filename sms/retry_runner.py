@@ -15,7 +15,6 @@ from sms.airtable_schema import (
 from sms.datastore import CONNECTOR, list_records, update_record
 from sms.dispatcher import get_policy
 from sms.runtime import get_logger, iso_now
-from sms.textgrid_sender import send_message as _send_direct
 
 try:  # Optional richer retry path that also updates linked tables
     from sms.message_processor import MessageProcessor as _Processor  # type: ignore
@@ -183,6 +182,7 @@ class RetryRunner:
                 direction=ConversationDirection.OUTBOUND.value,
                 metadata={"retry": True},
             )
+        from sms.textgrid_sender import send_message as _send_direct
         return _send_direct(
             phone,
             body,
