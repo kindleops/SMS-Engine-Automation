@@ -1,204 +1,137 @@
 # sms/main.py
 from __future__ import annotations
 
+"""
+REI SMS Engine — Enterprise Async Main (v3.0)
+- Runs on Render & Docker
+- Full async endpoints with immediate Airtable Runs/KPIs logging
+- Strict quiet-hours, CRON token auth, TEST_MODE gating
+- Defensive imports & graceful fallbacks
+- Fine-grained telemetry + per-step error isolation
+"""
+
+import asyncio
 import os
+import json
+import traceback
 from datetime import datetime, timezone, date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable, Awaitable, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from dotenv import load_dotenv
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
-from sms.dispatcher import get_policy
-
-# ───────────────────────────── Load .env ─────────────────────────────
+# ───────────────────────────── Load .env early ─────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
-# ─────────────────────── Safe Airtable helpers ───────────────────────
+# ─────────────────────────── Project policy (quiet hours) ───────────────────
+from sms.dispatcher import get_policy
+
+_POLICY = get_policy()
+
+# ─────────────────────────── Lazy & guarded imports ─────────────────────────
+def _guarded_import(path: str, attr: Optional[str] = None, fallback: Any = None):
+    try:
+        module = __import__(path, fromlist=[attr] if attr else [])
+        return getattr(module, attr) if attr else module
+    except Exception:
+        return fallback
+
+# Airtable safe helpers (all optional):
 try:
     from sms.airtable_client import (
         get_runs, get_kpis, get_leads, get_convos, get_templates,
         safe_create, remap_existing_only,
     )
 except Exception:
-    get_runs = get_kpis = get_leads = get_convos = get_templates = lambda: None
+    get_runs = get_kpis = get_leads = get_convos = get_templates = lambda: None  # type: ignore
     def safe_create(*_a, **_k): return None  # type: ignore
     def remap_existing_only(*_a, **_k): return {}  # type: ignore
 
-# ───────────────────── Core engine modules (guarded) ─────────────────
-try:
-    from sms.outbound_batcher import send_batch
-except Exception:
-    def send_batch(*_a, **_k): return {"ok": False, "error": "send_batch unavailable"}
+# Outbound batcher
+_send_batch = _guarded_import("sms.outbound_batcher", "send_batch", fallback=None)
 
+# Autoresponder (two possible names in tree)
 def _build_autoresponder():
-    try:
-        from sms.autoresponder import run as _run
-        return lambda limit=50, view=None: _run(limit=limit, view=view)
-    except Exception:
-        try:
-            from sms.autoresponder import run_autoresponder as _run2
-            return lambda limit=50, view=None: _run2(limit=limit, view=view)
-        except Exception:
-            return lambda *a, **k: {"ok": False, "error": "autoresponder unavailable"}
+    run = _guarded_import("sms.autoresponder", "run", fallback=None)
+    if run:
+        return lambda limit=50, view=None: run(limit=limit, view=view)
+    run2 = _guarded_import("sms.autoresponder", "run_autoresponder", fallback=None)
+    if run2:
+        return lambda limit=50, view=None: run2(limit=limit, view=view)
+    return None
+_run_autoresponder = _build_autoresponder()
 
-run_autoresponder = _build_autoresponder()
+# Quotas, metrics, followups, retry, dispatcher, health
+_reset_daily_quotas = _guarded_import("sms.quota_reset", "reset_daily_quotas", fallback=None)
+_update_metrics     = _guarded_import("sms.metrics_tracker", "update_metrics", fallback=None)
+_notify             = _guarded_import("sms.metrics_tracker", "_notify", fallback=lambda m: print(f"[notify] {m}"))
+_run_campaigns      = _guarded_import("sms.campaign_runner", "run_campaigns", fallback=None)
+_get_campaigns_tbl  = _guarded_import("sms.campaign_runner", "get_campaigns_table", fallback=lambda: None)
+_aggregate_kpis     = _guarded_import("sms.kpi_aggregator", "aggregate_kpis", fallback=None)
+_run_retry          = _guarded_import("sms.retry_runner", "run_retry", fallback=None)
+_run_followups      = _guarded_import("sms.followup_flow", "run_followups", fallback=lambda: {"ok": True, "skipped": "followups unavailable"})
+_run_engine         = _guarded_import("sms.dispatcher", "run_engine", fallback=lambda *a, **k: {"ok": False, "error": "dispatcher unavailable"})
+_strict_health      = _guarded_import("sms.health_strict", "strict_health", fallback=lambda mode: {"ok": True, "mode": mode, "note": "strict health shim"})
 
-try:
-    from sms.quota_reset import reset_daily_quotas
-except Exception:
-    def reset_daily_quotas(*_a, **_k): return {"ok": False, "error": "quota reset unavailable"}
+# Optional inbound router (mounted if available)
+_inbound_router = _guarded_import("sms.inbound_webhook", "router", fallback=None)
 
-try:
-    from sms.metrics_tracker import update_metrics, _notify  # type: ignore
-except Exception:
-    def update_metrics(*_a, **_k): return {"ok": False, "error": "metrics tracker unavailable"}
-    def _notify(msg: str): print(f"[notify] {msg}")
+# Optional Drip admin
+_normalize_next_send_dates = _guarded_import("sms.drip_admin", "normalize_next_send_dates",
+                                             fallback=lambda *a, **k: {"ok": False, "error": "drip_admin unavailable"})
 
-try:
-    from sms.inbound_webhook import router as inbound_router
-except Exception:
-    inbound_router = None
+# Optional numbers admin
+_backfill_numbers_for_existing_queue = _guarded_import("sms.admin_numbers", "backfill_numbers_for_existing_queue", fallback=None)
 
-try:
-    from sms.campaign_runner import run_campaigns, get_campaigns_table
-except Exception:
-    def run_campaigns(*_a, **_k): return {"ok": False, "error": "campaign runner unavailable"}
-    def get_campaigns_table(): return None
-
-try:
-    from sms.kpi_aggregator import aggregate_kpis
-except Exception:
-    def aggregate_kpis(*_a, **_k): return {"ok": False, "error": "kpi aggregator unavailable"}
-
-try:
-    from sms.retry_runner import run_retry
-except Exception:
-    def run_retry(*_a, **_k): return {"ok": False, "error": "retry runner unavailable"}
-
-try:
-    from sms.followup_flow import run_followups
-except Exception:
-    def run_followups(*_a, **_k): return {"ok": True, "skipped": "followups unavailable"}
-
-try:
-    from sms.dispatcher import run_engine
-except Exception:
-    def run_engine(*_a, **_k): return {"ok": False, "error": "dispatcher unavailable"}
-
-try:
-    from sms.health_strict import strict_health
-except Exception:
-    def strict_health(mode: str): return {"ok": True, "mode": mode, "note": "strict health shim"}
-
-# Optional Drip admin (UTC timestamp normalizer)
-try:
-    from sms.drip_admin import normalize_next_send_dates
-except Exception:
-    def normalize_next_send_dates(*_a, **_k): return {"ok": False, "error": "drip_admin unavailable"}
-
-# Optional numbers admin wrappers (name-compat)
-try:
-    from sms.admin_numbers import backfill_numbers_for_existing_queue
-    def backfill_drip_from_numbers(dry_run: bool = True):
-        res = backfill_numbers_for_existing_queue()
+def _backfill_drip_from_numbers(dry_run: bool = True) -> Dict[str, Any]:
+    if _backfill_numbers_for_existing_queue:
+        res = _backfill_numbers_for_existing_queue()
         res["dry_run_ignored"] = dry_run
         return res
-    def recalc_numbers_sent_today(for_date: str):
+    return {"ok": False, "error": "admin_numbers missing"}
+
+def _recalc_numbers_sent_today(for_date: str) -> Dict[str, Any]:
+    if _backfill_numbers_for_existing_queue:
         return {"ok": True, "note": "recalc not implemented in this build", "date": for_date}
-    def reset_numbers_daily_counters():
+    return {"ok": False, "error": "admin_numbers missing"}
+
+def _reset_numbers_daily_counters() -> Dict[str, Any]:
+    if _backfill_numbers_for_existing_queue:
         return {"ok": True, "note": "use /reset-quotas which resets Numbers daily counters"}
-except Exception:
-    def backfill_drip_from_numbers(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
-    def recalc_numbers_sent_today(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
-    def reset_numbers_daily_counters(*_a, **_k): return {"ok": False, "error": "admin_numbers missing"}
+    return {"ok": False, "error": "admin_numbers missing"}
 
 # ─────────────────────────── FastAPI app ────────────────────────────
-app = FastAPI(title="REI SMS Engine", version="1.4.0")
-if inbound_router:
-    app.include_router(inbound_router)
+app = FastAPI(title="REI SMS Engine", version="3.0.0")
+if _inbound_router:
+    app.include_router(_inbound_router)
 
 # ─────────────────────── ENV / runtime toggles ──────────────────────
 CRON_TOKEN = os.getenv("CRON_TOKEN")
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
+TEST_MODE  = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
 STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
 
-# Quiet hours (Central Time)
-_POLICY = get_policy()
 QUIET_HOURS_ENFORCED = os.getenv("QUIET_HOURS_ENFORCED", "true" if _POLICY.quiet_enforced else "false").lower() in ("1", "true", "yes")
-QUIET_START = int(os.getenv("QUIET_START_HOUR_LOCAL", str(_POLICY.quiet_start_hour)))   # 9p
-QUIET_END   = int(os.getenv("QUIET_END_HOUR_LOCAL",   str(_POLICY.quiet_end_hour)))    # 9a
+QUIET_START = int(os.getenv("QUIET_START_HOUR_LOCAL", str(_POLICY.quiet_start_hour)))
+QUIET_END   = int(os.getenv("QUIET_END_HOUR_LOCAL",   str(_POLICY.quiet_end_hour)))
 ALLOW_QUEUE_OUTSIDE_HOURS = os.getenv("ALLOW_QUEUE_OUTSIDE_HOURS", "true").lower() in ("1", "true", "yes")
 AUTORESPONDER_ALWAYS_ON   = os.getenv("AUTORESPONDER_ALWAYS_ON",   "true").lower() in ("1", "true", "yes")
 
-# Base hints (for logs only)
 PERF_BASE = os.getenv("PERFORMANCE_BASE") or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 
-# ─────────────────────────── Helpers ────────────────────────────────
-def log_error(context: str, err: Exception | str):
-    msg = f"❌ {context}: {err}"
-    print(msg)
-    try: _notify(msg)
-    except Exception: pass
-
-def iso_timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-def get_perf_tables():
-    return get_runs(), get_kpis()
-
-def log_run(runs_tbl, step: str, result: Dict[str, Any]):
-    if not runs_tbl: return None
-    try:
-        payload = {
-            "Type": step,
-            "Processed": float(result.get("processed") or result.get("total_sent") or result.get("sent") or 0),
-            "Breakdown": str(result),
-            "Timestamp": iso_timestamp(),
-        }
-        return safe_create(runs_tbl, payload)
-    except Exception as e:
-        log_error(f"Log Run {step}", e); return None
-
-def log_kpi(kpis_tbl, metric: str, value: int | float):
-    if not kpis_tbl: return None
-    try:
-        payload = {
-            "Campaign": "ALL",
-            "Metric": metric,
-            "Value": float(value),
-            "Date": datetime.now(timezone.utc).date().isoformat(),
-        }
-        return safe_create(kpis_tbl, payload)
-    except Exception as e:
-        log_error(f"Log KPI {metric}", e); return None
-
-# Token intake: query ?token=, headers x-webhook-token / x-cron-token, or Authorization: Bearer
-def _extract_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]) -> str:
-    if qp_token: return qp_token
-    if h_webhook: return h_webhook
-    if h_cron: return h_cron
-    auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "): return auth.split(" ", 1)[1]
-    return ""
-
-def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]):
-    if not CRON_TOKEN:  # unsecured mode (local dev)
-        return
-    token = _extract_token(request, qp_token, h_webhook, h_cron)
-    if token != CRON_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-# Quiet-hours helpers
+# ─────────────────────────── Time helpers ───────────────────────────
 try:
     from zoneinfo import ZoneInfo
 except Exception:
-    ZoneInfo = None  # py>=3.9 should have this
+    ZoneInfo = None
 
-def central_now():
+def _iso_ts() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+def central_now() -> datetime:
     if _POLICY.quiet_tz:
         return datetime.now(_POLICY.quiet_tz)
     if ZoneInfo:
@@ -206,21 +139,85 @@ def central_now():
     return datetime.now(timezone.utc)
 
 def is_quiet_hours_local() -> bool:
-    if not QUIET_HOURS_ENFORCED: return False
+    if not QUIET_HOURS_ENFORCED:
+        return False
     h = central_now().hour
     return (h >= QUIET_START) or (h < QUIET_END)
 
-# ───────────────────────────── Utilities ─────────────────────────────
+# ─────────────────────────── Auth helpers ───────────────────────────
+def _extract_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]) -> str:
+    if qp_token: return qp_token
+    if h_webhook: return h_webhook
+    if h_cron: return h_cron
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1]
+    return ""
+
+def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]):
+    if not CRON_TOKEN:
+        return
+    token = _extract_token(request, qp_token, h_webhook, h_cron)
+    if token != CRON_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+# ─────────────────────────── Logging + telemetry ────────────────────
+def _log_error(context: str, err: Exception | str):
+    msg = f"❌ {context}: {err}"
+    print(msg)
+    try:
+        _notify(msg)
+    except Exception:
+        pass
+
+def _get_perf_tables() -> Tuple[Any, Any]:
+    return get_runs(), get_kpis()
+
+async def _log_run_async(runs_tbl, step: str, result: Dict[str, Any]):
+    if not runs_tbl:
+        return
+    try:
+        payload = {
+            "Type": step,
+            "Processed": float(result.get("processed")
+                               or result.get("total_sent")
+                               or result.get("sent")
+                               or 0),
+            "Breakdown": json.dumps(result, ensure_ascii=False),
+            "Timestamp": _iso_ts(),
+        }
+        # safe_create may be sync or async depending on adapter; wrap in to_thread
+        await asyncio.to_thread(safe_create, runs_tbl, payload)
+    except Exception as e:
+        _log_error(f"Log Run {step}", e)
+
+async def _log_kpi_async(kpis_tbl, metric: str, value: int | float):
+    if not kpis_tbl:
+        return
+    try:
+        payload = {
+            "Campaign": "ALL",
+            "Metric": metric,
+            "Value": float(value),
+            "Date": datetime.now(timezone.utc).date().isoformat(),
+        }
+        await asyncio.to_thread(safe_create, kpis_tbl, payload)
+    except Exception as e:
+        _log_error(f"Log KPI {metric}", e)
+
+# ─────────────────────────── Utility parsing ─────────────────────────
 def _parse_limit_param(raw: Optional[str]) -> Optional[int]:
-    if raw is None: return None
+    if raw is None:
+        return None
     try:
         s = str(raw).strip().upper()
-        if s in ("", "ALL", "NONE", "UNLIMITED"): return None
-        v = int(s); return max(v, 1)
+        if s in ("", "ALL", "NONE", "UNLIMITED"):
+            return None
+        v = int(s)
+        return max(v, 1)
     except Exception:
         print(f"[warn] Invalid limit param: {raw!r} → treating as None")
         return None
-
 
 class RunCampaignsRequest(BaseModel):
     limit: Optional[int] = None
@@ -229,9 +226,9 @@ class RunCampaignsRequest(BaseModel):
 def _runner_limit_arg(safe_limit: Optional[int]) -> int | str:
     return safe_limit if (safe_limit and safe_limit > 0) else "ALL"
 
-# ─────────────────────────── Startup ────────────────────────────────
+# ─────────────────────────── Startup checks ─────────────────────────
 @app.on_event("startup")
-def startup_checks():
+async def startup_checks():
     try:
         print("✅ Environment loaded:")
         print(f"   LEADS_CONVOS_BASE: {LEADS_CONVOS_BASE}")
@@ -244,58 +241,65 @@ def startup_checks():
         ]
         if missing:
             msg = f"🚨 Missing env vars → {', '.join(missing)}"
-            log_error("Startup checks", msg)
-            if STRICT_MODE: raise RuntimeError(msg)
-        _ = get_templates(); _ = get_leads()  # smoke
+            _log_error("Startup checks", msg)
+            if STRICT_MODE:
+                raise RuntimeError(msg)
+        # Smoke checks (non-fatal)
+        _ = get_templates()
+        _ = get_leads()
         print("✅ Startup checks passed")
     except Exception as e:
-        log_error("Startup exception", e)
-        if STRICT_MODE: raise
+        _log_error("Startup exception", e)
+        if STRICT_MODE:
+            raise
 
-# ───────────────────────────── Health ───────────────────────────────
+# ─────────────────────────── Health ────────────────────────────────
 @app.get("/ping")
-def ping():
-    return {"ok": True, "pong": True, "time": iso_timestamp()}
+async def ping():
+    return {"ok": True, "pong": True, "time": _iso_ts()}
 
 @app.post("/echo-token")
-def echo_token(
+async def echo_token(
+    request: Request,
     x_cron_token: Optional[str] = Header(None),
     x_webhook_token: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
-    request: Request = None,
 ):
     return {
         "ok": True,
         "x_cron_token": x_cron_token,
         "x_webhook_token": x_webhook_token,
         "q_token": token,
-        "auth_header": request.headers.get("authorization") if request else None,
+        "auth_header": request.headers.get("authorization"),
     }
 
 @app.get("/health")
-def health():
+async def health():
     return {
         "ok": True,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "quiet_hours": is_quiet_hours_local(),
         "local_time_central": central_now().isoformat(),
-        "version": "1.4.0",
+        "version": "3.0.0",
     }
 
 @app.get("/healthz")
-def healthz():
-    """Health check endpoint for Render.com and monitoring systems."""
+async def healthz():
     return {
         "ok": True,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "quiet_hours": is_quiet_hours_local(),
         "local_time_central": central_now().isoformat(),
-        "version": "1.4.0",
+        "version": "3.0.0",
     }
 
 @app.get("/health/strict")
-def health_strict_endpoint(mode: str = Query("prospects", description="prospects | leads | inbounds")):
-    return strict_health(mode=mode)
+async def health_strict_endpoint(mode: str = Query("prospects", description="prospects | leads | inbounds")):
+    try:
+        return _strict_health(mode=mode)
+    except Exception as e:
+        _log_error("strict_health", e)
+        return {"ok": False, "error": str(e), "mode": mode}
 
 # ─────────────────────── Outbound / Send now ────────────────────────
 @app.post("/send")
@@ -312,9 +316,11 @@ async def send_endpoint(
         return {"ok": True, "status": "mock_send", "campaign": campaign_id}
     if is_quiet_hours_local():
         return {"ok": False, "error": "Quiet hours (Central). Sending blocked.", "quiet_hours": True}
-    return send_batch(campaign_id=campaign_id, limit=limit)
+    if not _send_batch:
+        return {"ok": False, "error": "send_batch unavailable"}
+    return await asyncio.to_thread(_send_batch, campaign_id, limit)
 
-# ─────────────── Campaigns (hardened; no limit crash) ───────────────
+# ─────────────── Campaigns (queue + optional immediate send) ───────────────
 @app.post("/run-campaigns")
 async def run_campaigns_endpoint(
     request: Request,
@@ -332,6 +338,8 @@ async def run_campaigns_endpoint(
       - Else → skip entirely
     """
     _require_token(request, token, x_webhook_token, x_cron_token)
+    if not _run_campaigns:
+        return {"ok": False, "error": "campaign runner unavailable"}
 
     if payload:
         if payload.limit is not None:
@@ -351,23 +359,17 @@ async def run_campaigns_endpoint(
             "send_after_queue": send_flag,
         }
 
-    if is_quiet_hours_local():
-        if not ALLOW_QUEUE_OUTSIDE_HOURS:
-            return {"ok": False, "error": "Quiet hours (Central). Queueing disabled.", "quiet_hours": True}
-        try:
-            res = run_campaigns(limit=runner_limit, send_after_queue=False)
+    try:
+        if is_quiet_hours_local():
+            if not ALLOW_QUEUE_OUTSIDE_HOURS:
+                return {"ok": False, "error": "Quiet hours (Central). Queueing disabled.", "quiet_hours": True}
+            res = await asyncio.to_thread(_run_campaigns, runner_limit, False)
             res.update({"note": "Queued only (quiet hours).", "quiet_hours": True})
             return res
-        except Exception as e:
-            log_error("run_campaigns (quiet hours)", e)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    try:
-        return run_campaigns(limit=runner_limit, send_after_queue=send_flag)
+        return await asyncio.to_thread(_run_campaigns, runner_limit, send_flag)
     except Exception as e:
-        log_error("run_campaigns (normal hours)", e)
+        _log_error("run_campaigns", e)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/schedule-campaigns")
 async def schedule_campaigns_endpoint(
@@ -380,28 +382,28 @@ async def schedule_campaigns_endpoint(
     """
     Hydrate Drip Queue entries for campaigns marked as Scheduled and activate them.
     """
-
     _require_token(request, token, x_webhook_token, x_cron_token)
     if TEST_MODE:
         return {"ok": True, "status": "mock_scheduler", "limit": limit}
-
     try:
-        from sms.scheduler import run_scheduler
-
-        return run_scheduler(limit=limit)
+        from sms.scheduler import run_scheduler  # local import to keep import-time light
+        return await asyncio.to_thread(run_scheduler, limit)
     except Exception as e:
-        log_error("schedule_campaigns", e)
+        _log_error("schedule_campaigns", e)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ─────────────── Manual Campaign Controls ───────────────
 def _safe_update(tbl, rid: str, patch: Dict[str, Any]):
-    if not (tbl and rid and patch): return None
-    try: return tbl.update(rid, patch)
-    except Exception as e: log_error("Airtable update", e); return None
+    if not (tbl and rid and patch):
+        return None
+    try:
+        return tbl.update(rid, patch)
+    except Exception as e:
+        _log_error("Airtable update", e)
+        return None
 
 @app.post("/campaign/{campaign_id}/start")
-def campaign_start(
+async def campaign_start(
     campaign_id: str,
     request: Request,
     x_cron_token: Optional[str] = Header(None),
@@ -409,13 +411,15 @@ def campaign_start(
     token: Optional[str] = Query(None),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
-    tbl = get_campaigns_table()
-    if not tbl: raise HTTPException(500, "Campaigns table unavailable")
-    _safe_update(tbl, campaign_id, {"status": "Scheduled", "Active": True, "Go Live": True, "last_run_at": iso_timestamp()})
+    tbl = _get_campaigns_tbl()
+    if not tbl:
+        raise HTTPException(500, "Campaigns table unavailable")
+    await asyncio.to_thread(_safe_update, tbl, campaign_id,
+                            {"status": "Scheduled", "Active": True, "Go Live": True, "last_run_at": _iso_ts()})
     return {"ok": True, "campaign": campaign_id, "status": "Scheduled"}
 
 @app.post("/campaign/{campaign_id}/stop")
-def campaign_stop(
+async def campaign_stop(
     campaign_id: str,
     request: Request,
     x_cron_token: Optional[str] = Header(None),
@@ -423,13 +427,15 @@ def campaign_stop(
     token: Optional[str] = Query(None),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
-    tbl = get_campaigns_table()
-    if not tbl: raise HTTPException(500, "Campaigns table unavailable")
-    _safe_update(tbl, campaign_id, {"status": "Paused", "Active": False, "Go Live": False, "last_run_at": iso_timestamp()})
+    tbl = _get_campaigns_tbl()
+    if not tbl:
+        raise HTTPException(500, "Campaigns table unavailable")
+    await asyncio.to_thread(_safe_update, tbl, campaign_id,
+                            {"status": "Paused", "Active": False, "Go Live": False, "last_run_at": _iso_ts()})
     return {"ok": True, "campaign": campaign_id, "status": "Paused"}
 
 @app.post("/campaign/{campaign_id}/kick")
-def campaign_kick(
+async def campaign_kick(
     campaign_id: str,
     request: Request,
     limit: Optional[str] = Query("ALL"),
@@ -442,19 +448,21 @@ def campaign_kick(
     Honors quiet hours (will queue-only or block accordingly).
     """
     _require_token(request, token, x_webhook_token, x_cron_token)
-    tbl = get_campaigns_table()
-    if not tbl: raise HTTPException(500, "Campaigns table unavailable")
-    _safe_update(tbl, campaign_id, {"status": "Scheduled", "Active": True, "Go Live": True})
-    # Narrow run to this campaign by letting campaign_runner filter naturally.
+    tbl = _get_campaigns_tbl()
+    if not tbl:
+        raise HTTPException(500, "Campaigns table unavailable")
+    await asyncio.to_thread(_safe_update, tbl, campaign_id, {"status": "Scheduled", "Active": True, "Go Live": True})
     safe_limit = _parse_limit_param(limit)
     runner_limit = _runner_limit_arg(safe_limit)
+    if not _run_campaigns:
+        return {"ok": False, "error": "campaign runner unavailable"}
     if is_quiet_hours_local():
         if not ALLOW_QUEUE_OUTSIDE_HOURS:
             return {"ok": False, "error": "Quiet hours (Central). Queueing disabled.", "quiet_hours": True}
-        res = run_campaigns(limit=runner_limit, send_after_queue=False)
+        res = await asyncio.to_thread(_run_campaigns, runner_limit, False)
         res.update({"note": "Queued only (quiet hours).", "quiet_hours": True})
         return res
-    return run_campaigns(limit=runner_limit, send_after_queue=True)
+    return await asyncio.to_thread(_run_campaigns, runner_limit, True)
 
 # ─────────────── Autoresponder / Followups / Retry / KPIs ───────────
 @app.post("/autoresponder/{mode}")
@@ -471,9 +479,11 @@ async def autoresponder_endpoint(
     os.environ["PROCESSED_BY_LABEL"] = mode.replace("-", " ").title()
     if TEST_MODE:
         return {"ok": True, "status": "mock_autoresponder", "mode": mode}
+    if not _run_autoresponder:
+        return {"ok": False, "error": "autoresponder unavailable"}
     if not AUTORESPONDER_ALWAYS_ON and is_quiet_hours_local():
         return {"ok": False, "error": "Quiet hours (Central). Autoresponder disabled by config.", "quiet_hours": True}
-    return run_autoresponder(limit=limit, view=view)
+    return await asyncio.to_thread(_run_autoresponder, limit, view)
 
 @app.post("/reset-quotas")
 async def reset_quotas_endpoint(
@@ -483,7 +493,9 @@ async def reset_quotas_endpoint(
     token: Optional[str] = Query(None),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
-    return reset_daily_quotas()
+    if not _reset_daily_quotas:
+        return {"ok": False, "error": "quota reset unavailable"}
+    return await asyncio.to_thread(_reset_daily_quotas)
 
 @app.post("/metrics")
 async def metrics_endpoint(
@@ -493,7 +505,9 @@ async def metrics_endpoint(
     token: Optional[str] = Query(None),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
-    return update_metrics()
+    if not _update_metrics:
+        return {"ok": False, "error": "metrics tracker unavailable"}
+    return await asyncio.to_thread(_update_metrics)
 
 @app.post("/retry")
 async def retry_endpoint(
@@ -509,7 +523,9 @@ async def retry_endpoint(
         return {"ok": True, "status": "mock_retry"}
     if is_quiet_hours_local():
         return {"ok": False, "error": "Quiet hours (Central). Retries blocked.", "quiet_hours": True}
-    return run_retry(limit=limit, view=view)
+    if not _run_retry:
+        return {"ok": False, "error": "retry runner unavailable"}
+    return await asyncio.to_thread(_run_retry, limit)
 
 @app.post("/aggregate-kpis")
 async def aggregate_kpis_endpoint(
@@ -519,9 +535,11 @@ async def aggregate_kpis_endpoint(
     token: Optional[str] = Query(None),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
-    return aggregate_kpis()
+    if not _aggregate_kpis:
+        return {"ok": False, "error": "kpi aggregator unavailable"}
+    return await asyncio.to_thread(_aggregate_kpis)
 
-# ─────────────── One-shot “all steps” orchestrator ────────────────
+# ─────────────── /cron/all (concurrent orchestration + immediate logs) ─────
 @app.post("/cron/all")
 async def cron_all_endpoint(
     request: Request,
@@ -538,87 +556,160 @@ async def cron_all_endpoint(
           * Skip send/retry
       - Normal hours:
           * Send, Autoresponder, Followups, Metrics, Retry, Aggregate KPIs, Campaigns
+    Immediate Airtable Run logs per step; KPIs at end.
     """
     _require_token(request, token, x_webhook_token, x_cron_token)
     results: Dict[str, Any] = {}
     totals = {"processed": 0, "errors": 0}
-    runs_tbl, kpis_tbl = get_perf_tables()
+    runs_tbl, kpis_tbl = _get_perf_tables()
 
-    # health gates
+    # Strict health gates
     for mode in ["prospects", "leads", "inbounds"]:
-        health_result = strict_health(mode)
+        try:
+            health_result = _strict_health(mode)
+        except Exception as e:
+            health_result = {"ok": False, "error": str(e)}
         results[f"{mode}_health"] = health_result
+        await _log_run_async(runs_tbl, f"{mode.upper()}_HEALTH", health_result)
         if not health_result.get("ok"):
-            log_run(runs_tbl, f"{mode.upper()}_HEALTH_FAIL", health_result)
+            await _log_run_async(runs_tbl, f"{mode.upper()}_HEALTH_FAIL", health_result)
+            await _log_kpi_async(kpis_tbl, "TOTAL_ERRORS", 1)
             return {"ok": False, "error": f"Health check failed for {mode}", "results": results}
 
     # Quiet hours flow
     if is_quiet_hours_local():
-        if AUTORESPONDER_ALWAYS_ON:
+        # autoresponder if allowed
+        if AUTORESPONDER_ALWAYS_ON and _run_autoresponder:
             try:
-                r = run_autoresponder(limit=50, view="Unprocessed Inbounds")
-                results["autoresponder"] = r
-                log_run(runs_tbl, "AUTORESPONDER", r)
-                totals["processed"] += r.get("processed", 0)
+                r = await asyncio.to_thread(_run_autoresponder, 50, "Unprocessed Inbounds")
             except Exception as e:
-                log_error("AUTORESPONDER", e); totals["errors"] += 1
-
-        results["followups"] = {"ok": True, "skipped": "quiet_hours"}
-
-        for step_name, func in (("METRICS", update_metrics), ("AGGREGATE_KPIS", aggregate_kpis)):
-            try:
-                r = func()
-                results[step_name.lower()] = r
-                log_run(runs_tbl, step_name, r)
-            except Exception as e:
-                log_error(step_name, e); totals["errors"] += 1
-
-        if ALLOW_QUEUE_OUTSIDE_HOURS:
-            try:
-                r = run_campaigns(limit="ALL", send_after_queue=False)
-                r.update({"note": "Queued only (quiet hours).", "quiet_hours": True})
-                results["campaign_runner"] = r
-                log_run(runs_tbl, "CAMPAIGN_RUNNER", r)
-            except Exception as e:
-                log_error("CAMPAIGN_RUNNER", e); totals["errors"] += 1
+                r = {"ok": False, "error": str(e)}
+            results["autoresponder"] = r
+            await _log_run_async(runs_tbl, "AUTORESPONDER", r)
+            totals["processed"] += int(r.get("processed", 0)) if isinstance(r.get("processed", 0), int) else 0
         else:
-            results["campaign_runner"] = {"ok": True, "skipped": "quiet_hours"}
+            results["autoresponder"] = {"ok": True, "skipped": "quiet_hours"}
+            await _log_run_async(runs_tbl, "AUTORESPONDER", results["autoresponder"])
 
+        # followups skipped
+        results["followups"] = {"ok": True, "skipped": "quiet_hours"}
+        await _log_run_async(runs_tbl, "FOLLOWUPS", results["followups"])
+
+        # metrics + aggregate KPIs (best effort)
+        if _update_metrics:
+            try:
+                r = await asyncio.to_thread(_update_metrics)
+            except Exception as e:
+                r = {"ok": False, "error": str(e)}
+        else:
+            r = {"ok": False, "error": "metrics tracker unavailable"}
+        results["metrics"] = r
+        await _log_run_async(runs_tbl, "METRICS", r)
+
+        if _aggregate_kpis:
+            try:
+                r = await asyncio.to_thread(_aggregate_kpis)
+            except Exception as e:
+                r = {"ok": False, "error": str(e)}
+        else:
+            r = {"ok": False, "error": "kpi aggregator unavailable"}
+        results["aggregate_kpis"] = r
+        await _log_run_async(runs_tbl, "AGGREGATE_KPIS", r)
+
+        # campaigns queue-only
+        if _run_campaigns and ALLOW_QUEUE_OUTSIDE_HOURS:
+            try:
+                r = await asyncio.to_thread(_run_campaigns, "ALL", False)
+                r.update({"note": "Queued only (quiet hours).", "quiet_hours": True})
+            except Exception as e:
+                r = {"ok": False, "error": str(e)}
+        else:
+            r = {"ok": True, "skipped": "quiet_hours"}
+        results["campaign_runner"] = r
+        await _log_run_async(runs_tbl, "CAMPAIGN_RUNNER", r)
+
+        # outbound + retry skipped
         results["outbound"] = {"ok": True, "skipped": "quiet_hours"}
         results["retry"]    = {"ok": True, "skipped": "quiet_hours"}
+        await _log_run_async(runs_tbl, "OUTBOUND", results["outbound"])
+        await _log_run_async(runs_tbl, "RETRY", results["retry"])
 
-        log_kpi(kpis_tbl, "TOTAL_PROCESSED", totals["processed"])
-        log_kpi(kpis_tbl, "TOTAL_ERRORS", totals["errors"])
-        results["timestamp"] = iso_timestamp()
-        results["quiet_hours"] = True
-        return {"ok": True, "results": results, "totals": totals}
+        # final KPIs
+        await _log_kpi_async(kpis_tbl, "TOTAL_PROCESSED", totals["processed"])
+        await _log_kpi_async(kpis_tbl, "TOTAL_ERRORS", totals["errors"])
+        return {"ok": True, "results": results, "totals": totals, "quiet_hours": True, "timestamp": _iso_ts()}
 
-    # Normal hours flow
-    steps = [
-        ("OUTBOUND",        lambda: send_batch(limit=limit)),
-        ("AUTORESPONDER",   lambda: run_autoresponder(limit=50, view="Unprocessed Inbounds")),
-        ("FOLLOWUPS",       run_followups),
-        ("METRICS",         update_metrics),
-        ("RETRY",           lambda: run_retry(limit=100)),
-        ("AGGREGATE_KPIS",  aggregate_kpis),
-        ("CAMPAIGN_RUNNER", lambda: run_campaigns(limit="ALL")),
-    ]
-    for step, func in steps:
+    # Normal hours flow — run steps, log as they complete, some in parallel
+    step_results: Dict[str, Dict[str, Any]] = {}
+
+    async def _run_step(name: str, func: Callable[[], Any]):
         try:
-            r = {"ok": True, "status": f"mock_{step.lower()}"} if TEST_MODE else func()
-            results[step.lower()] = r
-            log_run(runs_tbl, step, r)
-            totals["processed"] += r.get("processed", 0)
+            res = {"ok": True, "status": f"mock_{name.lower()}"} if TEST_MODE else await asyncio.to_thread(func)
         except Exception as e:
-            log_error(step, e); totals["errors"] += 1
+            res = {"ok": False, "error": str(e)}
+        step_results[name.lower()] = res
+        await _log_run_async(runs_tbl, name, res)
+        # accumulate processed metric if present
+        p = res.get("processed", 0) or res.get("total_sent", 0) or res.get("sent", 0)
+        if isinstance(p, (int, float)):
+            totals["processed"] += int(p)
+        return res
 
-    log_kpi(kpis_tbl, "TOTAL_PROCESSED", totals["processed"])
-    log_kpi(kpis_tbl, "TOTAL_ERRORS", totals["errors"])
-    return {"ok": True, "results": results, "totals": totals, "timestamp": iso_timestamp()}
+    tasks = []
+
+    if _send_batch:
+        tasks.append(_run_step("OUTBOUND", lambda: _send_batch(limit=limit)))
+    else:
+        step_results["outbound"] = {"ok": False, "error": "send_batch unavailable"}
+        await _log_run_async(runs_tbl, "OUTBOUND", step_results["outbound"])
+
+    if _run_autoresponder:
+        tasks.append(_run_step("AUTORESPONDER", lambda: _run_autoresponder(50, "Unprocessed Inbounds")))
+    else:
+        step_results["autoresponder"] = {"ok": False, "error": "autoresponder unavailable"}
+        await _log_run_async(runs_tbl, "AUTORESPONDER", step_results["autoresponder"])
+
+    # FOLLOWUPS (non-critical)
+    tasks.append(_run_step("FOLLOWUPS", lambda: _run_followups()))
+
+    if _update_metrics:
+        tasks.append(_run_step("METRICS", lambda: _update_metrics()))
+    else:
+        step_results["metrics"] = {"ok": False, "error": "metrics tracker unavailable"}
+        await _log_run_async(runs_tbl, "METRICS", step_results["metrics"])
+
+    if _run_retry:
+        tasks.append(_run_step("RETRY", lambda: _run_retry(limit=100)))
+    else:
+        step_results["retry"] = {"ok": False, "error": "retry runner unavailable"}
+        await _log_run_async(runs_tbl, "RETRY", step_results["retry"])
+
+    if _aggregate_kpis:
+        tasks.append(_run_step("AGGREGATE_KPIS", lambda: _aggregate_kpis()))
+    else:
+        step_results["aggregate_kpis"] = {"ok": False, "error": "kpi aggregator unavailable"}
+        await _log_run_async(runs_tbl, "AGGREGATE_KPIS", step_results["aggregate_kpis"])
+
+    if _run_campaigns:
+        tasks.append(_run_step("CAMPAIGN_RUNNER", lambda: _run_campaigns("ALL")))
+    else:
+        step_results["campaign_runner"] = {"ok": False, "error": "campaign runner unavailable"}
+        await _log_run_async(runs_tbl, "CAMPAIGN_RUNNER", step_results["campaign_runner"])
+
+    if tasks:
+        await asyncio.gather(*tasks)
+
+    # Compile results map
+    results.update(step_results)
+
+    # Final KPIs
+    await _log_kpi_async(kpis_tbl, "TOTAL_PROCESSED", totals["processed"])
+    await _log_kpi_async(kpis_tbl, "TOTAL_ERRORS", totals["errors"])
+    return {"ok": True, "results": results, "totals": totals, "timestamp": _iso_ts()}
 
 # ─────────────── Drip Admin (UTC normalize queued sends) ────────────
 @app.post("/admin/drip/normalize")
-def drip_normalize(
+async def drip_normalize(
     request: Request,
     dry_run: bool = Query(True),
     force_now: bool = Query(False),
@@ -628,10 +719,10 @@ def drip_normalize(
     token: Optional[str] = Query(None),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
-    return normalize_next_send_dates(dry_run=dry_run, force_now=force_now, limit=limit)
+    return await asyncio.to_thread(_normalize_next_send_dates, dry_run, force_now, limit)
 
 @app.post("/admin/drip/force-now")
-def drip_force_now(
+async def drip_force_now(
     request: Request,
     limit: int = Query(1000),
     x_cron_token: Optional[str] = Header(None),
@@ -639,11 +730,11 @@ def drip_force_now(
     token: Optional[str] = Query(None),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
-    return normalize_next_send_dates(dry_run=False, force_now=True, limit=limit)
+    return await asyncio.to_thread(_normalize_next_send_dates, False, True, limit)
 
 # ─────────────── Numbers Admin (from_number + quotas) ───────────────
 @app.post("/admin/numbers/backfill")
-def numbers_backfill_endpoint(
+async def numbers_backfill_endpoint(
     request: Request,
     dry_run: bool = Query(True),
     x_cron_token: Optional[str] = Header(None),
@@ -652,13 +743,13 @@ def numbers_backfill_endpoint(
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
     try:
-        return backfill_drip_from_numbers(dry_run=dry_run)
+        return await asyncio.to_thread(_backfill_drip_from_numbers, dry_run)
     except Exception as e:
-        log_error("numbers_backfill", e)
+        _log_error("numbers_backfill", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/numbers/recalc")
-def numbers_recalc_endpoint(
+async def numbers_recalc_endpoint(
     request: Request,
     for_date: Optional[str] = Query(None, description="YYYY-MM-DD (defaults to today in Central)"),
     x_cron_token: Optional[str] = Header(None),
@@ -668,13 +759,13 @@ def numbers_recalc_endpoint(
     _require_token(request, token, x_webhook_token, x_cron_token)
     try:
         target = for_date or date.fromisoformat(central_now().date().isoformat()).isoformat()
-        return recalc_numbers_sent_today(target)
+        return await asyncio.to_thread(_recalc_numbers_sent_today, target)
     except Exception as e:
-        log_error("numbers_recalc", e)
+        _log_error("numbers_recalc", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/numbers/reset")
-def numbers_reset_endpoint(
+async def numbers_reset_endpoint(
     request: Request,
     x_cron_token: Optional[str] = Header(None),
     x_webhook_token: Optional[str] = Header(None),
@@ -682,14 +773,14 @@ def numbers_reset_endpoint(
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
     try:
-        return reset_numbers_daily_counters()
+        return await asyncio.to_thread(_reset_numbers_daily_counters)
     except Exception as e:
-        log_error("numbers_reset", e)
+        _log_error("numbers_reset", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 # ───────────────────── Engine (manual debugging) ────────────────────
 @app.get("/engine")
-def trigger_engine(
+async def trigger_engine(
     request: Request,
     mode: str,
     limit: int = 50,
@@ -702,7 +793,9 @@ def trigger_engine(
     valid_modes = {"prospects", "leads", "inbounds"}
     if mode not in valid_modes:
         raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'")
-    health = strict_health(mode)
+    health = _strict_health(mode)
     if not health.get("ok"):
         raise HTTPException(status_code=500, detail=f"Health check failed for {mode}")
-    return {"ok": True, "mode": mode, "result": run_engine(mode, limit=limit, retry_limit=retry_limit)}
+    # run_engine may be sync; wrap
+    res = await asyncio.to_thread(_run_engine, mode, limit=limit, retry_limit=retry_limit)
+    return {"ok": True, "mode": mode, "result": res}
