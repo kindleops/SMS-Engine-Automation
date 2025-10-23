@@ -16,7 +16,7 @@ services:
     autoDeploy: true
     previews:
       enabled: false
-    healthCheckPath: /healthz
+    healthCheckPath: /health
     envVars:
       # === Airtable Credentials ===
       - key: AIRTABLE_API_KEY
