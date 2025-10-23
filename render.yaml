@@ -1,18 +1,26 @@
-# render.yaml — REI SMS Engine (Python runtime, matches existing service)
+# =====================================================
+#  REI SMS Engine — Full Render Deployment (Bulletproof)
+# =====================================================
+#  • Web API (FastAPI + Cron Endpoints)
+#  • Continuous Worker (SMS Runner)
+#  • AutoLinker (Airtable Sync)
+#  • Managed Cron Jobs for Automation
+# =====================================================
 
 services:
-  # 🌐 WEB SERVICE — API & Webhooks
+  # 🌐 MAIN WEB SERVICE — API, Webhooks, and CRON Endpoints
   - type: web
     name: rei-sms-engine
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-enabled    startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
     autoDeploy: true
     previews:
-      : false
+      enabled: false
     healthCheckPath: /healthz
     envVars:
+      # === Airtable Credentials ===
       - key: AIRTABLE_API_KEY
         sync: false
       - key: LEADS_CONVOS_BASE
@@ -30,59 +38,74 @@ enabled    startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
       - key: AIRTABLE_REPORTING_KEY
         sync: false
 
+      # === TextGrid / SMS Provider ===
       - key: TEXTGRID_ACCOUNT_SID
         sync: false
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
 
+      # === Tokens & Auth ===
       - key: WEBHOOK_TOKEN
         sync: false
       - key: CRON_TOKEN
         sync: false
 
+      # === Redis / Upstash (Optional Distributed Locks) ===
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
 
+      # === Operational Toggles ===
       - key: QUIET_HOURS_ENFORCED
-        value: true
+        value: "true"
       - key: QUIET_START_HOUR_LOCAL
-        value: 21
+        value: "21"
       - key: QUIET_END_HOUR_LOCAL
-        value: 9
+        value: "9"
       - key: RATE_PER_NUMBER_PER_MIN
-        value: 20
+        value: "20"
       - key: GLOBAL_RATE_PER_MIN
-        value: 5000
+        value: "5000"
       - key: DAILY_LIMIT
-        value: 750
+        value: "750"
       - key: DEDUPE_HOURS
-        value: 72
+        value: "72"
       - key: MESSAGES_PER_MIN
-        value: 20
+        value: "20"
       - key: JITTER_SECONDS
-        value: 2
+        value: "2"
       - key: RUNNER_SEND_AFTER_QUEUE
-        value: false
+        value: "false"
       - key: ENABLE_EMBEDDED_SCHEDULER
-        value: false
+        value: "false"
+      - key: ENABLE_METRICS
+        value: "true"
 
-      # Optional
+      # === Optional Debugging ===
       - key: LOG_LEVEL
-        value: debug
+        value: "debug"
+      - key: TEST_MODE
+        value: "false"
+      - key: STRICT_MODE
+        value: "false"
 
-  # ♾️ WORKER — Continuous SMS Runner
+    resources:
+      cpu: 1
+      memoryMB: 512
+
+  # ♾️ CONTINUOUS WORKER — Outbound, Retry, Autoresponder Loop
   - type: worker
     name: rei-sms-worker
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --no-cache-dir -r requirements.txt
     startCommand: python -u -m sms.worker
     autoDeploy: true
     previews:
       enabled: false
     envVars:
+      # Airtable Bases
       - key: AIRTABLE_API_KEY
         sync: false
       - key: LEADS_CONVOS_BASE
@@ -100,67 +123,83 @@ enabled    startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
       - key: AIRTABLE_REPORTING_KEY
         sync: false
 
+      # TextGrid
       - key: TEXTGRID_ACCOUNT_SID
         sync: false
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
 
+      # Redis / Upstash
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
 
+      # Worker Settings
       - key: WORKER_INTERVAL_SEC
-        value: 30
+        value: "30"
       - key: SEND_BATCH_LIMIT
-        value: 500
+        value: "500"
       - key: RETRY_LIMIT
-        value: 100
+        value: "100"
       - key: AUTORESPONDER_LIMIT
-        value: 50
+        value: "50"
       - key: AUTORESPONDER_VIEW
-        value: Unprocessed Inbounds
+        value: "Unprocessed Inbounds"
       - key: RUNNER_SEND_AFTER_QUEUE
-        value: true
-      - key: QUIET_HOURS_ENFORCED
-        value: true
-      - key: QUIET_START_HOUR_LOCAL
-        value: 21
-      - key: QUIET_END_HOUR_LOCAL
-        value: 9
+        value: "true"
 
+      # Quiet Hours
+      - key: QUIET_HOURS_ENFORCED
+        value: "true"
+      - key: QUIET_START_HOUR_LOCAL
+        value: "21"
+      - key: QUIET_END_HOUR_LOCAL
+        value: "9"
+
+      # Tokens
       - key: WEBHOOK_TOKEN
         sync: false
       - key: CRON_TOKEN
         sync: false
 
-  # 🧠 WORKER — AutoLinker
+      # Misc
+      - key: ENABLE_METRICS
+        value: "true"
+      - key: STRICT_MODE
+        value: "false"
+
+  # 🧠 AUTOLINKER — Airtable Relationship Sync
   - type: worker
     name: rei-autolinker
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --no-cache-dir -r requirements.txt
     startCommand: python -u -m sms.workers.autolinker_worker
     autoDeploy: true
     previews:
       enabled: false
     envVars:
       - key: AUTOLINKER_INTERVAL_SEC
-        value: 90
+        value: "90"
       - key: AUTOLINKER_BATCH
-        value: 200
+        value: "200"
       - key: AIRTABLE_API_KEY
         sync: false
       - key: LEADS_CONVOS_BASE
         sync: false
       - key: CONVERSATIONS_TABLE
-        value: Conversations
+        value: "Conversations"
       - key: PROSPECTS_TABLE
-        value: Prospects
+        value: "Prospects"
       - key: LEADS_TABLE
-        value: Leads
+        value: "Leads"
 
+# =====================================================
+#  Cron Jobs (Scheduled API Invocations)
+# =====================================================
 cronJobs:
+  # Run Autoresponder every 10 minutes
   - name: run-autoresponder
     schedule: "*/10 * * * *"
     command: >
@@ -169,6 +208,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Run Campaigns every 10 minutes
   - name: run-campaigns
     schedule: "*/10 * * * *"
     command: >
@@ -177,6 +217,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Hydrate and activate scheduled campaigns
   - name: schedule-campaigns
     schedule: "*/15 * * * *"
     command: >
@@ -185,6 +226,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Retry runner every 30 minutes
   - name: sms-retry-runner
     schedule: "*/30 * * * *"
     command: >
@@ -193,6 +235,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Reset daily quotas at midnight
   - name: reset-daily-quotas
     schedule: "0 0 * * *"
     command: >
@@ -201,6 +244,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Aggregate KPIs daily at 1 AM
   - name: aggregate-kpis-daily
     schedule: "0 1 * * *"
     command: >
@@ -209,6 +253,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Aggregate KPIs weekly (Mondays)
   - name: aggregate-kpis-weekly
     schedule: "0 2 * * 1"
     command: >
@@ -217,6 +262,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Aggregate KPIs monthly
   - name: aggregate-kpis-monthly
     schedule: "0 3 1 * *"
     command: >
@@ -225,6 +271,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Full CRON orchestration every 15 minutes
   - name: cron-all
     schedule: "*/15 * * * *"
     command: >
@@ -233,6 +280,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Health ping for uptime monitoring
   - name: health-ping
     schedule: "*/5 * * * *"
     command: >
