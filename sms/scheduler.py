@@ -43,25 +43,25 @@ TEST_MODE = os.getenv("TEST_MODE", "false").lower() in {"1", "true", "yes"}
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE", "appMn2MKocaJ9I3rW")
 CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE", "appyhhWYmrM86H35a")
 
-# For compatibility with any legacy code that referenced CAMPAIGNS_BASE_ID
+# Back-compat alias some internal helpers expect
 CAMPAIGNS_BASE_ID = LEADS_CONVOS_BASE
 
-# Numbers table (confirmed from your schema)
-NUMBERS_TABLE_ID = os.getenv("NUMBERS_TABLE_ID", "tblWG3Z2bkZF6k16n")  # safer than name
-NUMBERS_MARKET_FIELD = os.getenv("NUMBERS_MARKET_FIELD", "Market")
-NUMBERS_PHONE_FIELD = os.getenv("NUMBERS_PHONE_FIELD", "Number")
-NUMBERS_STATUS_FIELD = os.getenv("NUMBERS_STATUS_FIELD", "Status")
-NUMBERS_ACTIVE_FIELD = os.getenv("NUMBERS_ACTIVE_FIELD", "Active")
+# Numbers table (confirmed)
+NUMBERS_TABLE_ID      = os.getenv("NUMBERS_TABLE_ID", "tblWG3Z2bkZF6k16n")  # table id is safest
+NUMBERS_MARKET_FIELD  = os.getenv("NUMBERS_MARKET_FIELD", "Market")
+NUMBERS_PHONE_FIELD   = os.getenv("NUMBERS_PHONE_FIELD", "Number")
+NUMBERS_STATUS_FIELD  = os.getenv("NUMBERS_STATUS_FIELD", "Status")
+NUMBERS_ACTIVE_FIELD  = os.getenv("NUMBERS_ACTIVE_FIELD", "Active")
 
 # Prequeue behavior & pacing
-PREQUEUE_JITTER_MAX_SEC = int(os.getenv("PREQUEUE_JITTER_MAX_SEC", "90"))  # spread a bit
-CHUNK_SLEEP_SEC = float(os.getenv("CHUNK_SLEEP_SEC", "0.12"))              # Airtable friendliness
+PREQUEUE_JITTER_MAX_SEC = int(os.getenv("PREQUEUE_JITTER_MAX_SEC", "90"))  # spread slightly around start
+CHUNK_SLEEP_SEC         = float(os.getenv("CHUNK_SLEEP_SEC", "0.12"))      # Airtable friendliness
 
 # ───────────────────────────────────────────────────────────────
 # FIELD MAPS
 # ───────────────────────────────────────────────────────────────
 CAMPAIGN_FIELDS = campaign_field_map()
-DRIP_FIELDS = drip_field_map()
+DRIP_FIELDS     = drip_field_map()
 PROSPECT_FIELDS = prospects_field_map()
 TEMPLATE_FIELDS = template_field_map()
 
@@ -74,16 +74,16 @@ CAMPAIGN_PROSPECTS_LINK   = CAMPAIGN_FIELDS.get("Prospects", "Prospects")
 CAMPAIGN_TEMPLATES_LINK   = CAMPAIGN_FIELDS.get("Templates", "Templates")
 
 # Drip Fields
-DRIP_STATUS_FIELD         = DRIP_FIELDS.get("Status", "Status")
-DRIP_MARKET_FIELD         = DRIP_FIELDS.get("Market", "Market")
-DRIP_SELLER_PHONE_FIELD   = DRIP_FIELDS.get("Seller Phone Number", "Seller Phone Number")
-DRIP_FROM_NUMBER_FIELD    = DRIP_FIELDS.get("TextGrid Phone Number", "TextGrid Phone Number")
-DRIP_PROSPECT_LINK_FIELD  = DRIP_FIELDS.get("Prospect", "Prospect")
-DRIP_CAMPAIGN_LINK_FIELD  = DRIP_FIELDS.get("Campaign", "Campaign")
-DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS.get("Next Send Date", "Next Send Date")
-DRIP_UI_FIELD             = DRIP_FIELDS.get("UI", "UI")
-DRIP_PROCESSOR_FIELD      = DRIP_FIELDS.get("Processor", "Processor")
-DRIP_MESSAGE_PREVIEW_FIELD= DRIP_FIELDS.get("Message Preview", "Message Preview")
+DRIP_STATUS_FIELD          = DRIP_FIELDS.get("Status", "Status")
+DRIP_MARKET_FIELD          = DRIP_FIELDS.get("Market", "Market")
+DRIP_SELLER_PHONE_FIELD    = DRIP_FIELDS.get("Seller Phone Number", "Seller Phone Number")
+DRIP_FROM_NUMBER_FIELD     = DRIP_FIELDS.get("TextGrid Phone Number", "TextGrid Phone Number")
+DRIP_PROSPECT_LINK_FIELD   = DRIP_FIELDS.get("Prospect", "Prospect")
+DRIP_CAMPAIGN_LINK_FIELD   = DRIP_FIELDS.get("Campaign", "Campaign")
+DRIP_NEXT_SEND_DATE_FIELD  = DRIP_FIELDS.get("Next Send Date", "Next Send Date")
+DRIP_UI_FIELD              = DRIP_FIELDS.get("UI", "UI")
+DRIP_PROCESSOR_FIELD       = DRIP_FIELDS.get("Processor", "Processor")
+DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS.get("Message Preview", "Message Preview")
 
 SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
 
@@ -154,7 +154,7 @@ def _render_message(template: str, pf: Dict[str, Any]) -> str:
     if isinstance(raw_name, str) and raw_name.strip():
         first_name = raw_name.strip().split()[0].replace(".", "")
 
-    # Single-selects generally arrive as strings in the API, but guard lists
+    # Single-selects usually arrive as strings; guard lists just in case
     addr_val = pf.get("Property Address")
     city_val = pf.get("Property City")
     if isinstance(addr_val, list) and addr_val: addr_val = addr_val[0]
@@ -187,7 +187,7 @@ def _choose_rotating(market_key: str, pool: List[str]) -> Optional[str]:
 def _fetch_textgrid_number_pool(market_raw: str) -> List[str]:
     """
     Fetch (and cache) the pool of active numbers for a market.
-    Returns [] if none for that market. Uses exact equality for single-select.
+    Single-select equality match on Market, Status='Active', Active=1/true.
     """
     mk = _market_key(market_raw)
     if mk in _numbers_cache:
@@ -203,8 +203,14 @@ def _fetch_textgrid_number_pool(market_raw: str) -> List[str]:
         f"LOWER({{{NUMBERS_STATUS_FIELD}}})='active'"
         f")"
     )
-    resp = requests.get(url, headers=headers, params={"filterByFormula": exact, "pageSize": 100}, timeout=12)
-    recs = (resp.json() or {}).get("records", []) if resp.status_code == 200 else []
+    try:
+        resp = requests.get(url, headers=headers, params={"filterByFormula": exact, "pageSize": 100}, timeout=12)
+        resp.raise_for_status()
+        recs = (resp.json() or {}).get("records", [])
+    except Exception as exc:
+        logger.error("❌ Numbers fetch failed for %s: %s", market_raw, exc)
+        _numbers_cache[mk] = []
+        return []
 
     pool: List[str] = []
     for r in recs:
@@ -214,6 +220,8 @@ def _fetch_textgrid_number_pool(market_raw: str) -> List[str]:
             pool.append(num.strip())
 
     _numbers_cache[mk] = pool
+    if not pool:
+        logger.warning("⚠️ Market %s has no active numbers (exact single-select match).", market_raw)
     return pool
 
 def _fetch_textgrid_number_global_pool() -> List[str]:
@@ -223,9 +231,20 @@ def _fetch_textgrid_number_global_pool() -> List[str]:
 
     url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{NUMBERS_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    fb = f"AND(OR({{{NUMBERS_ACTIVE_FIELD}}}=1,{{{NUMBERS_ACTIVE_FIELD}}}='true'),LOWER({{{NUMBERS_STATUS_FIELD}}})='active')"
-    resp = requests.get(url, headers=headers, params={"filterByFormula": fb, "pageSize": 100}, timeout=12)
-    recs = (resp.json() or {}).get("records", []) if resp.status_code == 200 else []
+    fb = (
+        f"AND("
+        f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1,{{{NUMBERS_ACTIVE_FIELD}}}='true'),"
+        f"LOWER({{{NUMBERS_STATUS_FIELD}}})='active'"
+        f")"
+    )
+    try:
+        resp = requests.get(url, headers=headers, params={"filterByFormula": fb, "pageSize": 100}, timeout=12)
+        resp.raise_for_status()
+        recs = (resp.json() or {}).get("records", [])
+    except Exception as exc:
+        logger.error("❌ Global numbers fetch failed: %s", exc)
+        _numbers_cache["_global"] = []
+        return []
 
     pool: List[str] = []
     for r in recs:
@@ -235,17 +254,18 @@ def _fetch_textgrid_number_global_pool() -> List[str]:
             pool.append(num.strip())
 
     _numbers_cache["_global"] = pool
+    if not pool:
+        logger.error("🚫 No active TextGrid numbers found globally.")
     return pool
 
 def _choose_number_for_market(market_raw: str) -> Optional[str]:
     """
-    Choose a number for a prospect in this market (round-robin).
+    Choose a number for a prospect in this market (round-robin per prospect).
     Falls back to global pool if the market has no active numbers.
     """
     mk = _market_key(market_raw)
     pool = _fetch_textgrid_number_pool(market_raw)
     if not pool:
-        logger.warning("⚠️ Market %s has no active numbers; using global pool.", market_raw)
         gpool = _fetch_textgrid_number_global_pool()
         return _choose_rotating("_global", gpool) if gpool else None
     return _choose_rotating(mk, pool)
@@ -264,14 +284,15 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
     try:
         campaigns_h = CONNECTOR.campaigns()
         prospects_h = CONNECTOR.prospects()
-        drip_h = CONNECTOR.drip_queue()
+        drip_h      = CONNECTOR.drip_queue()
         templates_h = CONNECTOR.templates()
 
         # Pull ALL campaigns, then process all with Status == Scheduled
         campaigns = list_records(campaigns_h, page_size=100)
+
         # Sort by Start Time so multiple scheduled campaigns run predictably
-        def _start(f): 
-            return _parse_iso((f.get("fields") or {}).get(CAMPAIGN_START_FIELD)) or datetime.now(timezone.utc)
+        def _start(rec):
+            return _parse_iso((rec.get("fields") or {}).get(CAMPAIGN_START_FIELD)) or datetime.now(timezone.utc)
         campaigns_sorted = sorted(campaigns, key=_start)
 
         # Build de-dupe set from existing drip (campaign + last10)
@@ -294,8 +315,8 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 continue
 
             campaign_id = camp.get("id")
-            start_time = _campaign_start(cfields)
-            market = _campaign_market(cfields)
+            start_time  = _campaign_start(cfields)
+            market      = _campaign_market(cfields)
             if not market:
                 logger.warning("⚠️ Campaign %s missing Market; skipping", campaign_id)
                 continue
@@ -342,7 +363,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 ts = base_ts + random.randint(0, max(0, PREQUEUE_JITTER_MAX_SEC))
                 return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
-            # IMPORTANT: we choose a number **per prospect** for true rotation
+            # Per-prospect rotation (choose number each time)
             for idx, pr in enumerate(prospects):
                 processed += 1
                 pf = pr.get("fields", {}) or {}
@@ -389,7 +410,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     logger.warning("Create failed for %s: %s", digits, exc)
                     skipped += 1; skip_reasons["create_failed"] += 1
 
-            # Flip Status → Active only when we're at/after Start Time and we queued at least one
+            # Flip Status → Active once we reach start time AND queued at least one
             if queued and now_utc >= start_time:
                 try:
                     update_record(campaigns_h, campaign_id, {
@@ -399,7 +420,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 except Exception:
                     pass
             else:
-                # Keep as Scheduled (prequeued), but update Last Run At for traceability
+                # Keep as Scheduled; record last run for traceability
                 try:
                     update_record(campaigns_h, campaign_id, {
                         CAMPAIGN_LAST_RUN_FIELD: iso_now(),
