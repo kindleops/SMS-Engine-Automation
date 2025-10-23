@@ -122,50 +122,61 @@ LEAD_FIELDS = leads_field_map()
 PROSPECT_FIELDS = prospects_field_map()
 TEMPLATE_FIELDS = template_field_map()
 
-CONV_FROM_FIELD = CONV_FIELDS["FROM"]
-CONV_TO_FIELD = CONV_FIELDS["TO"]
-CONV_BODY_FIELD = CONV_FIELDS["BODY"]
-CONV_STATUS_FIELD = CONV_FIELDS["STATUS"]
-CONV_DIRECTION_FIELD = CONV_FIELDS["DIRECTION"]
-CONV_RECEIVED_AT_FIELD = CONV_FIELDS["RECEIVED_AT"]
-CONV_INTENT_FIELD = CONV_FIELDS["INTENT"]
-CONV_PROCESSED_BY_FIELD = CONV_FIELDS["PROCESSED_BY"]
-CONV_SENT_AT_FIELD = CONV_FIELDS["SENT_AT"]
-CONV_STAGE_FIELD = CONV_FIELD_NAMES["STAGE"]
-CONV_PROCESSED_AT_FIELD = CONV_FIELD_NAMES["PROCESSED_AT"]
-CONV_TEMPLATE_RECORD_FIELD = CONV_FIELD_NAMES["TEMPLATE_RECORD_ID"]
-CONV_TEMPLATE_LINK_FIELD = CONV_FIELD_NAMES["TEMPLATE_LINK"]
-CONV_PROSPECT_LINK_FIELD = CONV_FIELD_NAMES["PROSPECT_LINK"]
-CONV_LEAD_LINK_FIELD = CONV_FIELD_NAMES["LEAD_LINK"]
-CONV_PROSPECT_RECORD_FIELD = CONV_FIELD_NAMES["PROSPECT_RECORD_ID"]
-CONV_PROPERTY_ID_FIELD = CONV_FIELD_NAMES["PROPERTY_ID"]
-CONV_CAMPAIGN_LINK_FIELD = CONV_FIELD_NAMES["CAMPAIGN_LINK"]
-CONV_DRIP_LINK_FIELD = CONV_FIELD_NAMES["DRIP_QUEUE_LINK"]
-CONV_AI_INTENT_FIELD = CONV_FIELD_NAMES.get("AI_INTENT")  # optional
+# --- Conversations fields ---
+CONV_FROM_FIELD = CONV_FIELDS.get("FROM", "Seller Phone Number")
+CONV_TO_FIELD = CONV_FIELDS.get("TO", "TextGrid Number")
+CONV_BODY_FIELD = CONV_FIELDS.get("BODY", "Body")
+CONV_STATUS_FIELD = CONV_FIELDS.get("STATUS", "Status")
+CONV_DIRECTION_FIELD = CONV_FIELDS.get("DIRECTION", "Direction")
+CONV_RECEIVED_AT_FIELD = CONV_FIELDS.get("RECEIVED_AT", "Received At")
+CONV_INTENT_FIELD = CONV_FIELDS.get("INTENT", "Intent")
+CONV_PROCESSED_BY_FIELD = CONV_FIELDS.get("PROCESSED_BY", "Processed By")
+CONV_SENT_AT_FIELD = CONV_FIELDS.get("SENT_AT", "Sent At")
+CONV_STAGE_FIELD = CONV_FIELD_NAMES.get("STAGE", "Stage")
+CONV_PROCESSED_AT_FIELD = CONV_FIELD_NAMES.get("PROCESSED_AT", "Processed At")
+CONV_TEMPLATE_RECORD_FIELD = CONV_FIELD_NAMES.get("TEMPLATE_RECORD_ID", "Template Record ID")
+CONV_TEMPLATE_LINK_FIELD = CONV_FIELD_NAMES.get("TEMPLATE_LINK", "Template Link")
+CONV_PROSPECT_LINK_FIELD = CONV_FIELD_NAMES.get("PROSPECT_LINK", "Prospect")
+CONV_LEAD_LINK_FIELD = CONV_FIELD_NAMES.get("LEAD_LINK", "Lead")
+CONV_PROSPECT_RECORD_FIELD = CONV_FIELD_NAMES.get("PROSPECT_RECORD_ID", "Prospect Record ID")
+CONV_PROPERTY_ID_FIELD = CONV_FIELD_NAMES.get("PROPERTY_ID", "Property ID")
+CONV_CAMPAIGN_LINK_FIELD = CONV_FIELD_NAMES.get("CAMPAIGN_LINK", "Campaign")
+CONV_DRIP_LINK_FIELD = CONV_FIELD_NAMES.get("DRIP_QUEUE_LINK", "Drip Queue Link")
+CONV_AI_INTENT_FIELD = CONV_FIELD_NAMES.get("AI_INTENT", "AI Intent")
+
+# --- Candidate fallbacks ---
+CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "Seller Phone Number", "From"]
+CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Number", "From Number", "To"]
+CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Body", "Message"]
+CONV_DIRECTION_CANDIDATES = [CONV_DIRECTION_FIELD, "Direction", "direction"]
+CONV_PROCESSED_BY_CANDIDATES = [CONV_PROCESSED_BY_FIELD, "Processed By", "processed_by"]
 
 TEMPLATE_INTENT_FIELD = TEMPLATE_FIELDS.get("INTERNAL_ID", "Internal ID")
 TEMPLATE_MESSAGE_FIELD = TEMPLATE_FIELDS.get("MESSAGE", "Message")
 
-DRIP_STATUS_FIELD = DRIP_FIELDS["STATUS"]
+# --- Drip Queue fields (fully safe, aligned with your Airtable schema) ---
+DRIP_STATUS_FIELD = DRIP_FIELDS.get("STATUS", "Status")
 DRIP_PROCESSOR_FIELD = DRIP_FIELDS.get("PROCESSOR", "Processor")
 DRIP_MARKET_FIELD = DRIP_FIELDS.get("MARKET", "Market")
 DRIP_TEMPLATE_LINK_FIELD = DRIP_FIELDS.get("TEMPLATE_LINK", "Template")
 DRIP_PROSPECT_LINK_FIELD = DRIP_FIELDS.get("PROSPECT_LINK", "Prospect")
 DRIP_CAMPAIGN_LINK_FIELD = DRIP_FIELDS.get("CAMPAIGN_LINK", "Campaign")
 DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS.get("SELLER_PHONE", "Seller Phone Number")
-DRIP_TEXTGRID_PHONE_FIELD = DRIP_FIELDS.get("TEXTGRID_PHONE", "TextGrid Phone Number")
+DRIP_TEXTGRID_PHONE_FIELD = DRIP_FIELDS.get("TEXTGRID_PHONE", "TextGrid Number")
 DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS.get("FROM_NUMBER", "From Number")
-DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS.get("MESSAGE_PREVIEW", "Message Preview")
+DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS.get("MESSAGE_PREVIEW", "Message")
 DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS.get("NEXT_SEND_DATE", "Next Send Date")
-DRIP_NEXT_SEND_AT_UTC_FIELD = DRIP_FIELDS.get("NEXT_SEND_AT_UTC", "next_send_at_utc")
+# Airtable will store ISO timestamps, so reuse same field for UTC
+DRIP_NEXT_SEND_AT_UTC_FIELD = "Next Send Date"
 DRIP_PROPERTY_ID_FIELD = DRIP_FIELDS.get("PROPERTY_ID", "Property ID")
 DRIP_UI_FIELD = DRIP_FIELDS.get("UI", "UI")
 
-LEAD_STATUS_FIELD = LEAD_FIELDS["STATUS"]
+# --- Leads ---
+LEAD_STATUS_FIELD = LEAD_FIELDS.get("STATUS", "Status")
 
-CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "From", "phone"]
-CONV_TO_CANDIDATES = [CONV_TO_FIELD, "To", "to_number"]
-CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Body", "message"]
+CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "Seller Phone Number", "phone"]
+CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Phone Number", "to_number"]
+CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Body", "Message"]
 CONV_DIRECTION_CANDIDATES = [CONV_DIRECTION_FIELD, "Direction", "direction"]
 CONV_PROCESSED_BY_CANDIDATES = [CONV_PROCESSED_BY_FIELD, "Processed By", "processed_by"]
 
@@ -621,43 +632,66 @@ class Autoresponder:
         return created.get("id"), property_id
 
     # -------------------------- Drip: enqueue a message at a specific UTC time
-    def _enqueue_drip(self, conv_record: Dict[str, Any], conv_fields: Dict[str, Any], preview_text: str, when_utc: datetime, template_id: Optional[str], prospect_id: Optional[str]) -> Optional[str]:
+    def _enqueue_reply(
+        self,
+        record: Dict[str, Any],
+        fields: Dict[str, Any],
+        reply_text: str,
+        template_id: Optional[str],
+        queue_time: datetime,
+        lead_id: Optional[str],
+        prospect_id: Optional[str],
+        conv_stage_label: str,
+        template_category: Optional[str],
+    ) -> bool:
         if not self.drip:
-            return None
+            return False
+
+        campaign_link = _normalise_link(fields.get(CONV_CAMPAIGN_LINK_FIELD))
+
+        # ✅ Match Airtable casing exactly
         payload = {
-            DRIP_STATUS_FIELD: "QUEUED",
+            DRIP_STATUS_FIELD: "Queued",
             DRIP_PROCESSOR_FIELD: self.processed_by,
-            DRIP_MARKET_FIELD: conv_fields.get("Market"),
-            DRIP_SELLER_PHONE_FIELD: _get_first(conv_fields, CONV_FROM_CANDIDATES),
-            DRIP_TEXTGRID_PHONE_FIELD: _get_first(conv_fields, CONV_TO_CANDIDATES),
-            DRIP_FROM_NUMBER_FIELD: _get_first(conv_fields, CONV_TO_CANDIDATES),
-            DRIP_MESSAGE_PREVIEW_FIELD: preview_text,
-            DRIP_NEXT_SEND_DATE_FIELD: when_utc.date().isoformat(),
-            DRIP_NEXT_SEND_AT_UTC_FIELD: when_utc.isoformat(),
-            DRIP_PROPERTY_ID_FIELD: conv_fields.get(CONV_PROPERTY_ID_FIELD),
-            DRIP_UI_FIELD: STATUS_ICON.get("QUEUED"),
+            DRIP_MARKET_FIELD: fields.get("Market"),
+            DRIP_SELLER_PHONE_FIELD: _get_first(fields, CONV_FROM_CANDIDATES),
+            DRIP_TEXTGRID_PHONE_FIELD: _get_first(fields, CONV_TO_CANDIDATES),
+            DRIP_FROM_NUMBER_FIELD: _get_first(fields, CONV_TO_CANDIDATES),
+            DRIP_MESSAGE_PREVIEW_FIELD: reply_text,
+            DRIP_NEXT_SEND_DATE_FIELD: queue_time.astimezone(timezone.utc).date().isoformat(),
+            DRIP_NEXT_SEND_AT_UTC_FIELD: queue_time.astimezone(timezone.utc).isoformat(),
+            DRIP_PROPERTY_ID_FIELD: fields.get(CONV_PROPERTY_ID_FIELD),
+            DRIP_UI_FIELD: STATUS_ICON.get("QUEUED", "⏳"),
         }
-        campaign_link = _normalise_link(conv_fields.get(CONV_CAMPAIGN_LINK_FIELD))
-        if campaign_link:
-            payload[DRIP_CAMPAIGN_LINK_FIELD] = [campaign_link]
+
+        if template_category:
+            payload.setdefault("Template Category", template_category)
         if template_id:
             payload[DRIP_TEMPLATE_LINK_FIELD] = [template_id]
         if prospect_id:
             payload[DRIP_PROSPECT_LINK_FIELD] = [prospect_id]
+        if campaign_link:
+            payload[DRIP_CAMPAIGN_LINK_FIELD] = [campaign_link]
 
         try:
             created = self.drip.create(payload)
         except Exception as exc:
-            self.summary["errors"].append({"conversation": conv_record.get("id"), "error": f"drip enqueue failed: {exc}"})
-            return None
+            self.summary["errors"].append(
+                {"conversation": record.get("id"), "error": f"Queue failed: {exc}"}
+            )
+            return False
 
         if created and created.get("id"):
-            try:
-                self.convos.update(conv_record["id"], {CONV_DRIP_LINK_FIELD: [created["id"]]})
-            except Exception:
-                pass
-            return created["id"]
-        return None
+            self.convos.update(
+                record["id"],
+                {
+                    CONV_DRIP_LINK_FIELD: [created["id"]],
+                    CONV_TEMPLATE_LINK_FIELD: [template_id] if template_id else None,
+                },
+            )
+            return True
+
+        return False
 
     # -------------------------- Immediate send (fallback if no drip engine)
     def _send_immediate(self, from_number: str, body: str, to_number: Optional[str], lead_id: Optional[str], property_id: Optional[str]) -> None:
