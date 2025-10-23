@@ -567,20 +567,31 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     due: List[dict] = []
     for r in rows:
         f = r.get("fields", {})
+        status = str(f.get(DRIP_STATUS_FIELD) or "")
+        when_raw = f.get(DRIP_NEXT_SEND_DATE_FIELD) or f.get("scheduled_at")
+        when = _parse_iso_maybe_ct(when_raw) or now
+
+        # 🔍 Debug prints for the first few rows
+        if status in ("READY", "QUEUED", "SENDING"):
+            print("DEBUG:", f.get("Record ID"), status, when_raw, when, now)
+
         if campaign_id:
             cids = f.get(DRIP_CAMPAIGN_FIELD) or []
             if not isinstance(cids, list):
                 cids = [cids]
             if campaign_id not in cids:
                 continue
-        status = str(f.get(DRIP_STATUS_FIELD) or "")
-        if status not in (DripStatus.QUEUED.value, DripStatus.READY.value, DripStatus.SENDING.value):
+
+        if status not in (
+            DripStatus.QUEUED.value,
+            DripStatus.READY.value,
+            DripStatus.SENDING.value,
+        ):
             continue
-        when = _parse_iso_maybe_ct(
-            f.get(DRIP_NEXT_SEND_DATE_FIELD) or f.get("scheduled_at")
-        ) or now
-        if when <= now:
-            due.append(r)
+
+        # temporarily include all for debugging
+        # if when <= now:
+        due.append(r)
 
     if not due:
         return {"ok": True, "total_sent": 0, "note": "No due messages"}
