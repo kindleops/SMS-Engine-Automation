@@ -188,7 +188,7 @@ def get_kpis(table_name: str = "KPIs") -> Any | None:
 
 
 @lru_cache(maxsize=None)
-def get_runs(table_name: str = "Runs/Logs") -> Any | None:
+def get_runs(table_name: str = "Logs") -> Any | None:
     """Runs/Logs table (Performance base). Accepts RUNS_TABLE or RUNS_TABLE_NAME."""
     return get_table(
         "AIRTABLE_REPORTING_KEY",

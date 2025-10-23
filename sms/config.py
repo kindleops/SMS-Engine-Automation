@@ -246,7 +246,7 @@ def settings() -> Settings:
         CAMPAIGN_MANAGER_TABLE="Campaigns Manager",
         OPTOUTS_TABLE="Opt-Outs",
         MARKETS_TABLE="Markets",
-        LOGS_TABLE="Runs/Logs",
+        LOGS_TABLE="Logs",
         KPIS_TABLE="KPIs",
         DEVOPS_SERVICES_TABLE="Services",
         DEVOPS_DEPLOYMENTS_TABLE="Deployments",

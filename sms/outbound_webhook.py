@@ -718,7 +718,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             time.sleep(SLEEP_BETWEEN_SENDS_SEC)
 
     # KPIs (best effort)
-    runs = get_table(PERF_BASE_ENV, "Runs/Logs")
+    runs = get_table(PERF_BASE_ENV, "Logs")
     kpis = get_table(PERF_BASE_ENV, "KPIs")
     now_iso = utcnow().isoformat()
     if runs:

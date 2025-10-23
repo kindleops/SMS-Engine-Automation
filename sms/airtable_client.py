@@ -179,7 +179,7 @@ def get_kpis():
 
 @lru_cache(maxsize=None)
 def get_runs():
-    return get_performance_table(_first_env("RUNS_TABLE", "RUNS_TABLE_NAME") or "Runs/Logs")
+    return get_performance_table(_first_env("RUNS_TABLE", "RUNS_TABLE_NAME") or "Logs")
 
 
 # ---------------- field-safe helpers ----------------

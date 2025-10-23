@@ -12,7 +12,7 @@ def _get_table():
     if not (AIRTABLE_KEY and PERF_BASE):
         return None
     try:
-        return Table(AIRTABLE_KEY, PERF_BASE, "Runs/Logs")
+        return Table(AIRTABLE_KEY, PERF_BASE, "Logs")
     except Exception:
         traceback.print_exc()
         return None
@@ -27,7 +27,7 @@ def log_run(
     extra: dict | None = None,
 ):
     """
-    Write a row into Runs/Logs table in Performance base.
+    Write a row into Logs table in Performance base.
 
     Args:
         run_type (str): Type of run (e.g. "CAMPAIGN_RUN", "AUTORESPONDER", "INBOUND").

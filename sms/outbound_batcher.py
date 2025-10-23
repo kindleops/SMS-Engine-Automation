@@ -567,13 +567,10 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     due: List[dict] = []
     for r in rows:
         f = r.get("fields", {})
-        status = str(f.get(DRIP_STATUS_FIELD) or "")
-        when_raw = f.get(DRIP_NEXT_SEND_DATE_FIELD) or f.get("scheduled_at")
-        when = _parse_iso_maybe_ct(when_raw) or now
-
-        # 🔍 Debug prints for the first few rows
-        if status in ("READY", "QUEUED", "SENDING"):
-            print("DEBUG:", f.get("Record ID"), status, when_raw, when, now)
+        status = str(f.get(DRIP_STATUS_FIELD) or "").upper()
+        when = _parse_iso_maybe_ct(
+            f.get(DRIP_NEXT_SEND_DATE_FIELD) or f.get("scheduled_at")
+        ) or now
 
         if campaign_id:
             cids = f.get(DRIP_CAMPAIGN_FIELD) or []
@@ -582,12 +579,11 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             if campaign_id not in cids:
                 continue
 
-        if status not in (
-            DripStatus.QUEUED.value,
-            DripStatus.READY.value,
-            DripStatus.SENDING.value,
-        ):
+        if status not in ("QUEUED", "READY", "SENDING"):
             continue
+
+        if when <= now:
+            due.append(r)
 
         # temporarily include all for debugging
         # if when <= now:
@@ -731,7 +727,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             time.sleep(SLEEP_BETWEEN_SENDS_SEC)
 
     # KPIs (best effort)
-    runs = get_table(PERF_BASE_ENV, "Runs/Logs")
+    runs = get_table(PERF_BASE_ENV, "Logs")
     kpis = get_table(PERF_BASE_ENV, "KPIs")
     now_iso = utcnow().isoformat()
     if runs:

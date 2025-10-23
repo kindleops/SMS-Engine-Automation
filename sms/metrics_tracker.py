@@ -45,7 +45,7 @@ PERF_BASE      = os.getenv("PERFORMANCE_BASE")
 CAMPAIGNS_TABLE     = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 KPIS_TABLE          = os.getenv("KPIS_TABLE_NAME", "KPIs")
-RUNS_TABLE          = os.getenv("RUNS_TABLE_NAME", "Runs/Logs")
+RUNS_TABLE          = os.getenv("RUNS_TABLE_NAME", "Logs")
 
 # ───────────────────────────────── Field mappings (env overrideable) ─────────────────────────────
 CONV_FROM_FIELD         = CONV_FIELDS["FROM"]
