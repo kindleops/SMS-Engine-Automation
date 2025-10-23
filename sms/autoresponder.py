@@ -174,8 +174,8 @@ DRIP_UI_FIELD = DRIP_FIELDS.get("UI", "UI")
 # --- Leads ---
 LEAD_STATUS_FIELD = LEAD_FIELDS.get("STATUS", "Status")
 
-CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "Seller Phone Number", "phone"]
-CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Phone Number", "to_number"]
+CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "Seller Phone Number", "From", "phone"]
+CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Phone Number", "From Number", "To", "to_number"]
 CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Body", "Message"]
 CONV_DIRECTION_CANDIDATES = [CONV_DIRECTION_FIELD, "Direction", "direction"]
 CONV_PROCESSED_BY_CANDIDATES = [CONV_PROCESSED_BY_FIELD, "Processed By", "processed_by"]
@@ -546,8 +546,8 @@ class Autoresponder:
         return ("Thanks for the reply.", None, None)
 
     # -------------------------- Fetching
-    def _fetch_inbound(self, limit: int) -> List[Dict[str, Any]]:
-        view = os.getenv("CONV_VIEW_INBOUND", "Unprocessed Inbounds")
+    def _fetch_inbound(self, limit: int, view: Optional[str] = None) -> List[Dict[str, Any]]:
+        view = view or os.getenv("CONV_VIEW_INBOUND", "Unprocessed Inbounds")
         try:
             records = self.convos.all(view=view, max_records=limit)
             if records:
@@ -712,8 +712,8 @@ class Autoresponder:
             self.summary["errors"].append({"phone": from_number, "error": f"Immediate send failed: {exc}"})
 
     # -------------------------- Process loop
-    def process(self, limit: int) -> Dict[str, Any]:
-        records = self._fetch_inbound(limit)
+    def process(self, limit: int, view: Optional[str] = None) -> Dict[str, Any]:
+        records = self._fetch_inbound(limit, view=view)
         if not records:
             return {"ok": False, "processed": 0, "breakdown": {}, "errors": []}
 
@@ -997,9 +997,9 @@ class Autoresponder:
             self.summary["errors"].append({"conversation": conv_id, "error": f"conversation update failed: {exc}"})
 
 
-def run_autoresponder(limit: int = 50) -> Dict[str, Any]:
+def run_autoresponder(limit: int = 50, view: Optional[str] = None) -> Dict[str, Any]:
     service = Autoresponder()
-    return service.process(limit)
+    return service.process(limit, view=view)
 
 
 if __name__ == "__main__":

@@ -39,8 +39,23 @@ DRIP_FIELDS = drip_field_map()
 DRIP_FIELD_NAMES = DRIP_QUEUE_TABLE.field_names()
 CONV_FIELDS = conversations_field_map()
 
+
+def _resolve_status_field() -> str:
+    """Return the active delivery status column for the drip queue."""
+
+    direct = DRIP_FIELDS.get("STATUS") or DRIP_FIELD_NAMES.get("STATUS")
+    if direct:
+        return direct
+
+    for value in list(DRIP_FIELDS.values()) + list(DRIP_FIELD_NAMES.values()):
+        if isinstance(value, str) and value.strip().lower() == "delivery status":
+            return value
+
+    return "Delivery Status"
+
+
 # Column aliases
-DRIP_STATUS_FIELD = DRIP_FIELDS["Status"]
+DRIP_STATUS_FIELD = _resolve_status_field()
 DRIP_MESSAGE_FIELD = DRIP_FIELDS.get("Message Preview", "message_preview")
 DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS.get("SELLER_PHONE", "Seller Phone Number")
 DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS.get("TEXTGRID_PHONE_NUMBER", "TextGrid Phone Number")

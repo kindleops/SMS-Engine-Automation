@@ -28,7 +28,6 @@ try:
 except ImportError:
     Table = None
 
-from sms.textgrid_sender import send_message
 from sms.retry_handler import handle_retry
 from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS, LEAD_FIELDS
 from sms.airtable_schema import ConversationDirection, ConversationDeliveryStatus
@@ -157,6 +156,8 @@ class MessageProcessor:
 
         # --- 1️⃣ Send message via provider
         try:
+            from sms.textgrid_sender import send_message
+
             send_result = send_message(phone, body, from_number=from_number)
         except Exception as e:
             err = str(e)
