@@ -6,7 +6,8 @@ No Airtable writes occur.
 """
 
 import os
-from sms.autoresponder import Autoresponder, classify_intent
+from sms.autoresponder import Autoresponder
+from sms.intent import classify_intent
 
 def main():
     ar = Autoresponder()
