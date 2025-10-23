@@ -1,4 +1,4 @@
-"""Campaign scheduler that hydrates Drip Queue from Airtable campaigns (production)."""
+"""Campaign scheduler that hydrates Drip Queue from Airtable campaigns (production + deep telemetry)."""
 
 from __future__ import annotations
 
@@ -8,9 +8,8 @@ import random
 import requests
 from pathlib import Path
 from datetime import datetime, timezone
-from urllib.parse import quote
 from typing import Any, Dict, List, Optional
-from collections import defaultdict
+from collections import defaultdict, deque
 from dotenv import load_dotenv
 
 # Internal Imports
@@ -37,25 +36,24 @@ if not AIRTABLE_API_KEY:
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() in {"1", "true", "yes"}
 
-# =========================
-# Airtable Bases
-# =========================
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE", "appMn2MKocaJ9I3rW")
-CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE", "appyhhWYmrM86H35a")
-
-# Back-compat alias some internal helpers expect
-CAMPAIGNS_BASE_ID = LEADS_CONVOS_BASE
+# Bases
+LEADS_CONVOS_BASE      = os.getenv("LEADS_CONVOS_BASE", "appMn2MKocaJ9I3rW")
+CAMPAIGN_CONTROL_BASE  = os.getenv("CAMPAIGN_CONTROL_BASE", "appyhhWYmrM86H35a")
+CAMPAIGNS_BASE_ID      = LEADS_CONVOS_BASE  # back-compat alias
 
 # Numbers table (confirmed)
-NUMBERS_TABLE_ID      = os.getenv("NUMBERS_TABLE_ID", "tblWG3Z2bkZF6k16n")  # table id is safest
+NUMBERS_TABLE_ID      = os.getenv("NUMBERS_TABLE_ID", "tblWG3Z2bkZF6k16n")
 NUMBERS_MARKET_FIELD  = os.getenv("NUMBERS_MARKET_FIELD", "Market")
 NUMBERS_PHONE_FIELD   = os.getenv("NUMBERS_PHONE_FIELD", "Number")
 NUMBERS_STATUS_FIELD  = os.getenv("NUMBERS_STATUS_FIELD", "Status")
 NUMBERS_ACTIVE_FIELD  = os.getenv("NUMBERS_ACTIVE_FIELD", "Active")
 
-# Prequeue behavior & pacing
-PREQUEUE_JITTER_MAX_SEC = int(os.getenv("PREQUEUE_JITTER_MAX_SEC", "90"))  # spread slightly around start
-CHUNK_SLEEP_SEC         = float(os.getenv("CHUNK_SLEEP_SEC", "0.12"))      # Airtable friendliness
+# Pacing
+PREQUEUE_JITTER_MAX_SEC = int(os.getenv("PREQUEUE_JITTER_MAX_SEC", "90"))
+CHUNK_SLEEP_SEC         = float(os.getenv("CHUNK_SLEEP_SEC", "0.12"))
+
+# Optional safety caps (leave unset to disable)
+MAX_QUEUE_PER_CAMPAIGN = int(os.getenv("MAX_QUEUE_PER_CAMPAIGN", "0")) or None
 
 # ───────────────────────────────────────────────────────────────
 # FIELD MAPS
@@ -113,26 +111,34 @@ def _coerce_market(value: Any) -> str:
 def _campaign_market(fields: Dict[str, Any]) -> str:
     return _coerce_market(fields.get(CAMPAIGN_MARKET_FIELD))
 
+# Wider phone sweep: include common lookup/list variants.
+_PHONE_FIELD_CANDIDATES = [
+    # from schema maps (if present)
+    lambda pf: PROSPECT_FIELDS.get("PHONE_PRIMARY"),
+    lambda pf: PROSPECT_FIELDS.get("PHONE_PRIMARY_LINKED"),
+    lambda pf: PROSPECT_FIELDS.get("PHONE_SECONDARY"),
+    lambda pf: PROSPECT_FIELDS.get("PHONE_SECONDARY_LINKED"),
+    # explicit names we’ve seen
+    lambda pf: "Phone 1 (from Linked Owner)",
+    lambda pf: "Phone 2 (from Linked Owner)",
+    lambda pf: "Phone 3 (from Linked Owner)",
+    lambda pf: "Phone 4 (from Linked Owner)",
+    lambda pf: "Phones (from Linked Owner)",
+    lambda pf: "Owner Phones",
+    lambda pf: "Owner Phone",
+    lambda pf: "Phone 1",
+    lambda pf: "Phone 2",
+    lambda pf: "Phones",
+    lambda pf: "Primary Phone",
+    lambda pf: "Phone",
+    lambda pf: "phone",
+]
+
 def _prospect_best_phone(fields: Dict[str, Any]) -> Optional[str]:
-    """
-    Return best normalized phone number from common fields (string or list).
-    Includes Linked Owner variants to maximize hit rate.
-    """
-    candidates: List[str] = [
-        PROSPECT_FIELDS.get("PHONE_PRIMARY"),
-        PROSPECT_FIELDS.get("PHONE_PRIMARY_LINKED"),
-        PROSPECT_FIELDS.get("PHONE_SECONDARY"),
-        PROSPECT_FIELDS.get("PHONE_SECONDARY_LINKED"),
-        "Phone 1 (from Linked Owner)",
-        "Phone 2 (from Linked Owner)",
-        "Phone 1",
-        "Phone 2",
-        "Phones",
-        "Owner Phone",
-        "Primary Phone",
-        "Phone", "phone",
-    ]
-    for key in [c for c in candidates if c]:
+    for fn in _PHONE_FIELD_CANDIDATES:
+        key = fn(fields)
+        if not key:
+            continue
         val = fields.get(key)
         if isinstance(val, list):
             for v in val:
@@ -148,13 +154,11 @@ def _prospect_best_phone(fields: Dict[str, Any]) -> Optional[str]:
 # ───────────────────────────────────────────────────────────────
 def _render_message(template: str, pf: Dict[str, Any]) -> str:
     """Render {First}, {Address}, {Property City} using exact column names."""
-    # First name from linked-owner name, strip middle initials like "N."
     raw_name = pf.get("Phone 1 Name (Primary) (from Linked Owner)") or ""
     first_name = ""
     if isinstance(raw_name, str) and raw_name.strip():
         first_name = raw_name.strip().split()[0].replace(".", "")
 
-    # Single-selects usually arrive as strings; guard lists just in case
     addr_val = pf.get("Property Address")
     city_val = pf.get("Property City")
     if isinstance(addr_val, list) and addr_val: addr_val = addr_val[0]
@@ -177,26 +181,22 @@ _rotation_index: Dict[str, int] = {}
 def _market_key(raw: Optional[str]) -> str:
     return (raw or "").strip().lower().replace(",", "").replace(".", "")
 
-def _choose_rotating(market_key: str, pool: List[str]) -> Optional[str]:
+def _choose_rotating(key: str, pool: List[str]) -> Optional[str]:
     if not pool: return None
-    idx = _rotation_index.get(market_key, 0)
+    idx = _rotation_index.get(key, 0)
     choice = pool[idx % len(pool)]
-    _rotation_index[market_key] = idx + 1
+    _rotation_index[key] = idx + 1
     return choice
 
 def _fetch_textgrid_number_pool(market_raw: str) -> List[str]:
-    """
-    Fetch (and cache) the pool of active numbers for a market.
-    Single-select equality match on Market, Status='Active', Active=1/true.
-    """
+    """Exact single-select equality on Market; Status='Active'; Active=1/true."""
     mk = _market_key(market_raw)
     if mk in _numbers_cache:
         return _numbers_cache[mk]
 
     url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{NUMBERS_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-
-    exact = (
+    formula = (
         f"AND("
         f"{{{NUMBERS_MARKET_FIELD}}}='{market_raw}',"
         f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1,{{{NUMBERS_ACTIVE_FIELD}}}='true'),"
@@ -204,7 +204,7 @@ def _fetch_textgrid_number_pool(market_raw: str) -> List[str]:
         f")"
     )
     try:
-        resp = requests.get(url, headers=headers, params={"filterByFormula": exact, "pageSize": 100}, timeout=12)
+        resp = requests.get(url, headers=headers, params={"filterByFormula": formula, "pageSize": 100}, timeout=12)
         resp.raise_for_status()
         recs = (resp.json() or {}).get("records", [])
     except Exception as exc:
@@ -221,22 +221,17 @@ def _fetch_textgrid_number_pool(market_raw: str) -> List[str]:
 
     _numbers_cache[mk] = pool
     if not pool:
-        logger.warning("⚠️ Market %s has no active numbers (exact single-select match).", market_raw)
+        logger.warning("⚠️ Market %s has no active numbers (exact match).", market_raw)
     return pool
 
 def _fetch_textgrid_number_global_pool() -> List[str]:
-    """Global fallback pool of active numbers (any market)."""
+    """Global fallback pool (any market)."""
     if "_global" in _numbers_cache:
         return _numbers_cache["_global"]
 
     url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{NUMBERS_TABLE_ID}"
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    fb = (
-        f"AND("
-        f"OR({{{NUMBERS_ACTIVE_FIELD}}}=1,{{{NUMBERS_ACTIVE_FIELD}}}='true'),"
-        f"LOWER({{{NUMBERS_STATUS_FIELD}}})='active'"
-        f")"
-    )
+    fb = f"AND(OR({{{NUMBERS_ACTIVE_FIELD}}}=1,{{{NUMBERS_ACTIVE_FIELD}}}='true'),LOWER({{{NUMBERS_STATUS_FIELD}}})='active')"
     try:
         resp = requests.get(url, headers=headers, params={"filterByFormula": fb, "pageSize": 100}, timeout=12)
         resp.raise_for_status()
@@ -259,10 +254,6 @@ def _fetch_textgrid_number_global_pool() -> List[str]:
     return pool
 
 def _choose_number_for_market(market_raw: str) -> Optional[str]:
-    """
-    Choose a number for a prospect in this market (round-robin per prospect).
-    Falls back to global pool if the market has no active numbers.
-    """
     mk = _market_key(market_raw)
     pool = _fetch_textgrid_number_pool(market_raw)
     if not pool:
@@ -287,7 +278,6 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
         drip_h      = CONNECTOR.drip_queue()
         templates_h = CONNECTOR.templates()
 
-        # Pull ALL campaigns, then process all with Status == Scheduled
         campaigns = list_records(campaigns_h, page_size=100)
 
         # Sort by Start Time so multiple scheduled campaigns run predictably
@@ -295,7 +285,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
             return _parse_iso((rec.get("fields") or {}).get(CAMPAIGN_START_FIELD)) or datetime.now(timezone.utc)
         campaigns_sorted = sorted(campaigns, key=_start)
 
-        # Build de-dupe set from existing drip (campaign + last10)
+        # De-dupe from existing drip (campaign + last10)
         existing = list_records(drip_h, page_size=100)
         existing_pairs = {
             (
@@ -354,33 +344,49 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 prospects.extend((resp or {}).get("records", []))
                 time.sleep(CHUNK_SLEEP_SEC)
 
+            # Telemetry holders (sample up to 10 ids per reason)
+            samples = {
+                "missing_phone": deque(maxlen=10),
+                "duplicate_phone": deque(maxlen=10),
+                "missing_textgrid_number": deque(maxlen=10),
+                "create_failed": deque(maxlen=10),
+            }
+
             queued = skipped = processed = 0
             skip_reasons: Dict[str, int] = defaultdict(int)
 
             def _next_send(_j: int) -> str:
-                # Prequeue everything with jitter around the Start Time
                 base_ts = start_time.timestamp()
                 ts = base_ts + random.randint(0, max(0, PREQUEUE_JITTER_MAX_SEC))
                 return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
             # Per-prospect rotation (choose number each time)
             for idx, pr in enumerate(prospects):
+                if MAX_QUEUE_PER_CAMPAIGN and queued >= MAX_QUEUE_PER_CAMPAIGN:
+                    break
+
                 processed += 1
                 pf = pr.get("fields", {}) or {}
 
                 phone = _prospect_best_phone(pf)
                 if not phone:
-                    skipped += 1; skip_reasons["missing_phone"] += 1
+                    skipped += 1
+                    skip_reasons["missing_phone"] += 1
+                    samples["missing_phone"].append(pr.get("id"))
                     continue
 
                 digits = last_10_digits(phone)
                 if (campaign_id, digits) in existing_pairs:
-                    skipped += 1; skip_reasons["duplicate_phone"] += 1
+                    skipped += 1
+                    skip_reasons["duplicate_phone"] += 1
+                    samples["duplicate_phone"].append(pr.get("id"))
                     continue
 
                 from_number = _choose_number_for_market(market)
                 if not from_number:
-                    skipped += 1; skip_reasons["missing_textgrid_number"] += 1
+                    skipped += 1
+                    skip_reasons["missing_textgrid_number"] += 1
+                    samples["missing_textgrid_number"].append(pr.get("id"))
                     continue
 
                 template_text = random.choice(messages)
@@ -405,12 +411,17 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                         existing_pairs.add((campaign_id, digits))
                         queued += 1
                     else:
-                        skipped += 1; skip_reasons["create_failed"] += 1
+                        skipped += 1
+                        skip_reasons["create_failed"] += 1
+                        samples["create_failed"].append(pr.get("id"))
                 except Exception as exc:
-                    logger.warning("Create failed for %s: %s", digits, exc)
-                    skipped += 1; skip_reasons["create_failed"] += 1
+                    logger.warning("Create failed for %s (prospect %s): %s", digits, pr.get("id"), exc)
+                    skipped += 1
+                    skip_reasons["create_failed"] += 1
+                    samples["create_failed"].append(pr.get("id"))
 
             # Flip Status → Active once we reach start time AND queued at least one
+            now_utc = datetime.now(timezone.utc)
             if queued and now_utc >= start_time:
                 try:
                     update_record(campaigns_h, campaign_id, {
@@ -428,6 +439,19 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 except Exception:
                     pass
 
+            # Emit rich telemetry so we can see why anything was skipped
+            if skipped:
+                logger.info(
+                    "ℹ️  Campaign %s skip breakdown: %s",
+                    campaign_id, dict(skip_reasons)
+                )
+                for k, q in samples.items():
+                    if q:
+                        logger.info("   • %s (sample ids): %s", k, list(q))
+
+            logger.info("✅ Campaign %s queued=%d skipped=%d processed=%d",
+                        campaign_id, queued, skipped, processed)
+
             summary["queued"] += queued
             summary["campaigns"][campaign_id] = {
                 "queued": queued,
@@ -437,7 +461,6 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 "market": market,
                 "start_time": start_time.isoformat(),
             }
-            logger.info("✅ Campaign %s queued=%d skipped=%d processed=%d", campaign_id, queued, skipped, processed)
 
         summary["ok"] = not summary["errors"]
         logger.info("🏁 Scheduler done. Total queued: %s", summary["queued"])
