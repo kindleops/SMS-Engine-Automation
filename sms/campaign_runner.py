@@ -325,7 +325,7 @@ def _build_campaign_queue(campaign: Dict[str, Any], limit: int | str = "ALL") ->
                 "Seller Phone Number": phone,
                 "TextGrid Phone Number": textgrid_number,
                 "Message": filled_msg,
-                "Market": market,
+                "Market": market.replace(",", "") if isinstance(market, str) else market,
                 "Property ID": property_id,
                 "Status": DripStatus.QUEUED.value,   # your enum token
                 "UI": STATUS_ICON["QUEUED"],         # ⏳
