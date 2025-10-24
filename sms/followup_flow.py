@@ -1,89 +1,52 @@
 # sms/followup_flow.py
+"""
+Follow-Up Flow (Datastore Refactor)
+-----------------------------------
+Handles:
+  • Scheduling next follow-up after seller response
+  • Automatically queuing overdue leads daily/hourly
+Fully integrated with datastore + AI autoresponder.
+"""
+
 from __future__ import annotations
-
-import os, re, random, traceback
+import random, traceback
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
 
-try:
-    from zoneinfo import ZoneInfo
-except Exception:
-    ZoneInfo = None
-
-try:
-    from pyairtable import Table
-except Exception:
-    Table = None  # We’ll guard all usage
-
-from sms.config import (
-    DRIP_FIELD_MAP as DRIP_FIELDS,
-    TEMPLATE_FIELD_MAP as TEMPLATE_FIELDS,
-)
+from sms.runtime import get_logger
+from sms.datastore import CONNECTOR, update_record, create_record
 from sms.airtable_schema import DripStatus
 
-# =========================
-# ENV / CONFIG
-# =========================
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
+logger = get_logger("followup_flow")
 
-DRIP_TABLE_NAME = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
-LEADS_TABLE_NAME = os.getenv("LEADS_TABLE", "Leads")
-TEMPLATES_TABLE_NAME = os.getenv("TEMPLATES_TABLE", "Templates")
-
-# Local time zone for “naive CT” timestamps shown nicely in Airtable
-QUIET_TZ = ZoneInfo("America/Chicago") if ZoneInfo else None
-
-DRIP_STATUS_FIELD = DRIP_FIELDS["STATUS"]
-DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS["NEXT_SEND_DATE"]
-DRIP_UI_FIELD = DRIP_FIELDS["UI"]
-DRIP_STAGE_FIELD = DRIP_FIELDS["DRIP_STAGE"]
-DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS["MESSAGE_PREVIEW"]
-DRIP_TEMPLATE_FIELD = DRIP_FIELDS["TEMPLATE_LINK"]
-DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS["SELLER_PHONE"]
-DRIP_MARKET_FIELD = DRIP_FIELDS["MARKET"]
-DRIP_PROPERTY_ID_FIELD = DRIP_FIELDS["PROPERTY_ID"]
-TEMPLATE_INTERNAL_ID_FIELD = TEMPLATE_FIELDS["INTERNAL_ID"]
-TEMPLATE_MESSAGE_FIELD = TEMPLATE_FIELDS["MESSAGE"]
-
-# UI icons to match your app
-STATUS_ICON = {
-    DripStatus.QUEUED.value: "⏳",
-    DripStatus.READY.value: "⏳",
-    DripStatus.SENDING.value: "🔄",
-    DripStatus.SENT.value: "✅",
-    DripStatus.DELIVERED.value: "✅",
-    DripStatus.FAILED.value: "❌",
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+QUIET_TZ = ZoneInfo("America/Chicago")
+STAGES = {
+    "ENGAGE": "ENGAGE",
+    "NEGOTIATE": "NEGOTIATE",
+    "NURTURE_30": "NURTURE_30",
+    "NURTURE_60": "NURTURE_60",
+    "NURTURE_90": "NURTURE_90",
+    "DNC": "DNC",
+    "WRONG_NUMBER": "WRONG_NUMBER",
+    "ARCHIVE": "ARCHIVE",
 }
+NURTURE_CHAIN = ["NURTURE_30", "NURTURE_60", "NURTURE_90", "ARCHIVE"]
 
-# -------- Stages (lightweight state machine) --------
-# We keep human-readable string stages on Leads (and optionally on Drip rows).
-STAGE_ENGAGE = "ENGAGE"  # warm/hot; quick nudges
-STAGE_NEGOTIATE = "NEGOTIATE"  # price/condition; quick nudges
-STAGE_NURTURE_30 = "NURTURE_30"  # 30-day cadence
-STAGE_NURTURE_60 = "NURTURE_60"  # 60-day cadence
-STAGE_NURTURE_90 = "NURTURE_90"  # 90-day cadence
-STAGE_DNC = "DNC"  # do not contact
-STAGE_WRONG = "WRONG_NUMBER"
-STAGE_ARCHIVE = "ARCHIVE"
-
-NURTURE_CHAIN = [STAGE_NURTURE_30, STAGE_NURTURE_60, STAGE_NURTURE_90, STAGE_ARCHIVE]
-
-# Intent → (next_stage, delay, template_key)
-# (Delays are minutes unless suffixed with _d for days.)
-INTENT_PLAN: Dict[str, Dict[str, Any]] = {
-    "optout": {"stage": STAGE_DNC, "delay_min": None, "template": None},
-    "followup_wrong": {"stage": STAGE_WRONG, "delay_min": None, "template": None},
-    "followup_no": {"stage": STAGE_NURTURE_60, "delay_d": 60, "template": "followup_60"},
-    "neutral": {"stage": STAGE_NURTURE_30, "delay_d": 30, "template": "followup_30"},
-    "intro": {"stage": STAGE_NURTURE_30, "delay_d": 30, "template": "followup_30"},
-    "interest": {"stage": STAGE_ENGAGE, "delay_min": 120, "template": "engage_2h"},
-    "followup_yes": {"stage": STAGE_ENGAGE, "delay_min": 120, "template": "engage_2h"},
-    "price_response": {"stage": STAGE_NEGOTIATE, "delay_min": 30, "template": "negotiate_30m"},
-    "condition_response": {"stage": STAGE_NEGOTIATE, "delay_min": 30, "template": "negotiate_30m"},
+INTENT_PLAN = {
+    "optout": {"stage": STAGES["DNC"], "delay": None, "template": None},
+    "followup_wrong": {"stage": STAGES["WRONG_NUMBER"], "delay": None, "template": None},
+    "followup_no": {"stage": STAGES["NURTURE_60"], "delay": ("days", 60), "template": "followup_60"},
+    "neutral": {"stage": STAGES["NURTURE_30"], "delay": ("days", 30), "template": "followup_30"},
+    "intro": {"stage": STAGES["NURTURE_30"], "delay": ("days", 30), "template": "followup_30"},
+    "interest": {"stage": STAGES["ENGAGE"], "delay": ("min", 120), "template": "engage_2h"},
+    "followup_yes": {"stage": STAGES["ENGAGE"], "delay": ("min", 120), "template": "engage_2h"},
+    "price_response": {"stage": STAGES["NEGOTIATE"], "delay": ("min", 30), "template": "negotiate_30m"},
+    "condition_response": {"stage": STAGES["NEGOTIATE"], "delay": ("min", 30), "template": "negotiate_30m"},
 }
-
-# Fallback copy per template key if Airtable Templates not present
 FALLBACK_TEMPLATES = {
     "followup_30": "Hi {First}, circling back — still open to an offer on {Address}?",
     "followup_60": "Hey {First}, quick follow-up on {Address}. Any change in timing?",
@@ -91,228 +54,31 @@ FALLBACK_TEMPLATES = {
     "engage_2h": "Great — I’ll run numbers and text back soon. Anything I should know about {Address}?",
     "negotiate_30m": "Thanks! I’ll firm up pricing and reply shortly for {Address}.",
 }
+STATUS_ICON = {"QUEUED": "⏳", "READY": "⏳", "SENT": "✅", "FAILED": "❌"}
 
-PHONE_FIELDS = [
-    "phone",
-    "Phone",
-    "Mobile",
-    "Cell",
-    "Phone Number",
-    "Owner Phone",
-    "Owner Phone 1",
-    "Owner Phone 2",
-    "Phone 1 (from Linked Owner)",
-    "Phone 2 (from Linked Owner)",
-    "Phone 3 (from Linked Owner)",
-]
-
-
-# =========================
-# Time helpers
-# =========================
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def ct_naive(dt_utc: datetime | None = None) -> str:
-    """Return naive local CT ISO string (no Z) for Airtable date fields."""
-    dt_utc = dt_utc or utcnow()
-    if QUIET_TZ:
-        local = dt_utc.astimezone(QUIET_TZ).replace(tzinfo=None)
-    else:
-        local = dt_utc.replace(tzinfo=None)
-    return local.isoformat(timespec="seconds")
-
-
-def plus_delay(now_utc: datetime, *, delay_min: int | None = None, delay_d: int | None = None) -> datetime:
-    if delay_min is not None:
-        return now_utc + timedelta(minutes=int(delay_min))
-    if delay_d is not None:
-        return now_utc + timedelta(days=int(delay_d))
-    return now_utc  # immediate
-
-
-def _parse_iso(s: Any) -> Optional[datetime]:
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-# =========================
-# Airtable helpers (field-safe)
-# =========================
-def _norm(s: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else str(s)
-
-
-def _digits_only(v: Any) -> Optional[str]:
-    if not isinstance(v, str):
-        return None
-    ds = "".join(re.findall(r"\d+", v))
-    return ds if len(ds) >= 10 else None
-
-
-def last10(v: Any) -> Optional[str]:
-    d = _digits_only(v)
-    return d[-10:] if d else None
-
-
-def _table(name: str) -> Optional[Any]:
-    if not (AIRTABLE_API_KEY and LEADS_CONVOS_BASE and Table):
-        return None
-    try:
-        return Table(AIRTABLE_API_KEY, LEADS_CONVOS_BASE, name)
-    except Exception:
-        traceback.print_exc()
-        return None
-
-
-def _auto_field_map(tbl: Any) -> Dict[str, str]:
-    try:
-        one = tbl.all(max_records=1)
-        keys = list(one[0].get("fields", {}).keys()) if one else []
-    except Exception:
-        keys = []
-    return {_norm(k): k for k in keys}
-
-
-def _remap_existing_only(tbl: Any, payload: Dict) -> Dict:
-    amap = _auto_field_map(tbl)
-    if not amap:
-        return dict(payload)
-    out = {}
-    for k, v in payload.items():
-        mk = amap.get(_norm(k))
-        if mk:
-            out[mk] = v
-    return out
-
-
-def _safe_update(tbl: Any, rec_id: str, patch: Dict) -> Optional[Dict]:
-    try:
-        data = _remap_existing_only(tbl, patch)
-        return tbl.update(rec_id, data) if data else None
-    except Exception:
-        traceback.print_exc()
-        return None
-
-
-def _safe_create(tbl: Any, payload: Dict) -> Optional[Dict]:
-    try:
-        data = _remap_existing_only(tbl, payload)
-        return tbl.create(data) if data else None
-    except Exception:
-        traceback.print_exc()
-        return None
-
-
-# =========================
-# Template selection
-# =========================
-def _personalize(msg: str, row_fields: Dict[str, Any]) -> str:
-    name = row_fields.get("Owner Name") or row_fields.get("First") or "there"
-    first = name.split()[0] if isinstance(name, str) and name else "there"
-    address = row_fields.get("Property Address") or row_fields.get("Address") or "your property"
-    try:
-        return msg.format(First=first, Address=address)
-    except Exception:
-        return msg
-
-
-def _template_by_key(key: Optional[str], row_fields: Dict[str, Any]) -> Tuple[str, Optional[str]]:
-    if not key:
-        return "", None
-    templates = _table(TEMPLATES_TABLE_NAME)
-    if templates:
-        try:
-            rows = templates.all()
-            cands = []
-            for r in rows:
-                f = r.get("fields", {})
-                internal = (f.get(TEMPLATE_INTERNAL_ID_FIELD) or f.get("intent") or "").strip().lower()
-                if internal == key.strip().lower():
-                    cands.append(r)
-            if cands:
-                chosen = random.choice(cands)
-                msg = (chosen.get("fields", {}) or {}).get("Message") or ""
-                raw = (chosen.get("fields", {}) or {}).get(TEMPLATE_MESSAGE_FIELD) or msg
-                return _personalize(raw, row_fields), chosen["id"]
-        except Exception:
-            traceback.print_exc()
-    # fallback
-    raw = FALLBACK_TEMPLATES.get(key, "Just checking back on {Address}, {First}.")
-    return _personalize(raw, row_fields), None
-
-
-# =========================
-# Dup guards
-# =========================
-def _already_queued_today(drip: Any, phone: str) -> bool:
-    """Prevent multiple follow-ups same day for a phone."""
-    try:
-        today = datetime.now(timezone.utc)
-        if QUIET_TZ:
-            today = today.astimezone(QUIET_TZ)
-        prefix = today.strftime("%Y-%m-%d")
-        p10 = last10(phone)
-        for r in drip.all():
-            f = r.get("fields", {})
-            ph = f.get(DRIP_SELLER_PHONE_FIELD)
-            if last10(ph) != p10:
-                continue
-            st = str(f.get(DRIP_STATUS_FIELD) or "")
-            when = f.get(DRIP_NEXT_SEND_DATE_FIELD) or ""
-            if st in (
-                DripStatus.QUEUED.value,
-                DripStatus.SENDING.value,
-                DripStatus.SENT.value,
-                "DELIVERED",
-            ):
-                if isinstance(when, str) and when.startswith(prefix):
-                    return True
-        return False
-    except Exception:
-        traceback.print_exc()
-        return False
-
-
-# =========================
-# Stage helpers
-# =========================
-def _escalate_nurture(stage: str) -> str:
-    """NURTURE_30 → _60 → _90 → ARCHIVE"""
-    if stage not in NURTURE_CHAIN:
-        return STAGE_NURTURE_30
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _utcnow() -> datetime: return datetime.now(timezone.utc)
+def _ct_naive(dt: Optional[datetime] = None) -> str:
+    return (dt or _utcnow()).astimezone(QUIET_TZ).replace(tzinfo=None).isoformat(timespec="seconds")
+def _plus_delay(now: datetime, delay: Optional[Tuple[str, int]]) -> datetime:
+    if not delay: return now
+    typ, val = delay
+    return now + timedelta(minutes=val) if typ == "min" else now + timedelta(days=val)
+def _escalate(stage: str) -> str:
+    if stage not in NURTURE_CHAIN: return "NURTURE_30"
     idx = NURTURE_CHAIN.index(stage)
     return NURTURE_CHAIN[min(idx + 1, len(NURTURE_CHAIN) - 1)]
+def _template_message(key: str, context: Dict[str, Any]) -> str:
+    raw = FALLBACK_TEMPLATES.get(key, "Checking back on {Address}, {First}.")
+    name = context.get("First") or "there"
+    addr = context.get("Address") or "your property"
+    return raw.format(First=name, Address=addr)
 
-
-def _get_phone(f: Dict[str, Any]) -> Optional[str]:
-    # prefer verified if present
-    p1 = f.get("Phone 1") or f.get("Phone 1 (from Linked Owner)")
-    p2 = f.get("Phone 2") or f.get("Phone 2 (from Linked Owner)")
-    if f.get("Phone 1 Verified") or f.get("Phone 1 Ownership Verified"):
-        d = _digits_only(p1)
-        if d:
-            return d
-    if f.get("Phone 2 Verified") or f.get("Phone 2 Ownership Verified"):
-        d = _digits_only(p2)
-        if d:
-            return d
-    for k in PHONE_FIELDS:
-        d = _digits_only(f.get(k))
-        if d:
-            return d
-    return None
-
-
-# =========================
-# Public API #1:
-# Schedule from seller response (intent)
-# =========================
+# ---------------------------------------------------------------------------
+# Core Scheduling Logic
+# ---------------------------------------------------------------------------
 def schedule_from_response(
     phone: str,
     intent: str,
@@ -322,168 +88,119 @@ def schedule_from_response(
     property_id: Optional[str] = None,
     current_stage: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Call this from autoresponder after you label intent.
-    - Sets Lead.drip_stage/Next Followup Date
-    - Queues a Drip Queue row at the computed time (CT-naive) with message preview
-    Returns a summary dict.
-    """
-    drip = _table(DRIP_TABLE_NAME)
-    leads = _table(LEADS_TABLE_NAME)
-    if not drip:
-        return {"ok": False, "error": "Drip Queue table not configured"}
+    """Trigger next follow-up based on response intent."""
+    drip_tbl = CONNECTOR.drip_queue()
+    leads_tbl = CONNECTOR.leads()
+    if not drip_tbl: return {"ok": False, "error": "Drip table unavailable"}
 
-    plan = INTENT_PLAN.get((intent or "").strip().lower(), INTENT_PLAN["neutral"])
+    plan = INTENT_PLAN.get(intent.lower(), INTENT_PLAN["neutral"])
     next_stage = plan["stage"]
-    delay_min = plan.get("delay_min")
-    delay_d = plan.get("delay_d")
+    delay = plan.get("delay")
     template_key = plan.get("template")
 
-    # Resolve escalation for repeated “no / neutral”
-    if intent in ("followup_no", "neutral", "intro") and current_stage in NURTURE_CHAIN:
-        next_stage = _escalate_nurture(current_stage)
-        # adjust template/delay if we escalated to 90
-        if next_stage == STAGE_NURTURE_90:
-            template_key, delay_min, delay_d = "followup_90", None, 90
+    # Escalate for repeated neutral/no
+    if intent in ("neutral", "followup_no", "intro") and current_stage in NURTURE_CHAIN:
+        next_stage = _escalate(current_stage)
+        if next_stage == "NURTURE_90":
+            template_key, delay = "followup_90", ("days", 90)
 
-    # Stop stages
-    if next_stage in (STAGE_DNC, STAGE_WRONG, STAGE_ARCHIVE) or (delay_min is None and delay_d is None):
-        # Just mark the Lead; no new drip
-        if leads and lead_id:
-            _safe_update(leads, lead_id, {"drip_stage": next_stage, "Last Followup": utcnow().isoformat()})
-        return {"ok": True, "queued": 0, "stage": next_stage, "note": "no follow-up queued (terminal stage)"}
+    # Terminal stages (no new drips)
+    if next_stage in {"DNC", "WRONG_NUMBER", "ARCHIVE"} or not delay:
+        if leads_tbl and lead_id:
+            update_record(leads_tbl, lead_id, {"drip_stage": next_stage, "Last Followup": _utcnow().isoformat()})
+        return {"ok": True, "queued": 0, "stage": next_stage, "note": "terminal stage"}
 
-    # Compute schedule
-    send_at_utc = plus_delay(utcnow(), delay_min=delay_min, delay_d=delay_d)
-    send_at_local_str = ct_naive(send_at_utc)
+    # Schedule new drip
+    send_at_utc = _plus_delay(_utcnow(), delay)
+    send_at_local = _ct_naive(send_at_utc)
+    msg = _template_message(template_key, {"First": "there", "Address": "your property"})
 
-    # Compose message text
-    fields_for_pers = {"Owner Name": "there", "Property Address": "your property"}
-    msg, template_id = _template_by_key(template_key, fields_for_pers)
+    payload = {
+        "Leads": [lead_id] if lead_id else None,
+        "Seller Phone Number": phone,
+        "Market": market,
+        "Property ID": property_id,
+        "Message Preview": msg,
+        "Status": "QUEUED",
+        "Next Send Date": send_at_local,
+        "Drip Stage": next_stage,
+        "UI": STATUS_ICON["QUEUED"],
+    }
+    payload = {k: v for k, v in payload.items() if v is not None}
 
-    # De-dupe same-day
-    if _already_queued_today(drip, phone):
-        queued = 0
-    else:
-        payload = {
-            "Leads": [lead_id] if lead_id else None,
-            DRIP_SELLER_PHONE_FIELD: phone,
-            DRIP_MARKET_FIELD: market,
-            DRIP_PROPERTY_ID_FIELD: property_id,
-            DRIP_MESSAGE_PREVIEW_FIELD: msg,
-            DRIP_TEMPLATE_FIELD: [template_id] if template_id else None,
-            DRIP_STATUS_FIELD: DripStatus.QUEUED.value,
-            DRIP_NEXT_SEND_DATE_FIELD: send_at_local_str,
-            DRIP_STAGE_FIELD: next_stage,
-            DRIP_UI_FIELD: STATUS_ICON.get(DripStatus.QUEUED.value, "⏳"),
-        }
-        payload = {k: v for k, v in payload.items() if v is not None}
-        _safe_create(drip, payload)
-        queued = 1
-
-    # Update Lead planning fields
-    if leads and lead_id:
-        lead_patch = {
+    create_record(drip_tbl, payload)
+    if leads_tbl and lead_id:
+        update_record(leads_tbl, lead_id, {
             "drip_stage": next_stage,
-            "Next Followup Date": send_at_local_str.split("T")[0],  # date-only is fine here
-            "Last Followup": utcnow().isoformat(),
-        }
-        _safe_update(leads, lead_id, lead_patch)
+            "Next Followup Date": send_at_local.split("T")[0],
+            "Last Followup": _utcnow().isoformat(),
+        })
 
-    return {"ok": True, "queued": queued, "stage": next_stage, "scheduled_local": send_at_local_str}
+    return {"ok": True, "queued": 1, "stage": next_stage, "scheduled_local": send_at_local}
 
-
-# =========================
-# Public API #2:
-# Hourly (or daily) job to queue due follow-ups from Leads
-# =========================
+# ---------------------------------------------------------------------------
+# Daily / Hourly Auto-Followups
+# ---------------------------------------------------------------------------
 def run_followups(limit: int = 1000) -> Dict[str, Any]:
-    """
-    Finds Leads with Next Followup Date <= today (CT) and creates a Drip Queue row if not already queued today.
-    This is a safety net to ensure planning-only leads still get queued automatically.
-    """
-    drip = _table(DRIP_TABLE_NAME)
-    leads = _table(LEADS_TABLE_NAME)
-    if not (drip and leads):
-        return {"ok": False, "queued_from_leads": 0, "errors": ["Tables not configured"]}
+    """Auto-queue due leads for follow-up."""
+    drip_tbl = CONNECTOR.drip_queue()
+    leads_tbl = CONNECTOR.leads()
+    if not (drip_tbl and leads_tbl):
+        return {"ok": False, "queued_from_leads": 0, "error": "Tables unavailable"}
 
     try:
-        rows = leads.all(max_records=limit)
-    except Exception:
+        leads = leads_tbl.all(max_records=limit)
+    except Exception as e:
         traceback.print_exc()
-        return {"ok": False, "queued_from_leads": 0, "errors": ["Failed to read Leads"]}
+        return {"ok": False, "queued_from_leads": 0, "error": str(e)}
 
-    today_ct = datetime.now(timezone.utc)
-    if QUIET_TZ:
-        today_ct = today_ct.astimezone(QUIET_TZ)
-    today_str = today_ct.strftime("%Y-%m-%d")
+    today = _utcnow().astimezone(QUIET_TZ).strftime("%Y-%m-%d")
     queued = 0
-    errs: List[str] = []
 
-    for lr in rows:
-        lf = lr.get("fields", {})
-        nfd = lf.get("Next Followup Date") or lf.get("next_followup_date") or lf.get("Followup Date")
-        if not nfd:
-            continue
+    for r in leads:
+        f = r.get("fields", {}) or {}
+        nfd = str(f.get("Next Followup Date") or f.get("next_followup_date") or "")
+        if not nfd or nfd[:10] > today: continue
 
-        # if nfd is in the past or today
-        nfd_dt = _parse_iso(nfd) or _parse_iso(str(nfd) + "T00:00:00Z")
-        due = False
-        if isinstance(nfd, str) and nfd[:10] <= today_str:  # string compare
-            due = True
-        elif nfd_dt and nfd_dt.date().isoformat() <= today_str:
-            due = True
-        if not due:
-            continue
+        phone = f.get("Phone") or f.get("Seller Phone Number")
+        if not phone: continue
 
-        phone = _get_phone(lf)
-        if not phone:
-            continue
-        if _already_queued_today(drip, phone):
-            continue
-
-        stage = str(lf.get("drip_stage") or "").strip().upper() or STAGE_NURTURE_30
-        # pick a template based on stage (maps to internal IDs used earlier)
+        stage = (f.get("drip_stage") or "NURTURE_30").upper()
         key = {
-            STAGE_NURTURE_30: "followup_30",
-            STAGE_NURTURE_60: "followup_60",
-            STAGE_NURTURE_90: "followup_90",
-            STAGE_ENGAGE: "engage_2h",
-            STAGE_NEGOTIATE: "negotiate_30m",
+            "NURTURE_30": "followup_30",
+            "NURTURE_60": "followup_60",
+            "NURTURE_90": "followup_90",
+            "ENGAGE": "engage_2h",
+            "NEGOTIATE": "negotiate_30m",
         }.get(stage, "followup_30")
 
-        msg, template_id = _template_by_key(key, lf)
-        now_ct = ct_naive()
+        msg = _template_message(key, f)
+        now_ct = _ct_naive()
 
         dq_payload = {
-            "Leads": [lr["id"]],
-            "phone": phone,
-            "Market": lf.get("Market"),
-            "Property ID": lf.get("Property ID"),
-            "message_preview": msg,
-            "Template": [template_id] if template_id else None,
-            "status": "QUEUED",
-            "next_send_date": now_ct,  # queue immediately (outbound_batcher enforces quiet hrs)
-            "drip_stage": stage,
+            "Leads": [r["id"]],
+            "Seller Phone Number": phone,
+            "Market": f.get("Market"),
+            "Property ID": f.get("Property ID"),
+            "Message Preview": msg,
+            "Status": "QUEUED",
+            "Next Send Date": now_ct,
+            "Drip Stage": stage,
             "UI": STATUS_ICON["QUEUED"],
         }
-        _safe_create(drip, dq_payload)
+        create_record(drip_tbl, dq_payload)
         queued += 1
 
-        # Plan the next nurture step if in nurture chain
-        if stage in (STAGE_NURTURE_30, STAGE_NURTURE_60, STAGE_NURTURE_90):
-            next_stage = _escalate_nurture(stage)
-            next_date = (utcnow() + timedelta(days=30 if stage != STAGE_NURTURE_90 else 90)).date().isoformat()
-            _safe_update(
-                leads,
-                lr["id"],
-                {
-                    "drip_stage": next_stage,
-                    "Last Followup": utcnow().isoformat(),
-                    "Next Followup Date": next_date,
-                },
-            )
+        # Escalate stage
+        if stage in NURTURE_CHAIN:
+            next_stage = _escalate(stage)
+            next_date = (_utcnow() + timedelta(days=30 if stage != "NURTURE_90" else 90)).date().isoformat()
+            update_record(leads_tbl, r["id"], {
+                "drip_stage": next_stage,
+                "Last Followup": _utcnow().isoformat(),
+                "Next Followup Date": next_date,
+            })
         else:
-            _safe_update(leads, lr["id"], {"Last Followup": utcnow().isoformat()})
+            update_record(leads_tbl, r["id"], {"Last Followup": _utcnow().isoformat()})
 
-    return {"ok": True, "queued_from_leads": queued, "errors": errs}
+    return {"ok": True, "queued_from_leads": queued}
