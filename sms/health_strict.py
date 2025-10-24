@@ -24,16 +24,29 @@ def strict_health(mode: str = "prospects") -> dict:
     }
     tbl_func = table_map[mode]
     try:
-        tbl = tbl_func()
-        if not tbl:
+        handle = tbl_func()
+        table = getattr(handle, "table", None)
+        table_name = getattr(handle, "table_name", "unknown") if handle else "unknown"
+        if not table:
             raise ValueError("Table unavailable or misconfigured")
-        tbl.all(max_records=1)
+        try:
+            table.all(max_records=1)
+        except Exception as err:
+            return {
+                "ok": False,
+                "mode": mode,
+                "table": table_name,
+                "error": str(err),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
         return {
             "ok": True,
             "mode": mode,
-            "table": getattr(tbl, "name", "unknown"),
+            "table": table_name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+    except HTTPException:
+        raise
     except Exception as err:
         traceback.print_exc()
         raise HTTPException(
