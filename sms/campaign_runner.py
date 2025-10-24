@@ -40,7 +40,8 @@ def _get_template_body(templates_table, template_id: str) -> Optional[str]:
             return v.strip()
     return None
 
-def _safe_create_drip(drip_table, payload: Dict[str, Any]) -> bool:
+def _safe_create_drip(drip_handle, payload: Dict[str, Any]) -> bool:
+    table = drip_handle.table
     base = {k: payload.get(k) for k in [
         "Campaign", "Seller Phone Number", "TextGrid Phone Number", "Message",
         "Market", "Property ID", "Status", "UI", "Next Send Date"
@@ -49,12 +50,12 @@ def _safe_create_drip(drip_table, payload: Dict[str, Any]) -> bool:
         if payload.get(key):
             base[key] = payload[key]
             try:
-                drip_table.create(base)
+                table.create(base)
                 return True
             except Exception:
                 base.pop(key, None)
     try:
-        drip_table.create(base)
+        table.create(base)
         return True
     except Exception as e:
         log.error(f"Airtable create failed [Drip Queue]: {e}")
@@ -123,7 +124,7 @@ def _build_campaign_queue(campaign: Dict[str, Any], limit: int = 10000) -> int:
             "UI": STATUS_ICON["QUEUED"],
             "Next Send Date": _ct_future_iso_naive(2, 12),
         }
-        if _safe_create_drip(drip_handle.table, payload):
+        if _safe_create_drip(drip_handle, payload):
             queued += 1
     log.info(f"✅ Queued {queued} messages for campaign → {campaign_name}")
     return queued

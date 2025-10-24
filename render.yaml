@@ -12,7 +12,7 @@ services:
     buildCommand: |
       pip install --upgrade pip setuptools wheel
       pip install --no-cache-dir -r requirements.txt
-    startCommand: uvicorn sms.main:app --host 0.0.0.0 --port 10000
+    startCommand: uvicorn sms.main:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
     previews:
       enabled: false
