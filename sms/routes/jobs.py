@@ -68,8 +68,6 @@ JOB_MAP = {
     "autolinker": "sms.workers.autolinker_worker",
     "intent": "sms.workers.intent_worker",
     "lead-promoter": "sms.workers.lead_promoter",
-    # Replace with AI Core trigger if /ai removed
-    "ai-enrichment": "sms.workers.ai_enrichment",
 }
 
 def _launch(job_key: str, *extra_args: str):
