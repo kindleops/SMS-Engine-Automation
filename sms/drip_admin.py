@@ -96,7 +96,7 @@ def normalize_next_send_dates(
 
         # Extract and validate send time
         send_at_utc = (
-            _parse_datetime(fields.get("Next Send At"))
+            _parse_datetime(fields.get("Next Send Date"))
             or _parse_datetime(fields.get("next_send_at_utc"))
             or _parse_datetime(fields.get("Next Send Date"))
         )
@@ -105,7 +105,7 @@ def normalize_next_send_dates(
 
         ct_local_str = _to_ct_naive(send_at_utc)
         payload = {
-            "Next Send At": send_at_utc.isoformat(),
+            "Next Send Date": send_at_utc.isoformat(),
             "next_send_at_utc": send_at_utc.isoformat(),
             "Next Send Date": ct_local_str,
             "Status": DripStatus.READY.value,

@@ -167,7 +167,7 @@ DRIP_FIELD_MAP: dict[str, str] = {
     "MESSAGE_PREVIEW": "Message",
     "PROPERTY_ID": "Property ID",
     "NEXT_SEND_DATE": "Next Send Date",
-    "NEXT_SEND_AT": "Next Send At",
+    "NEXT_SEND_AT": "Next Send Date",
     "NEXT_SEND_AT_UTC": "Next Send At (UTC)",
     "UI": "UI",
     "LAST_SENT": "Last Sent",

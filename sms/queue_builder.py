@@ -9,7 +9,7 @@ import traceback, random
 from datetime import datetime, timezone
 from typing import Any, Dict
 from sms.runtime import get_logger
-from sms.datastore import CONNECTOR, list_records, update_record, _compact
+from sms.datastore import CONNECTOR, list_records, update_record, _compact, _safe_create
 from sms.airtable_schema import DripStatus
 
 log = get_logger("queue_builder")
@@ -53,7 +53,6 @@ def build_campaign_queue(campaign: Dict[str, Any], limit: int = 1000) -> int:
 
         f = campaign.get("fields", {}) or {}
         campaign_id = campaign.get("id")
-        campaign_name = f.get("Campaign Name", "Unnamed Campaign")
         market = f.get("Market")
         linked_templates = f.get("Template") or f.get("Templates") or []
 
@@ -96,17 +95,16 @@ def build_campaign_queue(campaign: Dict[str, Any], limit: int = 1000) -> int:
 
             drip_payload = _compact({
                 "Campaign": [campaign_id],
-                "Campaign Name": campaign_name,
                 "Prospect": [p.get("id")],
                 "Seller Phone Number": seller_num,
                 "TextGrid Phone Number": textgrid_num,
                 "Message": message_body,
                 "Status": DripStatus.QUEUED.value,
-                "Next Send At": (now).isoformat(),
+                "Next Send Date": (now).isoformat(),
             })
 
             try:
-                update_record(drip_tbl, None, drip_payload)
+                _safe_create(drip_tbl, drip_payload)
                 queued += 1
             except Exception as e:
                 log.warning(f"⚠️ Failed to queue message for {seller_num}: {e}")
