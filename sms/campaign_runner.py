@@ -1,3 +1,4 @@
+# sms/campaign_runner.py
 from __future__ import annotations
 import random, traceback
 from datetime import datetime, timedelta
@@ -21,12 +22,15 @@ STATUS_ICON = {
     "DNC": "⛔",
 }
 
+
 # ─────────────────────────────── helpers ───────────────────────────────
 def _ct_future_iso_naive(min_s: int = 2, max_s: int = 12) -> str:
     dt = datetime.now(QUIET_TZ) + timedelta(seconds=random.randint(min_s, max_s))
     return dt.replace(tzinfo=None).isoformat(timespec="seconds")
 
+
 def _get_template_body(templates_table, template_id: str) -> Optional[str]:
+    """Pull the text body from a linked template."""
     try:
         rec = templates_table.get(template_id)
     except Exception as e:
@@ -39,8 +43,33 @@ def _get_template_body(templates_table, template_id: str) -> Optional[str]:
             return v.strip()
     return None
 
-def _safe_create_drip(drip_handle, payload: Dict[str, Any]) -> bool:
-    table = drip_handle.table
+
+def _render_template_body(template: str, prospect_fields: Dict[str, Any], campaign_fields: Dict[str, Any]) -> str:
+    """Render placeholders in message body using both Prospect + Campaign fields."""
+    body = str(template)
+    # attempt to split full name if only one field is present
+    full_name = (
+        prospect_fields.get("Owner Name")
+        or prospect_fields.get("Full Name")
+        or prospect_fields.get("Name")
+        or ""
+    )
+    first = prospect_fields.get("Owner First") or prospect_fields.get("First Name") or (full_name.split(" ")[0] if full_name else "")
+    last = prospect_fields.get("Owner Last") or prospect_fields.get("Last Name") or (" ".join(full_name.split(" ")[1:]) if full_name and len(full_name.split(" ")) > 1 else "")
+    replacements = {
+        "{First}": first,
+        "{Last}": last,
+        "{Address}": prospect_fields.get("Property Address") or prospect_fields.get("Address") or "",
+        "{Property City}": prospect_fields.get("Property City") or prospect_fields.get("City") or "",
+        "{Market}": campaign_fields.get("Market") or "",
+    }
+    for key, val in replacements.items():
+        body = body.replace(key, str(val).strip())
+    return body.strip()
+
+
+def _safe_create_drip(drip_table, payload: Dict[str, Any]) -> bool:
+    """Create Drip Queue record safely with fallback logic."""
     base = {k: payload.get(k) for k in [
         "Campaign", "Seller Phone Number", "TextGrid Phone Number", "Message",
         "Market", "Property ID", "Status", "UI", "Next Send Date"
@@ -49,59 +78,66 @@ def _safe_create_drip(drip_handle, payload: Dict[str, Any]) -> bool:
         if payload.get(key):
             base[key] = payload[key]
             try:
-                table.create(base)
+                drip_table.create(base)
                 return True
             except Exception:
                 base.pop(key, None)
     try:
-        table.create(base)
+        drip_table.create(base)
         return True
     except Exception as e:
         log.error(f"Airtable create failed [Drip Queue]: {e}")
         return False
 
-# ─────────────────────────────── queue builder ───────────────────────────────
+
+# ─────────────────────────────── campaign queue builder ───────────────────────────────
 def _build_campaign_queue(campaign: Dict[str, Any], limit: int = 10000) -> int:
     drip_handle = CONNECTOR.drip_queue()
     camp_fields = (campaign or {}).get("fields", {}) or {}
     campaign_id = campaign.get("id")
     campaign_name = camp_fields.get("Name") or camp_fields.get("Campaign Name") or "Unnamed Campaign"
+    status = str(camp_fields.get("Status") or "").strip().lower()
+
+    # 🧠 Skip inactive campaigns
+    if status in ("paused", "inactive", "stopped", "complete", "completed"):
+        log.info(f"⏸️ Skipping paused/inactive campaign → {campaign_name}")
+        return 0
 
     templates_handle = CONNECTOR.templates().table
     template_link = (camp_fields.get("Templates") or [None])[0]
     if not template_link:
         log.warning(f"⚠️ Campaign {campaign_name} has no linked Template; skipping.")
         return 0
+
     body = _get_template_body(templates_handle, template_link)
     if not body:
         log.warning(f"⚠️ Campaign {campaign_name} template has no body; skipping.")
         return 0
 
+    # 🔗 Only linked prospects — no market fallback
     prospects_handle = CONNECTOR.prospects().table
     linked_prospects = camp_fields.get("Prospects") or camp_fields.get("Prospect")
-    market = camp_fields.get("Market") or camp_fields.get("market") or camp_fields.get("Market Name")
-
-    prospects: List[Dict[str, Any]] = []
-    if linked_prospects:
-        for pid in linked_prospects:
-            try:
-                rec = prospects_handle.get(pid)
-                if rec:
-                    prospects.append(rec)
-            except Exception as e:
-                log.debug(f"Prospect fetch failed ({pid}): {e}")
-    elif market:
-        try:
-            prospects = prospects_handle.all(formula=f"{{Market}}='{market}'")
-        except Exception as e:
-            log.error(f"Prospects query by Market failed: {e}")
-            return 0
-    else:
-        log.warning(f"⚠️ Campaign {campaign_name} missing Market and no linked Prospects; skipping.")
+    if not linked_prospects:
+        log.warning(f"⚠️ Campaign {campaign_name} has no linked Prospects; skipping.")
         return 0
 
+    # 📞 Use campaign TextGrid number for outbound
+    textgrid_number = camp_fields.get("TextGrid Phone Number") or None
+    if not textgrid_number:
+        log.warning(f"⚠️ Campaign {campaign_name} missing TextGrid number — will still queue, outbound will backfill.")
+
+    # hydrate linked prospects
+    prospects: List[Dict[str, Any]] = []
+    for pid in linked_prospects:
+        try:
+            rec = prospects_handle.get(pid)
+            if rec:
+                prospects.append(rec)
+        except Exception as e:
+            log.debug(f"Prospect fetch failed ({pid}): {e}")
+
     if not prospects:
-        log.info(f"⚠️ No prospects found for campaign → {campaign_name}")
+        log.info(f"⚠️ No valid prospect records found for campaign → {campaign_name}")
         return 0
 
     queued = 0
@@ -111,24 +147,30 @@ def _build_campaign_queue(campaign: Dict[str, Any], limit: int = 10000) -> int:
         if not phone:
             continue
         normalized = normalize_phone(str(phone)) or str(phone)
+        msg_body = _render_template_body(body, pf, camp_fields)
+
         payload = {
             "Campaign": [campaign_id],
             "Prospect": [p.get("id")],
             "Prospects": [p.get("id")],
             "Seller Phone Number": normalized,
-            "Message": body,
-            "Market": pf.get("Market") or market,
+            "TextGrid Phone Number": textgrid_number,
+            "Message": msg_body,
+            "Market": camp_fields.get("Market"),
             "Property ID": pf.get("Property ID"),
             "Status": DripStatus.QUEUED.value,
             "UI": STATUS_ICON["QUEUED"],
             "Next Send Date": _ct_future_iso_naive(2, 12),
         }
-        if _safe_create_drip(drip_handle, payload):
+
+        if _safe_create_drip(drip_handle.table, payload):
             queued += 1
+
     log.info(f"✅ Queued {queued} messages for campaign → {campaign_name}")
     return queued
 
-# ─────────────────────────────── campaign runner ───────────────────────────────
+
+# ─────────────────────────────── main runner ───────────────────────────────
 def _get_active_campaigns_table():
     try:
         return CONNECTOR.campaigns().table
@@ -136,25 +178,17 @@ def _get_active_campaigns_table():
         log.error(f"❌ Campaigns table fetch failed: {e}")
         return None
 
+
 def _fetch_active_campaigns(table) -> List[Dict[str, Any]]:
     if not table:
         return []
     try:
-        # Only include campaigns explicitly marked Active, Scheduled, or Running
-        formula = "OR({Status}='Active', {Status}='Scheduled', {Status}='Running')"
-        active = table.all(formula=formula)
-        log.info(f"📊 Found {len(active)} eligible campaigns (Active/Scheduled).")
-        if not active:
-            log.info("⚠️ No active campaigns matched filter.")
-        else:
-            for c in active:
-                name = c.get("fields", {}).get("Name") or "Unnamed Campaign"
-                status = c.get("fields", {}).get("Status")
-                log.info(f"✅ Queued candidate → {name} [Status={status}]")
-        return active
+        # Only fetch active campaigns (exclude paused/completed)
+        return table.all(formula="NOT({Status}='Paused')")
     except Exception as e:
         log.error(f"❌ Failed to fetch active campaigns: {e}")
         return []
+
 
 def run_campaigns(limit="ALL", send_after_queue: bool = True) -> Dict[str, Any]:
     log.info(f"🚀 Starting Campaign Runner — limit={limit}, send_after_queue={send_after_queue}")
@@ -171,22 +205,9 @@ def run_campaigns(limit="ALL", send_after_queue: bool = True) -> Dict[str, Any]:
 
     for camp in active_campaigns:
         try:
-            status = (camp.get("fields") or {}).get("Status", "")
-            name = (camp.get("fields") or {}).get("Name", "Unnamed Campaign")
-            if status not in ("Active", "Scheduled", "Running"):
-                log.info(f"⏸️ Skipping paused/inactive campaign → {name} [Status={status}]")
-                continue
-
             queued = _build_campaign_queue(camp, 10000 if limit == "ALL" else int(limit))
             total_queued += queued
             campaigns_processed += 1
-
-            # update Last Run timestamp in Airtable
-            try:
-                campaigns_table.update(camp["id"], {"Last Run": datetime.utcnow().isoformat()})
-            except Exception as e:
-                log.debug(f"Last Run update failed for {name}: {e}")
-
         except Exception as e:
             err = f"Campaign queue failed: {e}"
             log.error(err)
@@ -214,9 +235,11 @@ def run_campaigns(limit="ALL", send_after_queue: bool = True) -> Dict[str, Any]:
     log.info(f"✅ Campaign Runner complete → {total_queued} queued across {campaigns_processed} campaigns")
     return result
 
+
 async def run_campaigns_main(limit="ALL", send_after_queue=True):
     import asyncio
     return await asyncio.to_thread(run_campaigns, limit, send_after_queue)
+
 
 if __name__ == "__main__":
     print(run_campaigns("ALL", True))
