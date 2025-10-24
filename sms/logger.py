@@ -1,23 +1,44 @@
 # sms/logger.py
-import os
+"""
+Run Logger
+----------
+Lightweight utility to log automation runs (campaigns, inbound, autoresponder, etc.)
+to the 'Logs' table in the Performance base.
+"""
+
+from __future__ import annotations
 import traceback
 from datetime import datetime, timezone
-from pyairtable import Table
+from typing import Dict, Optional
+from sms.runtime import get_logger
+from sms.datastore import CONNECTOR
 
-AIRTABLE_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("AIRTABLE_API_KEY")
-PERF_BASE = os.getenv("PERFORMANCE_BASE")
+logger = get_logger("run_logger")
 
+# -----------------------------
+# Helpers
+# -----------------------------
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-def _get_table():
-    if not (AIRTABLE_KEY and PERF_BASE):
-        return None
+def _norm(s: str) -> str:
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+def _auto_map(tbl) -> Dict[str, str]:
     try:
-        return Table(AIRTABLE_KEY, PERF_BASE, "Logs")
+        one = tbl.all(max_records=1)
+        keys = list(one[0].get("fields", {}).keys()) if one else []
     except Exception:
-        traceback.print_exc()
-        return None
+        keys = []
+    return {_norm(k): k for k in keys}
 
+def _remap(tbl, data: Dict) -> Dict:
+    amap = _auto_map(tbl)
+    return {amap.get(_norm(k), k): v for k, v in data.items() if amap.get(_norm(k))}
 
+# -----------------------------
+# Public API
+# -----------------------------
 def log_run(
     run_type: str,
     processed: int = 0,
@@ -25,38 +46,33 @@ def log_run(
     status: str = "OK",
     campaign: str | None = None,
     extra: dict | None = None,
-):
+) -> Dict:
     """
-    Write a row into Logs table in Performance base.
-
-    Args:
-        run_type (str): Type of run (e.g. "CAMPAIGN_RUN", "AUTORESPONDER", "INBOUND").
-        processed (int): Number of records processed.
-        breakdown (dict|str|None): Any extra breakdown/debug info.
-        status (str): Status flag (OK, ERROR, PARTIAL, etc).
-        campaign (str|None): Optional campaign name for traceability.
-        extra (dict|None): Extra fields to attach into the record.
+    Log a system run into the Performance > Logs table.
+    Example:
+        log_run("CAMPAIGN_RUN", processed=500)
     """
-    tbl = _get_table()
+    tbl = CONNECTOR.performance_logs()
     if not tbl:
-        print(f"⚠️ Skipping run log for {run_type}, Airtable not configured")
-        return
+        logger.warning(f"⚠️ Skipping log_run for {run_type} — table unavailable.")
+        return {"ok": False, "error": "Performance Logs table unavailable"}
+
+    record = {
+        "Type": run_type,
+        "Processed": processed,
+        "Breakdown": str(breakdown or {}),
+        "Status": status,
+        "Timestamp": _utcnow_iso(),
+    }
+    if campaign:
+        record["Campaign"] = campaign
+    if extra:
+        record.update(extra)
 
     try:
-        record = {
-            "Type": run_type,
-            "Processed": processed,
-            "Breakdown": str(breakdown or {}),
-            "Status": status,
-            "Timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        if campaign:
-            record["Campaign"] = campaign
-        if extra:
-            record.update(extra)
-
-        tbl.create(record)
-        print(f"📝 Logged run → {run_type} | {status} | {processed} processed")
+        tbl.create(_remap(tbl, record))
+        logger.info(f"📝 Logged run: {run_type} | {status} | processed={processed}")
+        return {"ok": True, "action": "created", "type": run_type, "status": status}
     except Exception as e:
-        print(f"❌ Failed to log run {run_type}: {e}")
-        traceback.print_exc()
+        logger.error(f"❌ log_run failed: {run_type} — {e}", exc_info=True)
+        return {"ok": False, "error": str(e)}
