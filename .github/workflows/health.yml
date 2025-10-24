@@ -1,0 +1,25 @@
+name: health-checks
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    env:
+      AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+      DEVOPS_BASE: ${{ secrets.DEVOPS_BASE }}
+      HEALTHTARGETS_JSON: >
+        [
+          {"name": "sms-api", "url": "https://your-render-service.onrender.com/health"},
+          {"name": "webhooks", "url": "https://your-render-service.onrender.com/webhooks/health"}
+        ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install pyairtable httpx
+      - run: python ops/health_cron.py

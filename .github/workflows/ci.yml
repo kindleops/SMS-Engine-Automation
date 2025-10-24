@@ -1,0 +1,119 @@
+name: 🚀 CI & Docker Build
+
+on:
+  push:
+    branches: ["main", "master"]
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches: ["main", "master"]
+
+jobs:
+  # ----------------------------
+  # 🧪 Lint & Test
+  # ----------------------------
+  lint-and-test:
+    name: 🧪 Lint & Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - name: 🛎️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: 📦 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov ruff black
+
+      - name: 🔍 Lint with Ruff
+        run: ruff check .
+
+      - name: 🧹 Check Code Formatting with Black
+        run: black --check .
+
+      - name: ✅ Run Unit Tests with Coverage
+        run: pytest --maxfail=1 --disable-warnings -q --cov=sms --cov-report=xml
+
+      - name: 📊 Upload Coverage to Codecov
+        if: success() && github.event_name == 'push' && env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          flags: unittests
+          name: sms-engine
+
+  # ----------------------------
+  # 🐳 Docker Build & Push (main/tag only)
+  # ----------------------------
+  docker-build:
+    name: 🐳 Build & Push Docker Image
+    needs: [lint-and-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # ✅ Only run this job for pushes to main or version tags
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: 🛎️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🔑 Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 🧱 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: ⚙️ Extract Git Metadata
+        id: meta
+        run: |
+          echo "sha_short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          echo "is_tag=${{ startsWith(github.ref, 'refs/tags/') }}" >> $GITHUB_OUTPUT
+
+      - name: 🐳 Build & Push Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/rei-sms-engine:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/rei-sms-engine:${{ steps.meta.outputs.sha_short }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/rei-sms-engine:${{ steps.meta.outputs.branch_name }}
+            ${{ startsWith(github.ref, 'refs/tags/') && format('{0}/rei-sms-engine:{1}', secrets.DOCKERHUB_USERNAME, github.ref_name) || '' }}
+
+      - name: 🏷️ Output Pushed Tags
+        run: |
+          echo "✅ Pushed Docker tags:"
+          echo "• latest"
+          echo "• ${{ steps.meta.outputs.sha_short }}"
+          echo "• ${{ steps.meta.outputs.branch_name }}"
+          if [[ "${{ steps.meta.outputs.is_tag }}" == "true" ]]; then
+            echo "• ${{ github.ref_name }}"
+          fi
