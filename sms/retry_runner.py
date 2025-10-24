@@ -1,8 +1,15 @@
-"""Retry failed outbound messages using the datastore-driven pipeline."""
+"""
+🔁 retry_runner.py (v3.1 — Telemetry Edition)
+──────────────────────────────────────────────
+Retries failed outbound messages from Conversations.
+Adds:
+ - Structured KPI/Run telemetry
+ - Duration tracking
+ - Improved logging & error metrics
+"""
 
 from __future__ import annotations
-
-import os
+import os, time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -17,13 +24,26 @@ from sms.dispatcher import get_policy
 from sms.runtime import get_logger, iso_now
 from sms.textgrid_sender import send_message as _send_direct
 
-try:  # Optional richer retry path that also updates linked tables
-    from sms.message_processor import MessageProcessor as _Processor  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    _Processor = None  # type: ignore
+try:
+    from sms.message_processor import MessageProcessor as _Processor
+except Exception:
+    _Processor = None  # fallback
 
-logger = get_logger(__name__)
+try:
+    from sms.logger import log_run
+except Exception:
+    def log_run(*_a, **_k): pass
 
+try:
+    from sms.kpi_logger import log_kpi
+except Exception:
+    def log_kpi(*_a, **_k): pass
+
+logger = get_logger("retry_runner")
+
+# --------------------------
+# Config & field setup
+# --------------------------
 CONV_FIELDS = conversations_field_map()
 CONV_FIELD_NAMES = CONVERSATIONS_TABLE.field_names()
 
@@ -55,24 +75,23 @@ POLICY = get_policy()
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", str(getattr(POLICY, "retry_limit", 3))))
 BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
 
-
+# --------------------------
+# Helpers
+# --------------------------
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
-
-def _parse_dt(value: Any) -> Optional[datetime]:
-    if not value:
+def _parse_dt(v: Any) -> Optional[datetime]:
+    if not v:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except Exception:
         return None
-
 
 def _backoff_delay(retry_count: int) -> timedelta:
     exponent = max(0, retry_count - 1)
     return timedelta(minutes=BASE_BACKOFF_MINUTES * (2 ** exponent))
-
 
 def _link_id(value: Any) -> Optional[str]:
     if isinstance(value, list) and value:
@@ -81,24 +100,22 @@ def _link_id(value: Any) -> Optional[str]:
         return value
     return None
 
-
 def _qualifies(fields: Dict[str, Any]) -> bool:
     direction = str(fields.get(CONV_DIRECTION_FIELD) or "").upper()
     if ConversationDirection.OUTBOUND.value not in direction:
         return False
-
     status = str(fields.get(CONV_STATUS_FIELD) or "").upper()
     if status not in FAILED_STATUSES:
         return False
-
     retries = int(fields.get(RETRY_COUNT_FIELD) or 0)
     if retries >= MAX_RETRIES:
         return False
-
     retry_after = _parse_dt(fields.get(RETRY_AFTER_FIELD))
     return retry_after is None or retry_after <= _now()
 
-
+# --------------------------
+# Core class
+# --------------------------
 class RetryRunner:
     def __init__(self) -> None:
         self.convos = CONNECTOR.conversations()
@@ -107,21 +124,38 @@ class RetryRunner:
             "permanent_failures": 0,
             "rescheduled": 0,
             "errors": [],
+            "duration_sec": 0.0,
         }
 
-    def run(self, limit: int, view: Optional[str]) -> Dict[str, Any]:
+    def run(self, limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
+        start = time.time()
         candidates = self._fetch_candidates(limit, view)
         if not candidates:
-            return {"retried": 0, "permanent_failures": 0, "rescheduled": 0, "errors": [], "ok": True}
+            logger.info("No retry candidates found.")
+            return {"ok": True, "retried": 0}
 
+        logger.info(f"Found {len(candidates)} retry candidates.")
         for record in candidates:
             try:
                 self._process(record)
-            except Exception as exc:  # pragma: no cover - defensive guard
+            except Exception as exc:
                 logger.exception("Retry failed for %s", record.get("id"))
                 self.summary["errors"].append({"conversation": record.get("id"), "error": str(exc)})
 
+        self.summary["duration_sec"] = round(time.time() - start, 2)
         self.summary["ok"] = True
+
+        # --- Telemetry
+        log_run("RETRY_RUNNER", processed=self.summary["retried"], breakdown=self.summary)
+        log_kpi("RETRIED_MESSAGES", self.summary["retried"])
+        log_kpi("RETRY_PERM_FAILS", self.summary["permanent_failures"])
+        log_kpi("RETRY_RESCHEDULED", self.summary["rescheduled"])
+
+        logger.info(f"✅ Retry cycle done | retried={self.summary['retried']} | "
+                    f"rescheduled={self.summary['rescheduled']} | "
+                    f"failures={self.summary['permanent_failures']} | "
+                    f"duration={self.summary['duration_sec']}s")
+
         return self.summary
 
     def _fetch_candidates(self, limit: int, view: Optional[str]) -> List[Dict[str, Any]]:
@@ -129,49 +163,41 @@ class RetryRunner:
         if view:
             params["view"] = view
         records = list_records(self.convos, **params)
-        return [rec for rec in records if _qualifies(rec.get("fields", {}) or {})][:limit]
+        return [r for r in records if _qualifies(r.get("fields", {}) or {})][:limit]
 
     def _process(self, record: Dict[str, Any]) -> None:
-        fields = record.get("fields", {}) or {}
-        retries = int(fields.get(RETRY_COUNT_FIELD) or 0)
-        phone = fields.get(CONV_FROM_FIELD)
+        f = record.get("fields", {}) or {}
+        retries = int(f.get(RETRY_COUNT_FIELD) or 0)
+        phone = f.get(CONV_FROM_FIELD)
         if not phone:
-            self._mark_permanent(record, retries, "Missing phone number")
+            self._mark_permanent(record, retries, "Missing phone")
             return
 
-        body = fields.get(CONV_BODY_FIELD)
+        body = f.get(CONV_BODY_FIELD)
         if not body:
-            self._mark_permanent(record, retries, "Missing message body")
+            self._mark_permanent(record, retries, "Missing body")
             return
 
-        from_number = fields.get(CONV_TO_FIELD)
-        template_id = _link_id(fields.get(CONV_TEMPLATE_LINK_FIELD))
-        campaign_id = _link_id(fields.get(CONV_CAMPAIGN_LINK_FIELD))
-        lead_id = _link_id(fields.get(CONV_LEAD_LINK_FIELD))
+        from_number = f.get(CONV_TO_FIELD)
+        template_id = _link_id(f.get(CONV_TEMPLATE_LINK_FIELD))
+        campaign_id = _link_id(f.get(CONV_CAMPAIGN_LINK_FIELD))
+        lead_id = _link_id(f.get(CONV_LEAD_LINK_FIELD))
 
         result = self._send(phone, body, from_number, template_id, campaign_id, lead_id)
         if result.get("status") == "sent":
             self._mark_success(record, result.get("sid"), retries)
             self.summary["retried"] += 1
         else:
-            error = result.get("error") or "Send failed"
+            err = result.get("error") or "Send failed"
             retries += 1
             if retries >= MAX_RETRIES:
-                self._mark_permanent(record, retries, error)
+                self._mark_permanent(record, retries, err)
                 self.summary["permanent_failures"] += 1
             else:
-                self._schedule_retry(record, retries, error)
+                self._schedule_retry(record, retries, err)
                 self.summary["rescheduled"] += 1
 
-    def _send(
-        self,
-        phone: str,
-        body: str,
-        from_number: Optional[str],
-        template_id: Optional[str],
-        campaign_id: Optional[str],
-        lead_id: Optional[str],
-    ) -> Dict[str, Any]:
+    def _send(self, phone, body, from_number, template_id, campaign_id, lead_id) -> Dict[str, Any]:
         if _Processor:
             return _Processor.send(
                 phone=phone,
@@ -183,16 +209,9 @@ class RetryRunner:
                 direction=ConversationDirection.OUTBOUND.value,
                 metadata={"retry": True},
             )
-        return _send_direct(
-            phone,
-            body,
-            from_number=from_number,
-            template_id=template_id,
-            campaign_id=campaign_id,
-            lead_id=lead_id,
-        )
+        return _send_direct(phone, body, from_number=from_number)
 
-    def _mark_success(self, record: Dict[str, Any], sid: Optional[str], retries: int) -> None:
+    def _mark_success(self, record, sid, retries) -> None:
         update_record(
             self.convos,
             record["id"],
@@ -207,7 +226,7 @@ class RetryRunner:
             },
         )
 
-    def _schedule_retry(self, record: Dict[str, Any], retries: int, error: str) -> None:
+    def _schedule_retry(self, record, retries, err) -> None:
         delay = _backoff_delay(retries)
         update_record(
             self.convos,
@@ -216,12 +235,12 @@ class RetryRunner:
                 CONV_STATUS_FIELD: "NEEDS_RETRY",
                 RETRY_COUNT_FIELD: retries,
                 RETRY_AFTER_FIELD: (_now() + delay).isoformat(),
-                LAST_ERROR_FIELD: error,
+                LAST_ERROR_FIELD: err,
                 LAST_RETRY_AT_FIELD: iso_now(),
             },
         )
 
-    def _mark_permanent(self, record: Dict[str, Any], retries: int, error: str) -> None:
+    def _mark_permanent(self, record, retries, err) -> None:
         update_record(
             self.convos,
             record["id"],
@@ -229,18 +248,16 @@ class RetryRunner:
                 CONV_STATUS_FIELD: ConversationDeliveryStatus.FAILED.value,
                 RETRY_COUNT_FIELD: retries,
                 RETRY_AFTER_FIELD: "",
-                LAST_ERROR_FIELD: error,
+                LAST_ERROR_FIELD: err,
                 LAST_RETRY_AT_FIELD: iso_now(),
-                PERM_FAIL_FIELD: error,
+                PERM_FAIL_FIELD: err,
             },
         )
 
-
 def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
-    runner = RetryRunner()
-    return runner.run(limit, view)
+    return RetryRunner().run(limit, view)
 
-
-if __name__ == "__main__":  # pragma: no cover - manual execution helper
+if __name__ == "__main__":
     result = run_retry(limit=int(os.getenv("RETRY_LIMIT", "100")))
-    print(result)
+    import json
+    logger.info(json.dumps(result, indent=2))
