@@ -3477,3 +3477,14 @@ def default_conversation_payload(
         "Processed By": processor.value,
         "Sent At": datetime.now(timezone.utc).isoformat(),
     }
+
+# ---------------------------------------------------------------------------
+# Canonical Airtable Table Names
+# ---------------------------------------------------------------------------
+
+TABLE_NAMES = {
+    "CONVERSATIONS": "Conversations",
+    "LEADS": "Leads",
+    "CAMPAIGNS": "Campaigns",
+    "KPIS": "KPIs",
+}
