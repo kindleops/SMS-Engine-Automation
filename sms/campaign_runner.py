@@ -140,7 +140,7 @@ def _fetch_active_campaigns(table) -> List[Dict[str, Any]]:
     if not table:
         return []
     try:
-        return table.all(formula="AND({Active}=TRUE(), {Status}!='Paused')")
+        return table.all(formula="OR({Status}=TRUE(), {Status}!='Scheduled')")
     except Exception as e:
         log.error(f"❌ Failed to fetch active campaigns: {e}")
         return []
