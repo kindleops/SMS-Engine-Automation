@@ -191,7 +191,7 @@ services:
 # =====================================================
 cronJobs:
   - name: run-campaigns
-    schedule: "*/10 * * * *"
+    schedule: "*/5 * * * *"
     command: >
       curl -sf -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL&send_after_queue=true"
       -H "Authorization: Bearer ${CRON_TOKEN}"
