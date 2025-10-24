@@ -209,7 +209,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     due = sorted(due, key=lambda x: x.get("fields", {}).get(DRIP_FIELDS["NEXT_SEND_DATE"], ""))[:limit]
 
     limiter = build_limiter()
-    total_sent, total_failed = 0, 0
+    total_sent, total_failed, total_skipped = 0, 0, 0
     errors = []
 
     for r in due:
@@ -251,13 +251,30 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             pass
 
         ok = False
+        send_attempted = False
+        send_error: Optional[Exception] = None
+
+        if not MessageProcessor:
+            log.error("❌ Skipped send for %s — MessageProcessor not initialized or send() failed", phone)
+            total_skipped += 1
+            try:
+                drip_tbl.update(rid, {
+                    DRIP_FIELDS["STATUS"]: DripStatus.SKIPPED.value,
+                    DRIP_FIELDS["LAST_ERROR"]: "no_message_processor",
+                })
+            except Exception:
+                pass
+            continue
+
         try:
-            if MessageProcessor:
-                result = MessageProcessor.send(
-                    phone=phone, body=body, from_number=did, property_id=property_id, direction="OUT"
-                )
-                ok = (result or {}).get("status") == "sent"
+            send_attempted = True
+            result = MessageProcessor.send(
+                phone=phone, body=body, from_number=did, property_id=property_id, direction="OUT"
+            )
+            ok = (result or {}).get("status") == "sent"
         except Exception as e:
+            send_error = e
+            log.exception("❌ Skipped send for %s — MessageProcessor not initialized or send() failed", phone)
             ok = False
             errors.append(str(e))
 
@@ -270,12 +287,15 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
                 })
             except Exception:
                 pass
-        else:
+        elif send_attempted:
+            if not send_error:
+                log.error("❌ Skipped send for %s — MessageProcessor not initialized or send() failed", phone)
+                errors.append("send_failed")
             total_failed += 1
             try:
                 drip_tbl.update(rid, {
                     DRIP_FIELDS["STATUS"]: DripStatus.FAILED.value,
-                    DRIP_FIELDS["LAST_ERROR"]: "send_failed"
+                    DRIP_FIELDS["LAST_ERROR"]: str(send_error) if send_error else "send_failed"
                 })
             except Exception:
                 pass
@@ -283,11 +303,17 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         if SLEEP_BETWEEN_SENDS_SEC:
             time.sleep(SLEEP_BETWEEN_SENDS_SEC)
 
-    log.info("✅ Batch complete — sent=%s failed=%s", total_sent, total_failed)
+    log.info(
+        "✅ Batch complete — sent=%s failed=%s skipped=%s",
+        total_sent,
+        total_failed,
+        total_skipped,
+    )
     return {
         "ok": True,
         "total_sent": total_sent,
         "total_failed": total_failed,
+        "total_skipped": total_skipped,
         "quiet_hours": False,
         "errors": errors,
     }
