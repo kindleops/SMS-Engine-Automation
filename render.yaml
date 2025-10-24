@@ -1,5 +1,5 @@
 # =====================================================
-#  REI SMS Engine — Full Render Deployment (FINAL VERIFIED)
+#  REI SMS Engine — Full Render Deployment (FINAL AUTOPILOT)
 # =====================================================
 
 services:
@@ -75,10 +75,6 @@ services:
         value: "20"
       - key: JITTER_SECONDS
         value: "2"
-      - key: RUNNER_SEND_AFTER_QUEUE
-        value: "false"
-      - key: ENABLE_EMBEDDED_SCHEDULER
-        value: "false"
       - key: ENABLE_METRICS
         value: "true"
 
@@ -94,7 +90,7 @@ services:
       cpu: 1
       memoryMB: 512
 
-  # ♾️ CONTINUOUS WORKER — Outbound, Retry, Autoresponder Loop
+  # ♾️ CONTINUOUS WORKER — Outbound, Retry, Autoresponder, Metrics
   - type: worker
     name: rei-sms-worker
     env: python
@@ -112,31 +108,20 @@ services:
         sync: false
       - key: LEADS_CONVOS_BASE
         sync: false
-      - key: AIRTABLE_LEADS_CONVOS_BASE_ID
-        sync: false
       - key: CAMPAIGN_CONTROL_BASE
-        sync: false
-      - key: AIRTABLE_CAMPAIGN_CONTROL_BASE_ID
         sync: false
       - key: PERFORMANCE_BASE
         sync: false
-      - key: AIRTABLE_PERFORMANCE_BASE_ID
-        sync: false
-      - key: AIRTABLE_REPORTING_KEY
-        sync: false
-
       - key: TEXTGRID_ACCOUNT_SID
         sync: false
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
-
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
       - key: REDIS_TLS
         value: "true"
-
       - key: WORKER_INTERVAL_SEC
         value: "30"
       - key: SEND_BATCH_LIMIT
@@ -148,6 +133,8 @@ services:
       - key: AUTORESPONDER_VIEW
         value: "Unprocessed Inbounds"
       - key: RUNNER_SEND_AFTER_QUEUE
+        value: "true"
+      - key: ENABLE_CAMPAIGNS
         value: "true"
       - key: QUIET_HOURS_ENFORCED
         value: "true"
@@ -164,49 +151,45 @@ services:
       - key: STRICT_MODE
         value: "false"
 
-  # 🧠 AUTOLINKER — Airtable Relationship Sync
+  # 🚀 CAMPAIGN RUNNER — Continuous Campaign Queue Builder
   - type: worker
-    name: rei-sms-worker
-    env: docker
-    region: oregon
-    dockerfilePath: ./Dockerfile.sms
+    name: rei-sms-campaign-runner
+    env: python
+    plan: free
+    runtime: python3.11
+    buildCommand: |
+      pip install --upgrade pip setuptools wheel
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: python -u -m sms.campaign_runner
+    autoDeploy: true
+    previews:
+      enabled: false
     envVars:
-    - key: SERVICE_CMD
-      value: python -m sms.worker
-    - key: WORKER_NAME
-      value: rei-sms-worker
-    - key: ENABLE_CAMPAIGNS
-      value: true
-    - key: ENABLE_SEND
-      value: true
-    - key: ENABLE_RETRY
-      value: true
-    - key: ENABLE_AUTORESPONDER
-      value: true
-    - key: ENABLE_METRICS
-      value: true
-    - key: REDIS_URL
-      sync: false
-    - key: AIRTABLE_API_KEY
-      sync: false
-    - key: TEXTGRID_API_KEY
-      sync: false
-    - key: LEADS_CONVOS_BASE
-      sync: false
-    - key: PERFORMANCE_BASE
-      sync: false
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: LEADS_CONVOS_BASE
+        sync: false
+      - key: CAMPAIGN_CONTROL_BASE
+        sync: false
+      - key: PERFORMANCE_BASE
+        sync: false
+      - key: TEXTGRID_ACCOUNT_SID
+        sync: false
+      - key: TEXTGRID_AUTH_TOKEN
+        sync: false
+      - key: CRON_TOKEN
+        sync: false
+      - key: ENABLE_CAMPAIGNS
+        value: "true"
+      - key: RUNNER_SEND_AFTER_QUEUE
+        value: "true"
+      - key: TEST_MODE
+        value: "false"
 
 # =====================================================
 #  Cron Jobs — Automated Engine Orchestration
 # =====================================================
 cronJobs:
-  - name: run-autoresponder
-    schedule: "*/10 * * * *"
-    command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/autoresponder/autoresponder"
-      -H "Authorization: Bearer ${CRON_TOKEN}"
-      -H "x-cron-token: ${CRON_TOKEN}"
-
   - name: run-campaigns
     schedule: "*/10 * * * *"
     command: >
@@ -214,10 +197,10 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
-  - name: schedule-campaigns
-    schedule: "*/15 * * * *"
+  - name: run-autoresponder
+    schedule: "*/10 * * * *"
     command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/schedule-campaigns"
+      curl -sf -X POST "https://rei-sms-engine.onrender.com/autoresponder/autoresponder"
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
@@ -242,33 +225,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
-  - name: aggregate-kpis-weekly
-    schedule: "0 2 * * 1"
-    command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis"
-      -H "Authorization: Bearer ${CRON_TOKEN}"
-      -H "x-cron-token: ${CRON_TOKEN}"
-
-  - name: aggregate-kpis-monthly
-    schedule: "0 3 1 * *"
-    command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis"
-      -H "Authorization: Bearer ${CRON_TOKEN}"
-      -H "x-cron-token: ${CRON_TOKEN}"
-
-  - name: cron-all
-    schedule: "*/15 * * * *"
-    command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/cron/all?limit=500"
-      -H "Authorization: Bearer ${CRON_TOKEN}"
-      -H "x-cron-token: ${CRON_TOKEN}"
-
   - name: health-ping
     schedule: "*/5 * * * *"
     command: >
       curl -sf "https://rei-sms-engine.onrender.com/health"
-
-  - type: worker
-    name: rei-sms-campaign-runner
-    env: python
-    startCommand: python -m sms.campaign_runner
