@@ -14,17 +14,23 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 from sms.runtime import get_logger
+
 log = get_logger("reset_daily_stats")
 
 try:
     from sms.logger import log_run
 except Exception:
-    def log_run(*_a, **_k): pass
+
+    def log_run(*_a, **_k):
+        pass
+
 
 try:
     from sms.kpi_logger import log_kpi
 except Exception:
-    def log_kpi(*_a, **_k): pass
+
+    def log_kpi(*_a, **_k):
+        pass
 
 
 # -------------------------------
@@ -40,12 +46,15 @@ try:
 except Exception:
     pass
 
+
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
     if not (api_key and base_id):
         return None
     try:
-        if _PyTable: return _PyTable(api_key, base_id, table_name)
-        if _PyApi: return _PyApi(api_key).table(base_id, table_name)
+        if _PyTable:
+            return _PyTable(api_key, base_id, table_name)
+        if _PyApi:
+            return _PyApi(api_key).table(base_id, table_name)
     except Exception:
         log.error("Failed to init Airtable table", exc_info=True)
     return None
@@ -83,6 +92,7 @@ SYNONYMS = {
 def _today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
+
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
         sample = tbl.all(max_records=1)
@@ -91,13 +101,16 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         keys = []
     return {re.sub(r"[^a-z0-9]+", "", k.lower()): k for k in keys}
 
+
 def _existing_only(tbl, patch: Dict[str, Any]) -> Dict[str, Any]:
     amap = _auto_field_map(tbl)
     out = {}
     for k, v in patch.items():
         ak = amap.get(re.sub(r"[^a-z0-9]+", "", k.lower()))
-        if ak: out[ak] = v
+        if ak:
+            out[ak] = v
     return out
+
 
 def _cap_for_row(f: Dict[str, Any]) -> int:
     try:

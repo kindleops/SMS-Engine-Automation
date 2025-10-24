@@ -9,6 +9,7 @@ import os
 from sms.autoresponder import Autoresponder
 from sms.intent import classify_intent
 
+
 def main():
     ar = Autoresponder()
 
@@ -43,6 +44,7 @@ def main():
         print(f"{text!r} processed successfully ✅")
 
     print("\nSmoke test complete — check console output for any exceptions.")
+
 
 if __name__ == "__main__":
     main()

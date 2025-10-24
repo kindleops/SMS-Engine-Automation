@@ -58,6 +58,7 @@ UPSTASH_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN") or os.getenv("upstash
 # HELPERS
 # ---------------------------------------------------------------------------
 
+
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -120,6 +121,7 @@ IDEM = IdemStore()
 # NUMBER COUNTERS
 # ---------------------------------------------------------------------------
 
+
 def _bump_numbers(did: str, delivered: bool):
     """Increment counters on the Numbers table."""
     try:
@@ -150,6 +152,7 @@ def _bump_numbers(did: str, delivered: bool):
 # AIRTABLE UPDATES
 # ---------------------------------------------------------------------------
 
+
 async def _update_airtable_status(sid: str, status: str, error: Optional[str], from_did: str, to_phone: str):
     """Update Drip Queue + Conversations records via datastore."""
     dq_handle = CONNECTOR.drip_queue()
@@ -178,9 +181,13 @@ async def _update_airtable_status(sid: str, status: str, error: Optional[str], f
 # PAYLOAD PARSER
 # ---------------------------------------------------------------------------
 
+
 def _extract_payload(req_body: Any, headers: Dict[str, str]) -> Dict[str, Any]:
     """Normalize JSON or form body from any provider."""
-    def lower(d): return {k.lower(): v for k, v in d.items()}
+
+    def lower(d):
+        return {k.lower(): v for k, v in d.items()}
+
     def pick(d, *keys):
         for k in keys:
             if k.lower() in d:
@@ -228,6 +235,7 @@ def _extract_payload(req_body: Any, headers: Dict[str, str]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # MAIN ROUTE
 # ---------------------------------------------------------------------------
+
 
 @router.post("")
 async def delivery_webhook(

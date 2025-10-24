@@ -117,7 +117,7 @@ async def _safe_update(table, rid: str, payload: Dict[str, Any], retries: int = 
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
-            logger.warning(f"Airtable update failed ({i+1}/{retries}): {msg}")
+            logger.warning(f"Airtable update failed ({i + 1}/{retries}): {msg}")
             await asyncio.sleep(delay)
     logger.error(f"❌ Gave up updating record {rid}")
 
@@ -128,9 +128,7 @@ async def _safe_update(table, rid: str, payload: Dict[str, Any], retries: int = 
 class CampaignRunner:
     def __init__(self, *, send_after_queue: bool = False, concurrency: int = 10):
         self.drip = CONNECTOR.drip_queue()
-        self.summary: Dict[str, Any] = {
-            "sent": 0, "failed": 0, "deferred": 0, "errors": [], "ok": True
-        }
+        self.summary: Dict[str, Any] = {"sent": 0, "failed": 0, "deferred": 0, "errors": [], "ok": True}
         self.policy = get_policy()
         self.send_after_queue = send_after_queue
         self.concurrency = max(1, concurrency)

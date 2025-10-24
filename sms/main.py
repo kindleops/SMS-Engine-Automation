@@ -31,6 +31,7 @@ from sms.dispatcher import get_policy
 
 _POLICY = get_policy()
 
+
 # ─────────────────────────── Lazy & guarded imports ─────────────────────────
 def _guarded_import(path: str, attr: Optional[str] = None, fallback: Any = None):
     try:
@@ -39,19 +40,31 @@ def _guarded_import(path: str, attr: Optional[str] = None, fallback: Any = None)
     except Exception:
         return fallback
 
+
 # Airtable safe helpers (all optional):
 try:
     from sms.airtable_client import (
-        get_runs, get_kpis, get_leads, get_convos, get_templates,
-        safe_create, remap_existing_only,
+        get_runs,
+        get_kpis,
+        get_leads,
+        get_convos,
+        get_templates,
+        safe_create,
+        remap_existing_only,
     )
 except Exception:
     get_runs = get_kpis = get_leads = get_convos = get_templates = lambda: None  # type: ignore
-    def safe_create(*_a, **_k): return None  # type: ignore
-    def remap_existing_only(*_a, **_k): return {}  # type: ignore
+
+    def safe_create(*_a, **_k):
+        return None  # type: ignore
+
+    def remap_existing_only(*_a, **_k):
+        return {}  # type: ignore
+
 
 # Outbound batcher
 _send_batch = _guarded_import("sms.outbound_batcher", "send_batch", fallback=None)
+
 
 # Autoresponder (two possible names in tree)
 def _build_autoresponder():
@@ -62,29 +75,35 @@ def _build_autoresponder():
     if run2:
         return lambda limit=50, view=None: run2(limit=limit, view=view)
     return None
+
+
 _run_autoresponder = _build_autoresponder()
 
 # Quotas, metrics, followups, retry, dispatcher, health
 _reset_daily_quotas = _guarded_import("sms.quota_reset", "reset_daily_quotas", fallback=None)
-_update_metrics     = _guarded_import("sms.metrics_tracker", "update_metrics", fallback=None)
-_notify             = _guarded_import("sms.metrics_tracker", "_notify", fallback=lambda m: print(f"[notify] {m}"))
-_run_campaigns      = _guarded_import("sms.campaign_runner", "run_campaigns", fallback=None)
-_get_campaigns_tbl  = _guarded_import("sms.campaign_runner", "get_campaigns_table", fallback=lambda: None)
-_aggregate_kpis     = _guarded_import("sms.kpi_aggregator", "aggregate_kpis", fallback=None)
-_run_retry          = _guarded_import("sms.retry_runner", "run_retry", fallback=None)
-_run_followups      = _guarded_import("sms.followup_flow", "run_followups", fallback=lambda: {"ok": True, "skipped": "followups unavailable"})
-_run_engine         = _guarded_import("sms.dispatcher", "run_engine", fallback=lambda *a, **k: {"ok": False, "error": "dispatcher unavailable"})
-_strict_health      = _guarded_import("sms.health_strict", "strict_health", fallback=lambda mode: {"ok": True, "mode": mode, "note": "strict health shim"})
+_update_metrics = _guarded_import("sms.metrics_tracker", "update_metrics", fallback=None)
+_notify = _guarded_import("sms.metrics_tracker", "_notify", fallback=lambda m: print(f"[notify] {m}"))
+_run_campaigns = _guarded_import("sms.campaign_runner", "run_campaigns", fallback=None)
+_get_campaigns_tbl = _guarded_import("sms.campaign_runner", "get_campaigns_table", fallback=lambda: None)
+_aggregate_kpis = _guarded_import("sms.kpi_aggregator", "aggregate_kpis", fallback=None)
+_run_retry = _guarded_import("sms.retry_runner", "run_retry", fallback=None)
+_run_followups = _guarded_import("sms.followup_flow", "run_followups", fallback=lambda: {"ok": True, "skipped": "followups unavailable"})
+_run_engine = _guarded_import("sms.dispatcher", "run_engine", fallback=lambda *a, **k: {"ok": False, "error": "dispatcher unavailable"})
+_strict_health = _guarded_import(
+    "sms.health_strict", "strict_health", fallback=lambda mode: {"ok": True, "mode": mode, "note": "strict health shim"}
+)
 
 # Optional inbound router (mounted if available)
 _inbound_router = _guarded_import("sms.inbound_webhook", "router", fallback=None)
 
 # Optional Drip admin
-_normalize_next_send_dates = _guarded_import("sms.drip_admin", "normalize_next_send_dates",
-                                             fallback=lambda *a, **k: {"ok": False, "error": "drip_admin unavailable"})
+_normalize_next_send_dates = _guarded_import(
+    "sms.drip_admin", "normalize_next_send_dates", fallback=lambda *a, **k: {"ok": False, "error": "drip_admin unavailable"}
+)
 
 # Optional numbers admin
 _backfill_numbers_for_existing_queue = _guarded_import("sms.admin_numbers", "backfill_numbers_for_existing_queue", fallback=None)
+
 
 def _backfill_drip_from_numbers(dry_run: bool = True) -> Dict[str, Any]:
     if _backfill_numbers_for_existing_queue:
@@ -93,15 +112,18 @@ def _backfill_drip_from_numbers(dry_run: bool = True) -> Dict[str, Any]:
         return res
     return {"ok": False, "error": "admin_numbers missing"}
 
+
 def _recalc_numbers_sent_today(for_date: str) -> Dict[str, Any]:
     if _backfill_numbers_for_existing_queue:
         return {"ok": True, "note": "recalc not implemented in this build", "date": for_date}
     return {"ok": False, "error": "admin_numbers missing"}
 
+
 def _reset_numbers_daily_counters() -> Dict[str, Any]:
     if _backfill_numbers_for_existing_queue:
         return {"ok": True, "note": "use /reset-quotas which resets Numbers daily counters"}
     return {"ok": False, "error": "admin_numbers missing"}
+
 
 # ─────────────────────────── FastAPI app ────────────────────────────
 app = FastAPI(title="REI SMS Engine", version="3.0.0")
@@ -110,14 +132,14 @@ if _inbound_router:
 
 # ─────────────────────── ENV / runtime toggles ──────────────────────
 CRON_TOKEN = os.getenv("CRON_TOKEN")
-TEST_MODE  = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1", "true", "yes")
 STRICT_MODE = os.getenv("STRICT_MODE", "false").lower() in ("1", "true", "yes")
 
 QUIET_HOURS_ENFORCED = os.getenv("QUIET_HOURS_ENFORCED", "true" if _POLICY.quiet_enforced else "false").lower() in ("1", "true", "yes")
 QUIET_START = int(os.getenv("QUIET_START_HOUR_LOCAL", str(_POLICY.quiet_start_hour)))
-QUIET_END   = int(os.getenv("QUIET_END_HOUR_LOCAL",   str(_POLICY.quiet_end_hour)))
+QUIET_END = int(os.getenv("QUIET_END_HOUR_LOCAL", str(_POLICY.quiet_end_hour)))
 ALLOW_QUEUE_OUTSIDE_HOURS = os.getenv("ALLOW_QUEUE_OUTSIDE_HOURS", "true").lower() in ("1", "true", "yes")
-AUTORESPONDER_ALWAYS_ON   = os.getenv("AUTORESPONDER_ALWAYS_ON",   "true").lower() in ("1", "true", "yes")
+AUTORESPONDER_ALWAYS_ON = os.getenv("AUTORESPONDER_ALWAYS_ON", "true").lower() in ("1", "true", "yes")
 
 PERF_BASE = os.getenv("PERFORMANCE_BASE") or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
@@ -128,8 +150,10 @@ try:
 except Exception:
     ZoneInfo = None
 
+
 def _iso_ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
 
 def central_now() -> datetime:
     if _POLICY.quiet_tz:
@@ -138,21 +162,27 @@ def central_now() -> datetime:
         return datetime.now(ZoneInfo("America/Chicago"))
     return datetime.now(timezone.utc)
 
+
 def is_quiet_hours_local() -> bool:
     if not QUIET_HOURS_ENFORCED:
         return False
     h = central_now().hour
     return (h >= QUIET_START) or (h < QUIET_END)
 
+
 # ─────────────────────────── Auth helpers ───────────────────────────
 def _extract_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]) -> str:
-    if qp_token: return qp_token
-    if h_webhook: return h_webhook
-    if h_cron: return h_cron
+    if qp_token:
+        return qp_token
+    if h_webhook:
+        return h_webhook
+    if h_cron:
+        return h_cron
     auth = request.headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
         return auth.split(" ", 1)[1]
     return ""
+
 
 def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]):
     if not CRON_TOKEN:
@@ -160,6 +190,7 @@ def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optiona
     token = _extract_token(request, qp_token, h_webhook, h_cron)
     if token != CRON_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # ─────────────────────────── Logging + telemetry ────────────────────
 def _log_error(context: str, err: Exception | str):
@@ -170,8 +201,10 @@ def _log_error(context: str, err: Exception | str):
     except Exception:
         pass
 
+
 def _get_perf_tables() -> Tuple[Any, Any]:
     return get_runs(), get_kpis()
+
 
 async def _log_run_async(runs_tbl, step: str, result: Dict[str, Any]):
     if not runs_tbl:
@@ -179,10 +212,7 @@ async def _log_run_async(runs_tbl, step: str, result: Dict[str, Any]):
     try:
         payload = {
             "Type": step,
-            "Processed": float(result.get("processed")
-                               or result.get("total_sent")
-                               or result.get("sent")
-                               or 0),
+            "Processed": float(result.get("processed") or result.get("total_sent") or result.get("sent") or 0),
             "Breakdown": json.dumps(result, ensure_ascii=False),
             "Timestamp": _iso_ts(),
         }
@@ -190,6 +220,7 @@ async def _log_run_async(runs_tbl, step: str, result: Dict[str, Any]):
         await asyncio.to_thread(safe_create, runs_tbl, payload)
     except Exception as e:
         _log_error(f"Log Run {step}", e)
+
 
 async def _log_kpi_async(kpis_tbl, metric: str, value: int | float):
     if not kpis_tbl:
@@ -205,6 +236,7 @@ async def _log_kpi_async(kpis_tbl, metric: str, value: int | float):
     except Exception as e:
         _log_error(f"Log KPI {metric}", e)
 
+
 # ─────────────────────────── Utility parsing ─────────────────────────
 def _parse_limit_param(raw: Optional[str]) -> Optional[int]:
     if raw is None:
@@ -219,12 +251,15 @@ def _parse_limit_param(raw: Optional[str]) -> Optional[int]:
         print(f"[warn] Invalid limit param: {raw!r} → treating as None")
         return None
 
+
 class RunCampaignsRequest(BaseModel):
     limit: Optional[int] = None
     send_after_queue: Optional[bool] = None
 
+
 def _runner_limit_arg(safe_limit: Optional[int]) -> int | str:
     return safe_limit if (safe_limit and safe_limit > 0) else "ALL"
+
 
 # ─────────────────────────── Startup checks ─────────────────────────
 @app.on_event("startup")
@@ -236,7 +271,8 @@ async def startup_checks():
         print(f"   STRICT_MODE={STRICT_MODE} TEST_MODE={TEST_MODE}")
         print(f"   QUIET_HOURS_ENFORCED={QUIET_HOURS_ENFORCED} ({QUIET_START:02d}:00–{QUIET_END:02d}:00 CT)")
         missing = [
-            k for k in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"]
+            k
+            for k in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"]
             if not os.getenv(k) and not os.getenv(k.replace("BASE", "_BASE_ID"))
         ]
         if missing:
@@ -253,10 +289,12 @@ async def startup_checks():
         if STRICT_MODE:
             raise
 
+
 # ─────────────────────────── Health ────────────────────────────────
 @app.get("/ping")
 async def ping():
     return {"ok": True, "pong": True, "time": _iso_ts()}
+
 
 @app.post("/echo-token")
 async def echo_token(
@@ -273,6 +311,7 @@ async def echo_token(
         "auth_header": request.headers.get("authorization"),
     }
 
+
 @app.get("/health")
 async def health():
     return {
@@ -282,6 +321,7 @@ async def health():
         "local_time_central": central_now().isoformat(),
         "version": "3.0.0",
     }
+
 
 @app.get("/healthz")
 async def healthz():
@@ -293,6 +333,7 @@ async def healthz():
         "version": "3.0.0",
     }
 
+
 @app.get("/health/strict")
 async def health_strict_endpoint(mode: str = Query("prospects", description="prospects | leads | inbounds")):
     try:
@@ -300,6 +341,7 @@ async def health_strict_endpoint(mode: str = Query("prospects", description="pro
     except Exception as e:
         _log_error("strict_health", e)
         return {"ok": False, "error": str(e), "mode": mode}
+
 
 # ─────────────────────── Outbound / Send now ────────────────────────
 @app.post("/send")
@@ -319,6 +361,7 @@ async def send_endpoint(
     if not _send_batch:
         return {"ok": False, "error": "send_batch unavailable"}
     return await asyncio.to_thread(_send_batch, campaign_id, limit)
+
 
 # ─────────────── Campaigns (queue + optional immediate send) ───────────────
 @app.post("/run-campaigns")
@@ -371,6 +414,7 @@ async def run_campaigns_endpoint(
         _log_error("run_campaigns", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/schedule-campaigns")
 async def schedule_campaigns_endpoint(
     request: Request,
@@ -387,10 +431,12 @@ async def schedule_campaigns_endpoint(
         return {"ok": True, "status": "mock_scheduler", "limit": limit}
     try:
         from sms.scheduler import run_scheduler  # local import to keep import-time light
+
         return await asyncio.to_thread(run_scheduler, limit)
     except Exception as e:
         _log_error("schedule_campaigns", e)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # ─────────────── Manual Campaign Controls ───────────────
 def _safe_update(tbl, rid: str, patch: Dict[str, Any]):
@@ -401,6 +447,7 @@ def _safe_update(tbl, rid: str, patch: Dict[str, Any]):
     except Exception as e:
         _log_error("Airtable update", e)
         return None
+
 
 @app.post("/campaign/{campaign_id}/start")
 async def campaign_start(
@@ -414,9 +461,11 @@ async def campaign_start(
     tbl = _get_campaigns_tbl()
     if not tbl:
         raise HTTPException(500, "Campaigns table unavailable")
-    await asyncio.to_thread(_safe_update, tbl, campaign_id,
-                            {"status": "Scheduled", "Active": True, "Go Live": True, "last_run_at": _iso_ts()})
+    await asyncio.to_thread(
+        _safe_update, tbl, campaign_id, {"status": "Scheduled", "Active": True, "Go Live": True, "last_run_at": _iso_ts()}
+    )
     return {"ok": True, "campaign": campaign_id, "status": "Scheduled"}
+
 
 @app.post("/campaign/{campaign_id}/stop")
 async def campaign_stop(
@@ -430,9 +479,11 @@ async def campaign_stop(
     tbl = _get_campaigns_tbl()
     if not tbl:
         raise HTTPException(500, "Campaigns table unavailable")
-    await asyncio.to_thread(_safe_update, tbl, campaign_id,
-                            {"status": "Paused", "Active": False, "Go Live": False, "last_run_at": _iso_ts()})
+    await asyncio.to_thread(
+        _safe_update, tbl, campaign_id, {"status": "Paused", "Active": False, "Go Live": False, "last_run_at": _iso_ts()}
+    )
     return {"ok": True, "campaign": campaign_id, "status": "Paused"}
+
 
 @app.post("/campaign/{campaign_id}/kick")
 async def campaign_kick(
@@ -464,6 +515,7 @@ async def campaign_kick(
         return res
     return await asyncio.to_thread(_run_campaigns, runner_limit, True)
 
+
 # ─────────────── Autoresponder / Followups / Retry / KPIs ───────────
 @app.post("/autoresponder/{mode}")
 async def autoresponder_endpoint(
@@ -485,6 +537,7 @@ async def autoresponder_endpoint(
         return {"ok": False, "error": "Quiet hours (Central). Autoresponder disabled by config.", "quiet_hours": True}
     return await asyncio.to_thread(_run_autoresponder, limit, view)
 
+
 @app.post("/reset-quotas")
 async def reset_quotas_endpoint(
     request: Request,
@@ -497,6 +550,7 @@ async def reset_quotas_endpoint(
         return {"ok": False, "error": "quota reset unavailable"}
     return await asyncio.to_thread(_reset_daily_quotas)
 
+
 @app.post("/metrics")
 async def metrics_endpoint(
     request: Request,
@@ -508,6 +562,7 @@ async def metrics_endpoint(
     if not _update_metrics:
         return {"ok": False, "error": "metrics tracker unavailable"}
     return await asyncio.to_thread(_update_metrics)
+
 
 @app.post("/retry")
 async def retry_endpoint(
@@ -527,6 +582,7 @@ async def retry_endpoint(
         return {"ok": False, "error": "retry runner unavailable"}
     return await asyncio.to_thread(_run_retry, limit)
 
+
 @app.post("/aggregate-kpis")
 async def aggregate_kpis_endpoint(
     request: Request,
@@ -538,6 +594,7 @@ async def aggregate_kpis_endpoint(
     if not _aggregate_kpis:
         return {"ok": False, "error": "kpi aggregator unavailable"}
     return await asyncio.to_thread(_aggregate_kpis)
+
 
 # ─────────────── /cron/all (concurrent orchestration + immediate logs) ─────
 @app.post("/cron/all")
@@ -630,7 +687,7 @@ async def cron_all_endpoint(
 
         # outbound + retry skipped
         results["outbound"] = {"ok": True, "skipped": "quiet_hours"}
-        results["retry"]    = {"ok": True, "skipped": "quiet_hours"}
+        results["retry"] = {"ok": True, "skipped": "quiet_hours"}
         await _log_run_async(runs_tbl, "OUTBOUND", results["outbound"])
         await _log_run_async(runs_tbl, "RETRY", results["retry"])
 
@@ -707,6 +764,7 @@ async def cron_all_endpoint(
     await _log_kpi_async(kpis_tbl, "TOTAL_ERRORS", totals["errors"])
     return {"ok": True, "results": results, "totals": totals, "timestamp": _iso_ts()}
 
+
 # ─────────────── Drip Admin (UTC normalize queued sends) ────────────
 @app.post("/admin/drip/normalize")
 async def drip_normalize(
@@ -721,6 +779,7 @@ async def drip_normalize(
     _require_token(request, token, x_webhook_token, x_cron_token)
     return await asyncio.to_thread(_normalize_next_send_dates, dry_run, force_now, limit)
 
+
 @app.post("/admin/drip/force-now")
 async def drip_force_now(
     request: Request,
@@ -731,6 +790,7 @@ async def drip_force_now(
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
     return await asyncio.to_thread(_normalize_next_send_dates, False, True, limit)
+
 
 # ─────────────── Numbers Admin (from_number + quotas) ───────────────
 @app.post("/admin/numbers/backfill")
@@ -748,6 +808,7 @@ async def numbers_backfill_endpoint(
         _log_error("numbers_backfill", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/admin/numbers/recalc")
 async def numbers_recalc_endpoint(
     request: Request,
@@ -764,6 +825,7 @@ async def numbers_recalc_endpoint(
         _log_error("numbers_recalc", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/admin/numbers/reset")
 async def numbers_reset_endpoint(
     request: Request,
@@ -777,6 +839,7 @@ async def numbers_reset_endpoint(
     except Exception as e:
         _log_error("numbers_reset", e)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # ───────────────────── Engine (manual debugging) ────────────────────
 @app.get("/engine")

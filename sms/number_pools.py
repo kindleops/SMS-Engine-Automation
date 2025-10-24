@@ -14,6 +14,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
 from sms.runtime import get_logger
+
 logger = get_logger("number_pools")
 
 # Optional deps
@@ -30,12 +31,17 @@ except Exception:
 try:
     from sms.kpi_logger import log_kpi
 except Exception:
-    def log_kpi(*_a, **_k): pass
+
+    def log_kpi(*_a, **_k):
+        pass
+
 
 try:
     from sms.logger import log_run
 except Exception:
-    def log_run(*_a, **_k): pass
+
+    def log_run(*_a, **_k):
+        pass
 
 
 # =========================
@@ -57,20 +63,34 @@ F_REMAINING, F_DAILY_RESET, F_LAST_USED = "Remaining", "Daily Reset", "Last Used
 # =========================
 # Time helpers
 # =========================
-def _now() -> datetime: return datetime.now(timezone.utc)
-def _today_str() -> str: return _now().date().isoformat()
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _today_str() -> str:
+    return _now().date().isoformat()
+
+
 def _parse_dt(s: str | None) -> Optional[datetime]:
-    if not s: return None
-    try: return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except Exception: return None
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
+
 def _digits_only(s: str | None) -> Optional[str]:
-    if not isinstance(s, str): return None
+    if not isinstance(s, str):
+        return None
     ds = "".join(re.findall(r"\d+", s))
     return ds if len(ds) >= 10 else None
+
+
 def _same_did(a: str | None, b: str | None) -> bool:
     da, db = _digits_only(a), _digits_only(b)
     return bool(da and db and da == db)
@@ -80,13 +100,17 @@ def _same_did(a: str | None, b: str | None) -> bool:
 # Airtable connection
 # =========================
 def _make_table(base_id: str, table_name: str):
-    if not (AIRTABLE_KEY and base_id): return None
+    if not (AIRTABLE_KEY and base_id):
+        return None
     try:
-        if _ATTable: return _ATTable(AIRTABLE_KEY, base_id, table_name)
-        if _ATApi: return _ATApi(AIRTABLE_KEY).table(base_id, table_name)
+        if _ATTable:
+            return _ATTable(AIRTABLE_KEY, base_id, table_name)
+        if _ATApi:
+            return _ATApi(AIRTABLE_KEY).table(base_id, table_name)
     except Exception as e:
         logger.error(f"Airtable init failed: {e}", exc_info=True)
     return None
+
 
 @lru_cache(maxsize=1)
 def _numbers_tbl():
@@ -104,12 +128,14 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         keys = []
     return {_norm(k): k for k in keys}
 
+
 def _remap_existing_only(tbl, payload: Dict) -> Dict:
     amap = _auto_field_map(tbl)
     out = {}
     for k, v in payload.items():
         ak = amap.get(_norm(k))
-        if ak: out[ak] = v
+        if ak:
+            out[ak] = v
     return out or dict(payload)
 
 
@@ -117,21 +143,28 @@ def _remap_existing_only(tbl, payload: Dict) -> Dict:
 # Logic helpers
 # =========================
 def _remaining_calc(f: Dict) -> int:
-    try: return max(0, int(f.get(F_REMAINING) or 0))
+    try:
+        return max(0, int(f.get(F_REMAINING) or 0))
     except Exception:
         sent_today = int(f.get(F_SENT_TODAY) or 0)
         daily_cap = int(f.get(F_DAILY_RESET) or DAILY_LIMIT_FALLBACK)
         return max(0, daily_cap - sent_today)
 
+
 def _reset_daily_if_needed(rec: Dict) -> Dict:
     tbl = _numbers_tbl()
-    if not (tbl and rec and rec.get("fields")): return rec
+    if not (tbl and rec and rec.get("fields")):
+        return rec
     f = rec["fields"]
     last_used = _parse_dt(f.get(F_LAST_USED))
     needs_reset = (not last_used) or (last_used.date().isoformat() != _today_str())
-    if not needs_reset: return rec
+    if not needs_reset:
+        return rec
     patch = {
-        F_SENT_TODAY: 0, F_DELIV_TODAY: 0, F_FAILED_TODAY: 0, F_OPTOUT_TODAY: 0,
+        F_SENT_TODAY: 0,
+        F_DELIV_TODAY: 0,
+        F_FAILED_TODAY: 0,
+        F_OPTOUT_TODAY: 0,
         F_REMAINING: int(f.get(F_DAILY_RESET) or DAILY_LIMIT_FALLBACK),
         F_LAST_USED: _now().isoformat(),
     }
@@ -143,14 +176,20 @@ def _reset_daily_if_needed(rec: Dict) -> Dict:
         logger.warning(f"⚠️ Reset failed: {e}")
     return rec
 
+
 def _is_active(f: Dict) -> bool:
-    if f.get(F_ACTIVE) is False: return False
-    if str(f.get(F_STATUS) or "").strip().lower() == "paused": return False
+    if f.get(F_ACTIVE) is False:
+        return False
+    if str(f.get(F_STATUS) or "").strip().lower() == "paused":
+        return False
     return True
 
+
 def _supports_market(f: Dict, market: Optional[str]) -> bool:
-    if not market: return True
-    if f.get(F_MARKET) == market: return True
+    if not market:
+        return True
+    if f.get(F_MARKET) == market:
+        return True
     ms = f.get(F_MARKETS_MULTI)
     return isinstance(ms, list) and market in ms
 
@@ -169,9 +208,11 @@ def get_from_number(market: Optional[str] = None) -> str:
     for r in tbl.all():
         r = _reset_daily_if_needed(r)
         f = r.get("fields", {})
-        if not _is_active(f) or not _supports_market(f, market): continue
+        if not _is_active(f) or not _supports_market(f, market):
+            continue
         remaining = _remaining_calc(f)
-        if remaining <= 0: continue
+        if remaining <= 0:
+            continue
         last_used = _parse_dt(f.get(F_LAST_USED)) or datetime(1970, 1, 1, tzinfo=timezone.utc)
         elig.append(((-remaining, last_used), r))
 
@@ -236,28 +277,36 @@ def _get_row_or_none(did: Optional[str]) -> Optional[Dict]:
 # =========================
 def increment_sent(did: str):
     row = _get_row_or_none(did)
-    if not row: return
+    if not row:
+        return
     _bump(row, F_SENT_TODAY, F_SENT_TOTAL, delta=1, dec_remaining=True)
     log_kpi("OUTBOUND_SENT", 1)
     log_run("NUMBER_BUMP", processed=1, breakdown={"did": did, "metric": "SENT"})
 
+
 def increment_delivered(did: str):
     row = _get_row_or_none(did)
-    if not row: return
+    if not row:
+        return
     _bump(row, F_DELIV_TODAY, F_DELIV_TOTAL)
     log_kpi("OUTBOUND_DELIVERED", 1)
 
+
 def increment_failed(did: str):
     row = _get_row_or_none(did)
-    if not row: return
+    if not row:
+        return
     _bump(row, F_FAILED_TODAY, F_FAILED_TOTAL)
     log_kpi("OUTBOUND_FAILED", 1)
 
+
 def increment_opt_out(did: str):
     row = _get_row_or_none(did)
-    if not row: return
+    if not row:
+        return
     _bump(row, F_OPTOUT_TODAY, F_OPTOUT_TOTAL)
     log_kpi("OUTBOUND_OPTOUT", 1)
+
 
 def pick_and_mark_sent(market: Optional[str] = None) -> str:
     did = get_from_number(market)

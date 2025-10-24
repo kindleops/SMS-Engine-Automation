@@ -35,8 +35,10 @@ except ImportError:
 try:
     from sms.spec import normalize_delivery_status
 except ImportError:
+
     def normalize_delivery_status(v: str) -> str:
         return str(v or "").upper()
+
 
 # ────────────────────────────────────────────────
 # Router & ENV
@@ -51,11 +53,7 @@ CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 TEMPLATE_DELIVERED_FIELD = os.getenv("TEMPLATE_DELIVERED_FIELD", "Delivered")
 TEMPLATE_FAILED_FIELD = os.getenv("TEMPLATE_FAILED_FIELD", "Failed Deliveries")
 
-WEBHOOK_TOKEN = (
-    os.getenv("WEBHOOK_TOKEN")
-    or os.getenv("TEXTGRID_AUTH_TOKEN")
-    or os.getenv("CRON_TOKEN")
-)
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN") or os.getenv("TEXTGRID_AUTH_TOKEN") or os.getenv("CRON_TOKEN")
 
 REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
 REDIS_TLS = os.getenv("REDIS_TLS", "true").lower() in ("1", "true", "yes")
@@ -64,14 +62,17 @@ UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 KEY_PREFIX = os.getenv("RATE_LIMIT_KEY_PREFIX", "sms")
 
+
 # ────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+
 def _norm(s: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(s).lower().strip()) if s else ""
+
 
 def _get_table(base: str, name: str):
     if not (AIRTABLE_API_KEY and base and _AirTable):
@@ -82,6 +83,7 @@ def _get_table(base: str, name: str):
         traceback.print_exc()
         return None
 
+
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
         rec = tbl.all(max_records=1)
@@ -90,9 +92,11 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         keys = []
     return {_norm(k): k for k in keys}
 
+
 def _remap_existing_only(tbl, patch: Dict) -> Dict:
     amap = _auto_field_map(tbl)
     return {amap.get(_norm(k), k): v for k, v in patch.items() if amap.get(_norm(k))} if amap else patch
+
 
 def _safe_update(tbl, rec_id: str, patch: Dict):
     try:
@@ -103,12 +107,14 @@ def _safe_update(tbl, rec_id: str, patch: Dict):
         traceback.print_exc()
     return None
 
+
 def _safe_get(tbl, rec_id: str):
     try:
         return tbl.get(rec_id)
     except Exception:
         traceback.print_exc()
         return None
+
 
 def _increment_numeric(tbl, rec_id: str, field_name: str, by: int = 1) -> bool:
     """Airtable-safe numeric increment."""
@@ -128,6 +134,7 @@ def _increment_numeric(tbl, rec_id: str, field_name: str, by: int = 1) -> bool:
         traceback.print_exc()
         return False
 
+
 # ────────────────────────────────────────────────
 # Idempotency layer
 # ────────────────────────────────────────────────
@@ -137,9 +144,7 @@ class _Idempotency:
         self.r = None
         if REDIS_URL and _redis:
             try:
-                self.r = _redis.from_url(
-                    REDIS_URL, ssl=REDIS_TLS, decode_responses=True, socket_timeout=3
-                )
+                self.r = _redis.from_url(REDIS_URL, ssl=REDIS_TLS, decode_responses=True, socket_timeout=3)
                 print("✅ Redis connected for status handler")
             except Exception:
                 traceback.print_exc()
@@ -195,19 +200,25 @@ class _Idempotency:
         self.mem.add(key)
         return False
 
+
 IDEM = _Idempotency()
+
 
 # ────────────────────────────────────────────────
 # Payload extraction
 # ────────────────────────────────────────────────
 def _extract_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize across Twilio, TextGrid, Telnyx, etc."""
-    def pick(d, *keys): return next((d[k] for k in keys if k in d), None)
+
+    def pick(d, *keys):
+        return next((d[k] for k in keys if k in d), None)
+
     sid = pick(data, "sid", "message_sid", "MessageSid", "id")
     status = str(pick(data, "status", "message_status", "MessageStatus") or "").lower()
     template_id = pick(data, "template_id", "Template", "TemplateId", "template")
     provider = pick(data, "provider", "source") or "textgrid"
     return {"sid": sid, "status": status, "template_id": template_id, "provider": provider}
+
 
 # ────────────────────────────────────────────────
 # Template fallback lookup
@@ -234,6 +245,7 @@ def _resolve_template_from_convos(sid: Optional[str]) -> Optional[str]:
         traceback.print_exc()
         return None
 
+
 # ────────────────────────────────────────────────
 # KPI logger
 # ────────────────────────────────────────────────
@@ -254,6 +266,7 @@ def log_template_kpi(template_id: str, delivered: bool):
         print(f"📊 Template {template_id} KPI incremented → {field}")
     else:
         print(f"⚠️ Field '{field}' not found on Templates table")
+
 
 # ────────────────────────────────────────────────
 # Endpoint

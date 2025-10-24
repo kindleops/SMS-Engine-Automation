@@ -22,6 +22,7 @@ from sms.tables import get_convos, get_leads, get_prospects
 # Time + Phone Utilities
 # -----------------------------------------------------------
 
+
 def utcnow_iso() -> str:
     """Return current UTC time in ISO8601 Zulu format."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -54,6 +55,7 @@ def last10(phone: Optional[str]) -> Optional[str]:
 # Cached Airtable Handles
 # -----------------------------------------------------------
 
+
 @lru_cache(maxsize=1)
 def _conversation_table():
     return get_convos()
@@ -72,6 +74,7 @@ def _prospects_table():
 # -----------------------------------------------------------
 # Airtable Helpers (Safe CRUD)
 # -----------------------------------------------------------
+
 
 def _safe_create(tbl, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not tbl:
@@ -102,6 +105,7 @@ def _safe_update(tbl, record_id: str, payload: Dict[str, Any]) -> Optional[Dict[
 # -----------------------------------------------------------
 # Lookup Helpers
 # -----------------------------------------------------------
+
 
 @lru_cache(maxsize=512)
 def _find_record_by_phone(tbl, phone: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -272,6 +276,7 @@ def update_conversation_links(
 # Lead Activity Tracking
 # -----------------------------------------------------------
 
+
 def update_lead_activity(
     lead: Optional[Dict[str, Any]],
     *,
@@ -325,6 +330,7 @@ def update_lead_activity(
 # Conversation Payload Builder
 # -----------------------------------------------------------
 
+
 def base_conversation_payload(
     *,
     seller_phone: Optional[str],
@@ -360,16 +366,19 @@ def base_conversation_payload(
         payload[CONVERSATIONS.last_sent_time] = utcnow_iso()
 
     if campaign_id:
-        payload.update({
-            CONVERSATIONS.campaign_record_id: campaign_id,
-            CONVERSATIONS.link_campaign: [campaign_id],
-        })
+        payload.update(
+            {
+                CONVERSATIONS.campaign_record_id: campaign_id,
+                CONVERSATIONS.link_campaign: [campaign_id],
+            }
+        )
 
     if template_id:
-        payload.update({
-            CONVERSATIONS.template_record_id: template_id,
-            CONVERSATIONS.link_template: [template_id],
-        })
+        payload.update(
+            {
+                CONVERSATIONS.template_record_id: template_id,
+                CONVERSATIONS.link_template: [template_id],
+            }
+        )
 
     return payload
-

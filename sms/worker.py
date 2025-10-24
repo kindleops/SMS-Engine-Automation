@@ -20,6 +20,7 @@ try:
 except ImportError:
     _redis = None
 
+
 # ────────────────────────────────────────────────
 # ENV CONFIG HELPERS
 # ────────────────────────────────────────────────
@@ -29,17 +30,20 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return default
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
     except Exception:
         return default
 
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
     except Exception:
         return default
+
 
 # ────────────────────────────────────────────────
 # ENV VARIABLES
@@ -57,7 +61,7 @@ RUNNER_TIMEOUT_SEC = _env_int("WORKER_RUNNER_TIMEOUT_SEC", 120)
 
 # Adaptive backoff (on failure streak)
 BACKOFF_MAX_EXP = _env_int("WORKER_BACKOFF_MAX_EXP", 3)  # caps 2^exp multiplier
-BACKOFF_BASE = _env_float("WORKER_BACKOFF_BASE", 1.0)    # multiplier base on INTERVAL
+BACKOFF_BASE = _env_float("WORKER_BACKOFF_BASE", 1.0)  # multiplier base on INTERVAL
 
 ENABLE_CAMPAIGNS = _env_bool("ENABLE_CAMPAIGNS", True)
 ENABLE_SEND = _env_bool("ENABLE_SEND", True)
@@ -84,48 +88,59 @@ INSTANCE_ID = os.getenv("WORKER_INSTANCE_ID", str(uuid.uuid4())[:8])
 REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
 REDIS_TLS = _env_bool("REDIS_TLS", True)
 
+
 # ────────────────────────────────────────────────
 # IMPORT DEFERRED RUNNERS (lazy to avoid crash loops)
 # ────────────────────────────────────────────────
 def _run_campaigns(limit: Any, send_after_queue: bool):
     try:
         from sms.campaign_runner import run_campaigns
+
         return run_campaigns(limit=limit, send_after_queue=send_after_queue)
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": str(e)}
 
+
 def _send_batch(limit: int):
     try:
         from sms.outbound_batcher import send_batch
+
         return send_batch(limit=limit)
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": str(e)}
 
+
 def _run_retry(limit: int):
     try:
         from sms.retry_runner import run_retry
+
         return run_retry(limit=limit)
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": str(e)}
 
+
 def _run_autoresponder(limit: int, view: str):
     try:
         from sms.autoresponder import run_autoresponder
+
         return run_autoresponder(limit=limit, view=view)
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": str(e)}
 
+
 def _update_metrics():
     try:
         from sms.metrics_tracker import update_metrics
+
         return update_metrics()
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": str(e)}
+
 
 # ────────────────────────────────────────────────
 # RUNNER SAFETY WRAPPER (timeouts)
@@ -142,6 +157,7 @@ def _run_safely(fn: Callable[[], Dict[str, Any]], timeout_sec: int = RUNNER_TIME
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": str(e)}
+
 
 # ────────────────────────────────────────────────
 # REDIS DIST LOCK + HEARTBEAT
@@ -195,6 +211,7 @@ class Dist:
                 except Exception:
                     traceback.print_exc()
 
+
 DIST = Dist()
 
 # ────────────────────────────────────────────────
@@ -202,13 +219,16 @@ DIST = Dist()
 # ────────────────────────────────────────────────
 _shutdown = False
 
+
 def _signal_handler(signum, frame):
     global _shutdown
     _shutdown = True
     print(f"👋 {WORKER_NAME}[{INSTANCE_ID}] got signal {signum}, shutting down...")
 
+
 signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
+
 
 # ────────────────────────────────────────────────
 # UTILITIES
@@ -218,18 +238,25 @@ def _sleep_with_jitter(base: float):
     j = random.randint(0, max(0, JITTER_SEC))
     time.sleep(min(3600, base + j))
 
+
 def _ping_health():
     if not HEALTHCHECK_URL:
         return
     try:
         import requests
-        requests.post(HEALTHCHECK_URL, json={
-            "service": WORKER_NAME,
-            "instance": INSTANCE_ID,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }, timeout=3)
+
+        requests.post(
+            HEALTHCHECK_URL,
+            json={
+                "service": WORKER_NAME,
+                "instance": INSTANCE_ID,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            timeout=3,
+        )
     except Exception:
         pass
+
 
 def _log(event: str, **extra):
     data = {
@@ -241,6 +268,7 @@ def _log(event: str, **extra):
     }
     print(json.dumps(data, ensure_ascii=False))
 
+
 def _compact(res: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Trim result payloads for cleaner cycle logs."""
     if not isinstance(res, dict):
@@ -249,16 +277,19 @@ def _compact(res: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     filtered = {k: v for k, v in res.items() if k in keep}
     return filtered
 
+
 def _sys_metrics() -> Optional[Dict[str, Any]]:
     """Lightweight system metrics (optional)."""
     try:
         import psutil  # optional
+
         return {
             "cpu": psutil.cpu_percent(interval=0.1),
             "mem": round(psutil.virtual_memory().percent, 1),
         }
     except Exception:
         return None
+
 
 # ────────────────────────────────────────────────
 # MAIN WORKER LOOP
@@ -346,10 +377,7 @@ def main():
                         _log("skip_lock", step="metrics")
 
             # --- Summary & Telemetry ---
-            _log("cycle",
-                 cycle=cycles,
-                 sys=_sys_metrics(),
-                 summary={k: _compact(v) for k, v in results.items()})
+            _log("cycle", cycle=cycles, sys=_sys_metrics(), summary={k: _compact(v) for k, v in results.items()})
             _ping_health()
 
             # Update failure streak & choose sleep
@@ -361,7 +389,7 @@ def main():
                 _sleep_with_jitter(INTERVAL_SEC)
             else:
                 # Adaptive backoff when cycles keep failing (protects Airtable)
-                backoff_mult = BACKOFF_BASE * (2 ** fail_streak)
+                backoff_mult = BACKOFF_BASE * (2**fail_streak)
                 sleep_sec = max(1.0, IDLE_INTERVAL_SEC * backoff_mult)
                 _sleep_with_jitter(sleep_sec)
 
@@ -376,6 +404,7 @@ def main():
 
     _log("shutdown", cycles=cycles)
     print(f"🏁 {WORKER_NAME}[{INSTANCE_ID}] stopped cleanly after {cycles} cycles.")
+
 
 if __name__ == "__main__":
     main()

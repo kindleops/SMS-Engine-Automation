@@ -32,12 +32,18 @@ except Exception:
 try:
     from sms.logger import log_run
 except Exception:
-    def log_run(*_a, **_k): pass
+
+    def log_run(*_a, **_k):
+        pass
+
 
 try:
     from sms.kpi_logger import log_kpi
 except Exception:
-    def log_kpi(*_a, **_k): pass
+
+    def log_kpi(*_a, **_k):
+        pass
+
 
 logger = get_logger("retry_runner")
 
@@ -75,11 +81,13 @@ POLICY = get_policy()
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", str(getattr(POLICY, "retry_limit", 3))))
 BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
 
+
 # --------------------------
 # Helpers
 # --------------------------
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
 
 def _parse_dt(v: Any) -> Optional[datetime]:
     if not v:
@@ -89,9 +97,11 @@ def _parse_dt(v: Any) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def _backoff_delay(retry_count: int) -> timedelta:
     exponent = max(0, retry_count - 1)
-    return timedelta(minutes=BASE_BACKOFF_MINUTES * (2 ** exponent))
+    return timedelta(minutes=BASE_BACKOFF_MINUTES * (2**exponent))
+
 
 def _link_id(value: Any) -> Optional[str]:
     if isinstance(value, list) and value:
@@ -99,6 +109,7 @@ def _link_id(value: Any) -> Optional[str]:
     if isinstance(value, str) and value.strip():
         return value
     return None
+
 
 def _qualifies(fields: Dict[str, Any]) -> bool:
     direction = str(fields.get(CONV_DIRECTION_FIELD) or "").upper()
@@ -112,6 +123,7 @@ def _qualifies(fields: Dict[str, Any]) -> bool:
         return False
     retry_after = _parse_dt(fields.get(RETRY_AFTER_FIELD))
     return retry_after is None or retry_after <= _now()
+
 
 # --------------------------
 # Core class
@@ -151,10 +163,12 @@ class RetryRunner:
         log_kpi("RETRY_PERM_FAILS", self.summary["permanent_failures"])
         log_kpi("RETRY_RESCHEDULED", self.summary["rescheduled"])
 
-        logger.info(f"✅ Retry cycle done | retried={self.summary['retried']} | "
-                    f"rescheduled={self.summary['rescheduled']} | "
-                    f"failures={self.summary['permanent_failures']} | "
-                    f"duration={self.summary['duration_sec']}s")
+        logger.info(
+            f"✅ Retry cycle done | retried={self.summary['retried']} | "
+            f"rescheduled={self.summary['rescheduled']} | "
+            f"failures={self.summary['permanent_failures']} | "
+            f"duration={self.summary['duration_sec']}s"
+        )
 
         return self.summary
 
@@ -254,10 +268,13 @@ class RetryRunner:
             },
         )
 
+
 def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
     return RetryRunner().run(limit, view)
+
 
 if __name__ == "__main__":
     result = run_retry(limit=int(os.getenv("RETRY_LIMIT", "100")))
     import json
+
     logger.info(json.dumps(result, indent=2))

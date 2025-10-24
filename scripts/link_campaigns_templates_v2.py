@@ -6,12 +6,12 @@ from sms.tables import get_table
 # --- Config ---
 DRY_RUN = False
 DRIP_INTERVALS = {
-    "Interest": timedelta(hours=1),       # quick follow-up
-    "Delay": timedelta(hours=24),         # next-day check
-    "Negative": timedelta(days=7),        # weekly recheck
-    "Opt Out": None,                      # stop all
+    "Interest": timedelta(hours=1),  # quick follow-up
+    "Delay": timedelta(hours=24),  # next-day check
+    "Negative": timedelta(days=7),  # weekly recheck
+    "Opt Out": None,  # stop all
     "Wrong Number": None,
-    "Neutral": timedelta(hours=6)         # nurture interval
+    "Neutral": timedelta(hours=6),  # nurture interval
 }
 
 # --- Airtable setup ---
@@ -29,7 +29,7 @@ intent_map = {
     "negative": "Negative",
     "delay": "Delay",
     "wrong_number": "Wrong Number",
-    "neutral": "Neutral"
+    "neutral": "Neutral",
 }
 
 status_map = {
@@ -38,33 +38,85 @@ status_map = {
     "negative": "PROCESSED-NO",
     "delay": "PROCESSED-LATER",
     "wrong_number": "PROCESSED-WRONG",
-    "neutral": "RECEIVED"
+    "neutral": "RECEIVED",
 }
 
 # --- Keyword libraries ---
 keywords = {
     "interest": [
-        "yes", "yeah", "yep", "sure", "okay", "ok", "interested", "offer", "price",
-        "cash", "maybe", "depends", "send it", "run numbers", "how much", "what price",
-        "would consider", "make me an offer", "potentially", "open to", "how soon", "let’s talk"
+        "yes",
+        "yeah",
+        "yep",
+        "sure",
+        "okay",
+        "ok",
+        "interested",
+        "offer",
+        "price",
+        "cash",
+        "maybe",
+        "depends",
+        "send it",
+        "run numbers",
+        "how much",
+        "what price",
+        "would consider",
+        "make me an offer",
+        "potentially",
+        "open to",
+        "how soon",
+        "let’s talk",
     ],
     "opt_out": [
-        "stop", "unsubscribe", "remove", "opt out", "don’t text", "no more",
-        "quit", "take me off", "leave me alone", "wrong person", "do not contact"
+        "stop",
+        "unsubscribe",
+        "remove",
+        "opt out",
+        "don’t text",
+        "no more",
+        "quit",
+        "take me off",
+        "leave me alone",
+        "wrong person",
+        "do not contact",
     ],
     "negative": [
-        "no", "not interested", "never", "don’t bother", "don’t want",
-        "no thanks", "already sold", "keep off", "not selling", "no longer own"
+        "no",
+        "not interested",
+        "never",
+        "don’t bother",
+        "don’t want",
+        "no thanks",
+        "already sold",
+        "keep off",
+        "not selling",
+        "no longer own",
     ],
     "delay": [
-        "busy", "later", "not now", "next week", "follow up", "another time",
-        "call me later", "in a few days", "reach out later", "not ready"
+        "busy",
+        "later",
+        "not now",
+        "next week",
+        "follow up",
+        "another time",
+        "call me later",
+        "in a few days",
+        "reach out later",
+        "not ready",
     ],
     "wrong_number": [
-        "wrong number", "who is this", "don’t know", "not the owner", "wrong person",
-        "don’t own", "not me", "no idea", "mistake"
-    ]
+        "wrong number",
+        "who is this",
+        "don’t know",
+        "not the owner",
+        "wrong person",
+        "don’t own",
+        "not me",
+        "no idea",
+        "mistake",
+    ],
 }
+
 
 def classify_intent(msg):
     txt = msg.lower().strip()
@@ -74,6 +126,7 @@ def classify_intent(msg):
                 return label
     return "neutral"
 
+
 def next_drip_time(intent_label):
     """Return next send date based on intent type."""
     delay = DRIP_INTERVALS.get(intent_label)
@@ -81,18 +134,12 @@ def next_drip_time(intent_label):
         return None
     return (datetime.now(timezone.utc) + delay).isoformat()
 
+
 # --- Processing ---
 for i, r in enumerate(rows, 1):
     f = r.get("fields", {})
     rid = r.get("id")
-    msg = (
-        f.get("message", "")
-        or f.get("Message", "")
-        or f.get("Body", "")
-        or f.get("Text", "")
-        or f.get("SMS Body", "")
-        or ""
-    ).strip()
+    msg = (f.get("message", "") or f.get("Message", "") or f.get("Body", "") or f.get("Text", "") or f.get("SMS Body", "") or "").strip()
 
     if not msg:
         continue

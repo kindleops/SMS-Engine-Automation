@@ -133,6 +133,7 @@ class TableHandle:
 # CONNECTOR
 # ============================================================
 
+
 class DataConnector:
     """Lazy pyairtable connector with in-memory fallback."""
 
@@ -169,13 +170,35 @@ class DataConnector:
         self._tables[key] = handle
         return handle
 
-    def conversations(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), CONVERSATIONS_TABLE.name())
-    def leads(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), LEADS_TABLE.name())
-    def prospects(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), PROSPECTS_TABLE.name())
-    def templates(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), TEMPLATES_TABLE.name())
-    def drip_queue(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), DRIP_QUEUE_TABLE.name())
-    def campaigns(self): return self._table(_first_non_empty("CAMPAIGNS_BASE_ID", "LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID", "CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"), CAMPAIGNS_TABLE.name())
-    def numbers(self): return self._table(_first_non_empty("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"), NUMBERS_TABLE_DEF.name())
+    def conversations(self):
+        return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), CONVERSATIONS_TABLE.name())
+
+    def leads(self):
+        return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), LEADS_TABLE.name())
+
+    def prospects(self):
+        return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), PROSPECTS_TABLE.name())
+
+    def templates(self):
+        return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), TEMPLATES_TABLE.name())
+
+    def drip_queue(self):
+        return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), DRIP_QUEUE_TABLE.name())
+
+    def campaigns(self):
+        return self._table(
+            _first_non_empty(
+                "CAMPAIGNS_BASE_ID",
+                "LEADS_CONVOS_BASE",
+                "AIRTABLE_LEADS_CONVOS_BASE_ID",
+                "CAMPAIGN_CONTROL_BASE",
+                "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID",
+            ),
+            CAMPAIGNS_TABLE.name(),
+        )
+
+    def numbers(self):
+        return self._table(_first_non_empty("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"), NUMBERS_TABLE_DEF.name())
 
 
 CONNECTOR = DataConnector()
@@ -184,6 +207,7 @@ CONNECTOR = DataConnector()
 # ============================================================
 # LOW LEVEL HELPERS
 # ============================================================
+
 
 def _compact(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in (payload or {}).items() if v not in (None, "", [], {}, ())}
@@ -248,6 +272,7 @@ def _log_airtable_exception(handle: TableHandle, exc: Exception, action: str) ->
 # SAFE WRAPPERS
 # ============================================================
 
+
 def _safe_all(handle: TableHandle, **kwargs) -> List[Dict[str, Any]]:
     if "page_size" not in kwargs:
         kwargs["page_size"] = 100
@@ -258,12 +283,12 @@ def _safe_all(handle: TableHandle, **kwargs) -> List[Dict[str, Any]]:
             return list(handle.table.all(**kwargs))
         except (requests.exceptions.ConnectionError, ConnectionResetError) as exc:
             logger.warning("Airtable connection reset [%s] retry %s: %s", handle.table_name, attempt + 1, exc)
-            time.sleep((2 ** attempt) * 0.5)
+            time.sleep((2**attempt) * 0.5)
             continue
         except Exception as exc:
             _log_airtable_exception(handle, exc, "all")
             if "429" in str(exc) and attempt < 2:
-                time.sleep((2 ** attempt) * 0.5)
+                time.sleep((2**attempt) * 0.5)
                 continue
             break
         finally:
@@ -314,6 +339,7 @@ def _safe_update(handle: TableHandle, record_id: str, fields: Dict[str, Any]) ->
 # ============================================================
 # REPOSITORY
 # ============================================================
+
 
 class Repository:
     """High-level helpers for schema-aware Airtable interactions."""
@@ -452,6 +478,7 @@ REPOSITORY = Repository()
 # ============================================================
 # PUBLIC HELPERS
 # ============================================================
+
 
 def reset_state():
     CONNECTOR._tables.clear()

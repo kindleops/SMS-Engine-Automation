@@ -25,6 +25,7 @@ logger = get_logger("kpi_logger")
 # -----------------------------
 KPI_TZ = os.getenv("KPI_TZ", "America/Chicago")
 
+
 # -----------------------------
 # Time helpers
 # -----------------------------
@@ -34,17 +35,21 @@ def _tz_now():
     except Exception:
         return datetime.now(timezone.utc)
 
+
 def _today_local_str() -> str:
     return _tz_now().date().isoformat()
 
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 # -----------------------------
 # Airtable field normalization
 # -----------------------------
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.lower().strip())
+
 
 def _auto_map(tbl) -> Dict[str, str]:
     try:
@@ -54,12 +59,15 @@ def _auto_map(tbl) -> Dict[str, str]:
         keys = []
     return {_norm(k): k for k in keys}
 
+
 def _remap(tbl, data: Dict) -> Dict:
     amap = _auto_map(tbl)
     return {amap.get(_norm(k), k): v for k, v in data.items() if amap.get(_norm(k))}
 
+
 def _fquote(s: str) -> str:
     return (s or "").replace("'", "\\'")
+
 
 # -----------------------------
 # Public API
@@ -116,7 +124,7 @@ def log_kpi(
 
         rec = tbl.create(_remap(tbl, payload))
         logger.info(f"📊 KPI logged → {metric}={val} ({campaign})")
-        return {"ok": True, "action": "created", "record_id": rec.get('id') if rec else None}
+        return {"ok": True, "action": "created", "record_id": rec.get("id") if rec else None}
 
     except Exception as e:
         logger.error(f"❌ KPI log failed {metric}: {e}", exc_info=True)

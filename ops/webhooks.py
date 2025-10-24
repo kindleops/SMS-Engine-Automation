@@ -13,26 +13,34 @@ from fastapi import FastAPI, Header, Request, Query, HTTPException
 try:
     from sms.campaign_runner import run_campaigns
 except Exception:
+
     def run_campaigns(limit: int | str = 1, send_after_queue: Optional[bool] = None):
         return {"ok": True, "mock": True, "note": "campaign_runner not available"}
+
 
 try:
     from sms.retry_runner import run_retry
 except Exception:
+
     def run_retry(limit: int = 100, view: str | None = None):
         return {"ok": True, "mock": True, "note": "retry_runner not available"}
+
 
 try:
     from sms.metrics_tracker import update_metrics
 except Exception:
+
     def update_metrics(*args, **kwargs):
         return {"ok": True, "mock": True}
+
 
 try:
     from sms.autoresponder import run as run_autoresponder
 except Exception:
+
     def run_autoresponder(limit: int = 50, view: Optional[str] = None):
         return {"ok": True, "processed": 0, "mock": True}
+
 
 # ─────────────────────────────────────────────────────────────
 # pyairtable v1/v2 compatibility
@@ -53,9 +61,9 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
         return None
     try:
         if _PyTable:
-            return _PyTable(api_key, base_id, table_name)        # v1
+            return _PyTable(api_key, base_id, table_name)  # v1
         if _PyApi:
-            return _PyApi(api_key).table(base_id, table_name)    # v2
+            return _PyApi(api_key).table(base_id, table_name)  # v2
     except Exception:
         traceback.print_exc()
     return None
@@ -64,23 +72,11 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
 # ─────────────────────────────────────────────────────────────
 # Config & env
 # ─────────────────────────────────────────────────────────────
-AIRTABLE_API_KEY = (
-    os.getenv("AIRTABLE_REPORTING_KEY")
-    or os.getenv("PERFORMANCE_KEY")
-    or os.getenv("AIRTABLE_API_KEY")
-)
-DEVOPS_BASE = (
-    os.getenv("DEVOPS_BASE")
-    or os.getenv("PERFORMANCE_BASE")
-    or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
-)
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_REPORTING_KEY") or os.getenv("PERFORMANCE_KEY") or os.getenv("AIRTABLE_API_KEY")
+DEVOPS_BASE = os.getenv("DEVOPS_BASE") or os.getenv("PERFORMANCE_BASE") or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")
 LOGS_TABLE_NAME = os.getenv("DEVOPS_LOGS_TABLE", "Logs")
 
-WEBHOOK_TOKEN = (
-    os.getenv("WEBHOOK_TOKEN")
-    or os.getenv("CRON_TOKEN")
-    or os.getenv("TEXTGRID_AUTH_TOKEN")
-)
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN") or os.getenv("CRON_TOKEN") or os.getenv("TEXTGRID_AUTH_TOKEN")
 
 # Numbers table for quota reset
 CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE") or os.getenv("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
@@ -99,9 +95,12 @@ AUTORESPONDER_VIEW = os.getenv("AUTORESPONDER_VIEW", "Unprocessed Inbounds")
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def _norm(s: Any) -> Any:
     import re
+
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
@@ -109,7 +108,8 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         keys = list(rows[0].get("fields", {}).keys()) if rows else []
     except Exception:
         keys = []
-    return { _norm(k): k for k in keys }
+    return {_norm(k): k for k in keys}
+
 
 def _safe_update(tbl, rid: str, payload: Dict):
     if not (tbl and rid and payload):
@@ -132,6 +132,7 @@ def _safe_update(tbl, rid: str, payload: Dict):
 # DevOps logging
 def get_logs_table():
     return _make_table(AIRTABLE_API_KEY, DEVOPS_BASE, LOGS_TABLE_NAME)
+
 
 def log_devops(event: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     fields = {
@@ -164,6 +165,7 @@ def _extract_token(request: Request, qp_token: Optional[str], h_webhook: Optiona
         return auth.split(" ", 1)[1]
     return ""
 
+
 def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optional[str], h_cron: Optional[str]):
     if not WEBHOOK_TOKEN:
         return  # unsecured mode
@@ -177,6 +179,7 @@ def _require_token(request: Request, qp_token: Optional[str], h_webhook: Optiona
 # ─────────────────────────────────────────────────────────────
 app = FastAPI(title="SMS Engine Ops", version="3.0.0")
 
+
 @app.get("/health")
 def health():
     return {
@@ -186,9 +189,11 @@ def health():
         "time": iso_now(),
     }
 
+
 @app.get("/ping")
 def ping():
     return {"ok": True, "pong": True, "time": iso_now()}
+
 
 @app.post("/echo-token")
 def echo_token(
@@ -197,16 +202,25 @@ def echo_token(
 ):
     return {"ok": True, "x_cron_token": x_cron_token, "x_webhook_token": x_webhook_token}
 
+
 @app.get("/debug/env")
 def debug_env():
     keys = [
-        "AIRTABLE_API_KEY","LEADS_CONVOS_BASE","AIRTABLE_LEADS_CONVOS_BASE_ID",
-        "CAMPAIGN_CONTROL_BASE","AIRTABLE_CAMPAIGN_CONTROL_BASE_ID",
-        "PERFORMANCE_BASE","AIRTABLE_PERFORMANCE_BASE_ID",
-        "UPSTASH_REDIS_REST_URL","UPSTASH_REDIS_REST_TOKEN",
-        "WEBHOOK_TOKEN","CRON_TOKEN","TEXTGRID_AUTH_TOKEN"
+        "AIRTABLE_API_KEY",
+        "LEADS_CONVOS_BASE",
+        "AIRTABLE_LEADS_CONVOS_BASE_ID",
+        "CAMPAIGN_CONTROL_BASE",
+        "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID",
+        "PERFORMANCE_BASE",
+        "AIRTABLE_PERFORMANCE_BASE_ID",
+        "UPSTASH_REDIS_REST_URL",
+        "UPSTASH_REDIS_REST_TOKEN",
+        "WEBHOOK_TOKEN",
+        "CRON_TOKEN",
+        "TEXTGRID_AUTH_TOKEN",
     ]
     return {"ok": True, "present": {k: bool(os.getenv(k)) for k in keys}}
+
 
 # Generic logger (optional)
 @app.post("/ops/webhook")
@@ -224,7 +238,9 @@ async def ops_webhook(
     res = log_devops("webhook", body if isinstance(body, dict) else {"payload": str(body)})
     return {"ok": True, "logged": res.get("ok", False), "airtable": res}
 
+
 # ---- Cron/worker endpoints (single, canonical definitions) -------------------
+
 
 @app.post("/run-campaigns")
 def run_campaigns_ep(
@@ -243,6 +259,7 @@ def run_campaigns_ep(
     log_devops("run-campaigns", {"limit": limit, "send_after_queue": send_after_queue, "result": result})
     return result
 
+
 @app.post("/retry")
 def retry_ep(
     request: Request,
@@ -257,6 +274,7 @@ def retry_ep(
     log_devops("retry", {"limit": limit, "view": view, "result": result})
     return result
 
+
 @app.post("/autoresponder/autoresponder")
 def autoresponder_ep(
     request: Request,
@@ -270,6 +288,7 @@ def autoresponder_ep(
     result = run_autoresponder(limit=limit, view=view)
     log_devops("autoresponder", {"limit": limit, "view": view, "result": result})
     return result
+
 
 @app.post("/reset-quotas")
 def reset_quotas_ep(
@@ -307,6 +326,7 @@ def reset_quotas_ep(
 
     log_devops("reset-quotas", {"updated": updated})
     return {"ok": True, "updated": updated}
+
 
 @app.post("/aggregate-kpis")
 def aggregate_kpis_ep(

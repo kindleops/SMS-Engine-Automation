@@ -53,6 +53,7 @@ from sms.airtable_schema import (
 # -----------------------------
 try:
     from dotenv import load_dotenv
+
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
     load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -67,6 +68,7 @@ try:
 except Exception:
     ZoneInfo = None  # type: ignore
 
+
 # -----------------------------
 # Env helpers
 # -----------------------------
@@ -76,17 +78,20 @@ def env_bool(key: str, default: bool = False) -> bool:
         return default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
+
 def env_int(key: str, default: int) -> int:
     try:
         return int(os.getenv(key, default))
     except Exception:
         return default
 
+
 def env_float(key: str, default: float) -> float:
     try:
         return float(os.getenv(key, default))
     except Exception:
         return default
+
 
 def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(key)
@@ -157,7 +162,7 @@ DRIP_FIELD_MAP: dict[str, str] = {
     "TEMPLATE_LINK": "Template",
     "PROSPECT_LINK": "Prospect",
     "SELLER_PHONE": "Seller Phone Number",
-    "FROM_NUMBER": "TextGrid Phone Number",     # ✅ Fix for outbound_batcher KeyError
+    "FROM_NUMBER": "TextGrid Phone Number",  # ✅ Fix for outbound_batcher KeyError
     "MARKET": "Market",
     "MESSAGE_PREVIEW": "Message",
     "PROPERTY_ID": "Property ID",
@@ -174,9 +179,20 @@ DRIP_FIELD_MAP: dict[str, str] = {
 }
 
 PHONE_FIELDS = [
-    "phone", "Phone", "Mobile", "Cell", "Phone Number", "Primary Phone",
-    "Phone 1", "Phone 2", "Phone 3", "Owner Phone", "Owner Phone 1",
-    "Owner Phone 2", "Phone 1 (from Linked Owner)", "Phone 2 (from Linked Owner)",
+    "phone",
+    "Phone",
+    "Mobile",
+    "Cell",
+    "Phone Number",
+    "Primary Phone",
+    "Phone 1",
+    "Phone 2",
+    "Phone 3",
+    "Owner Phone",
+    "Owner Phone 1",
+    "Owner Phone 2",
+    "Phone 1 (from Linked Owner)",
+    "Phone 2 (from Linked Owner)",
     "Phone 3 (from Linked Owner)",
 ]
 
@@ -275,15 +291,18 @@ def settings() -> Settings:
         CAMPAIGNS_BASE_ID=env_str("CAMPAIGNS_BASE_ID"),
     )
 
+
 # -----------------------------
 # Time helpers
 # -----------------------------
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def tz_now() -> datetime:
     tz = ZoneInfo(settings().QUIET_TZ) if ZoneInfo else timezone.utc
     return datetime.now(tz)
+
 
 def in_quiet_hours() -> bool:
     s = settings()
@@ -291,6 +310,7 @@ def in_quiet_hours() -> bool:
         return False
     h = tz_now().hour
     return (h >= s.QUIET_START_HOUR) or (h < s.QUIET_END_HOUR)
+
 
 # -----------------------------
 # Airtable Helpers
@@ -300,15 +320,18 @@ try:
 except Exception:
     Api = None  # type: ignore
 
+
 @lru_cache(maxsize=1)
 def api_main():
     s = settings()
     return Api(s.AIRTABLE_API_KEY) if (Api and s.AIRTABLE_API_KEY and s.LEADS_CONVOS_BASE) else None
 
+
 @lru_cache(maxsize=1)
 def api_control():
     s = settings()
     return Api(s.AIRTABLE_API_KEY) if (Api and s.AIRTABLE_API_KEY and s.CAMPAIGN_CONTROL_BASE) else None
+
 
 @lru_cache(maxsize=1)
 def api_perf():
@@ -316,17 +339,24 @@ def api_perf():
     key = s.AIRTABLE_REPORTING_KEY or s.AIRTABLE_API_KEY
     return Api(key) if (Api and key and s.PERFORMANCE_BASE) else None
 
+
 def table_main(table_name: str):
-    a = api_main(); b = settings().LEADS_CONVOS_BASE
+    a = api_main()
+    b = settings().LEADS_CONVOS_BASE
     return a.table(b, table_name) if a else None
+
 
 def table_control(table_name: str):
-    a = api_control(); b = settings().CAMPAIGN_CONTROL_BASE
+    a = api_control()
+    b = settings().CAMPAIGN_CONTROL_BASE
     return a.table(b, table_name) if a else None
 
+
 def table_perf(table_name: str):
-    a = api_perf(); b = settings().PERFORMANCE_BASE
+    a = api_perf()
+    b = settings().PERFORMANCE_BASE
     return a.table(b, table_name) if a else None
+
 
 # -----------------------------
 # Shortcuts

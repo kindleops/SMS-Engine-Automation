@@ -31,6 +31,7 @@ TEST_MODE = os.getenv("TEST_MODE", "false").lower() in {"1", "true"}
 KPI_TZ = os.getenv("KPI_TZ", "America/Chicago")
 MAX_SCAN = int(os.getenv("KPI_MAX_SCAN", "10000"))
 
+
 # ---------------------
 # Helpers
 # ---------------------
@@ -39,6 +40,7 @@ def _tz_now():
         return datetime.now(ZoneInfo(KPI_TZ))
     except Exception:
         return datetime.now(timezone.utc)
+
 
 def _to_date_local(s: str) -> Optional[datetime.date]:
     if not s:
@@ -51,8 +53,10 @@ def _to_date_local(s: str) -> Optional[datetime.date]:
     except Exception:
         return None
 
+
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.lower().strip())
+
 
 def _auto_map(tbl) -> Dict[str, str]:
     try:
@@ -62,9 +66,11 @@ def _auto_map(tbl) -> Dict[str, str]:
         keys = []
     return {_norm(k): k for k in keys}
 
+
 def _remap(tbl, data: Dict) -> Dict:
     amap = _auto_map(tbl)
     return {amap.get(_norm(k), k): v for k, v in data.items() if amap.get(_norm(k))}
+
 
 def _fetch(tbl) -> Tuple[list, Optional[str]]:
     """Fetch KPI rows safely with retries."""
@@ -73,9 +79,10 @@ def _fetch(tbl) -> Tuple[list, Optional[str]]:
             rows = tbl.all(page_size=100, max_records=min(100, MAX_SCAN))
             return rows, None
         except Exception as e:
-            logger.error(f"KPI fetch attempt {i+1} failed: {e}")
+            logger.error(f"KPI fetch attempt {i + 1} failed: {e}")
             time.sleep(1)
     return [], "Fetch failed after retries"
+
 
 # ---------------------
 # Core Aggregator
@@ -103,22 +110,36 @@ def aggregate_kpis() -> Dict:
         d = _to_date_local(str(f.get("Date", "")))
         if not metric or not d:
             continue
-        if metric.endswith("_DAILY_TOTAL") and d == today: daily_exist[metric] = r; continue
-        if metric.endswith("_WEEKLY_TOTAL") and d == today: weekly_exist[metric] = r; continue
-        if metric.endswith("_MONTHLY_TOTAL") and d == today: monthly_exist[metric] = r; continue
+        if metric.endswith("_DAILY_TOTAL") and d == today:
+            daily_exist[metric] = r
+            continue
+        if metric.endswith("_WEEKLY_TOTAL") and d == today:
+            weekly_exist[metric] = r
+            continue
+        if metric.endswith("_MONTHLY_TOTAL") and d == today:
+            monthly_exist[metric] = r
+            continue
         raw.append(r)
 
     # Aggregate
     agg = {"daily": {}, "weekly": {}, "monthly": {}}
     for r in raw:
         f = r["fields"]
-        m = f.get("Metric"); d = _to_date_local(str(f.get("Date"))); v = f.get("Value") or 0
-        try: val = float(str(v).replace(",", ""))
-        except Exception: val = 0
-        if not (m and d): continue
-        if d == today: agg["daily"][m] = agg["daily"].get(m, 0) + val
-        if d >= start_week: agg["weekly"][m] = agg["weekly"].get(m, 0) + val
-        if d >= start_month: agg["monthly"][m] = agg["monthly"].get(m, 0) + val
+        m = f.get("Metric")
+        d = _to_date_local(str(f.get("Date")))
+        v = f.get("Value") or 0
+        try:
+            val = float(str(v).replace(",", ""))
+        except Exception:
+            val = 0
+        if not (m and d):
+            continue
+        if d == today:
+            agg["daily"][m] = agg["daily"].get(m, 0) + val
+        if d >= start_week:
+            agg["weekly"][m] = agg["weekly"].get(m, 0) + val
+        if d >= start_month:
+            agg["monthly"][m] = agg["monthly"].get(m, 0) + val
 
     def _upsert(suffix: str, data: Dict[str, float], existing: Dict[str, dict]):
         written = 0
@@ -151,6 +172,7 @@ def aggregate_kpis() -> Dict:
     }
 
     out = {"ok": True, "written": written, "errors": []}
-    if fetch_err: out["errors"].append(fetch_err)
+    if fetch_err:
+        out["errors"].append(fetch_err)
     logger.info("✅ KPI aggregation complete: %s", written)
     return out

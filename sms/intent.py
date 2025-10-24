@@ -29,18 +29,22 @@ NOT_OWNER = {"not the owner", "i sold", "no longer own", "sold this", "wrong per
 APPT = {"appointment", "schedule", "set up", "meet", "meeting", "tomorrow at", "see you"}
 CONTRACT = {"under contract", "signed", "in escrow", "closing", "executed"}
 
+
 # -----------------------------
 # Utils
 # -----------------------------
 def _norm(text: str) -> str:
     return text.lower().translate(str.maketrans("", "", string.punctuation)).strip()
 
+
 def _has_any(text: str, phrases: Iterable[str]) -> bool:
     return any(p in text for p in phrases)
+
 
 def _match_words(text: str, words: Iterable[str]) -> bool:
     pattern = r"\b(" + "|".join(map(re.escape, words)) + r")\b"
     return bool(re.search(pattern, text))
+
 
 # -----------------------------
 # Main classifier
@@ -72,5 +76,6 @@ def classify_intent(body: str) -> str:
     if any(t in text for t in ["maybe", "not sure", "thinking", "depends", "idk", "i don't know", "i dont know"]):
         return "neutral"
     return "intro"
+
 
 __all__ = ["classify_intent"]

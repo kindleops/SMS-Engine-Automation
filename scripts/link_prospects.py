@@ -7,10 +7,12 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 C = _get("AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "CONVERSATIONS_TABLE", "Conversations")
 P = _get("AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PROSPECTS_TABLE", "Prospects")
 
+
 def normalize(phone: str):
     if not phone:
         return None
     return "".join(c for c in str(phone) if c.isdigit())[-10:]  # last 10 digits for matching
+
 
 # === Build prospect maps ===
 pros_phone, pros_lead, pros_id = {}, {}, {}

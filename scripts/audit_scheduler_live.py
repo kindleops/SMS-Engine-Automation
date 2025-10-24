@@ -11,6 +11,7 @@ Usage:
   # or audit all scheduled:
   python scripts/audit_scheduler_live.py --all
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,6 +42,7 @@ from sms.airtable_schema import (
     template_field_map,
 )
 
+
 # ───────────────────────────────────────────────────────────────
 # Field mapping (robust, no KeyError)
 # ───────────────────────────────────────────────────────────────
@@ -49,22 +51,22 @@ def _flex(map_: Dict[str, str], name: str, default: str) -> str:
 
 
 CAMPAIGN_FIELDS = campaign_field_map()
-DRIP_FIELDS     = drip_field_map()
+DRIP_FIELDS = drip_field_map()
 TEMPLATE_FIELDS = template_field_map()
 
 # Campaign fields
-CAMPAIGN_STATUS_FIELD    = _flex(CAMPAIGN_FIELDS, "Status", "Status")
-CAMPAIGN_MARKET_FIELD    = _flex(CAMPAIGN_FIELDS, "Market", "Market")
-CAMPAIGN_START_FIELD     = _flex(CAMPAIGN_FIELDS, "Start Time", "Start Time")
-CAMPAIGN_PROSPECTS_LINK  = _flex(CAMPAIGN_FIELDS, "Prospects", "Prospects")
-CAMPAIGN_TEMPLATES_LINK  = _flex(CAMPAIGN_FIELDS, "Templates", "Templates")
+CAMPAIGN_STATUS_FIELD = _flex(CAMPAIGN_FIELDS, "Status", "Status")
+CAMPAIGN_MARKET_FIELD = _flex(CAMPAIGN_FIELDS, "Market", "Market")
+CAMPAIGN_START_FIELD = _flex(CAMPAIGN_FIELDS, "Start Time", "Start Time")
+CAMPAIGN_PROSPECTS_LINK = _flex(CAMPAIGN_FIELDS, "Prospects", "Prospects")
+CAMPAIGN_TEMPLATES_LINK = _flex(CAMPAIGN_FIELDS, "Templates", "Templates")
 
 # Drip fields (only what we need for dedupe)
-DRIP_CAMPAIGN_LINK_FIELD   = _flex(DRIP_FIELDS, "Campaign", "Campaign")
-DRIP_SELLER_PHONE_FIELD    = _flex(DRIP_FIELDS, "Seller Phone Number", "Seller Phone Number")
+DRIP_CAMPAIGN_LINK_FIELD = _flex(DRIP_FIELDS, "Campaign", "Campaign")
+DRIP_SELLER_PHONE_FIELD = _flex(DRIP_FIELDS, "Seller Phone Number", "Seller Phone Number")
 
 # Template fields (only what we need)
-TEMPLATE_MESSAGE_FIELD     = _flex(TEMPLATE_FIELDS, "Message", "Message")
+TEMPLATE_MESSAGE_FIELD = _flex(TEMPLATE_FIELDS, "Message", "Message")
 
 # Airtable-friendly pacing
 CHUNK_SLEEP_SEC = 0.12  # gentle on API when batching OR filters
@@ -282,10 +284,7 @@ def main() -> None:
     tot_q = sum(s["queued"] for s in summaries)
     print(f"\n=== Scheduler Read-Only Audit ({len(summaries)} campaign(s)) ===")
     for s in summaries:
-        print(
-            f"\n• Campaign {s['id']}  [{s['status']}]  "
-            f"market={s['market']}  pool={s['pool_size']}  templates={s['has_templates']}"
-        )
+        print(f"\n• Campaign {s['id']}  [{s['status']}]  market={s['market']}  pool={s['pool_size']}  templates={s['has_templates']}")
         print(f"  start={s['start_time']}")
         print(f"  processed={s['processed']:,}  queued={s['queued']:,}  skipped={s['skipped']:,}")
         if s["skip_reasons"]:

@@ -33,14 +33,17 @@ from typing import Dict
 # ENUM DEFINITIONS
 # =====================================================================
 
+
 class ConversationDirection(str, Enum):
     """Defines message direction: Inbound vs Outbound."""
+
     INBOUND = "Inbound"
     OUTBOUND = "Outbound"
 
 
 class ConversationDeliveryStatus(str, Enum):
     """Defines delivery state of messages."""
+
     QUEUED = "Queued"
     SENT = "Sent"
     FAILED = "Failed"
@@ -50,6 +53,7 @@ class ConversationDeliveryStatus(str, Enum):
 
 class ConversationProcessor(str, Enum):
     """Tracks which system component processed the message."""
+
     CAMPAIGN_RUNNER = "Campaign Runner"
     AUTORESPONDER = "Autoresponder"
     MANUAL = "Manual"
@@ -58,6 +62,7 @@ class ConversationProcessor(str, Enum):
 # =====================================================================
 # FIELD MAPS
 # =====================================================================
+
 
 def conversations_field_map() -> Dict[str, str]:
     """
@@ -68,14 +73,14 @@ def conversations_field_map() -> Dict[str, str]:
         TO   = Seller Phone Number (prospect / lead)
     """
     return {
-        "FROM": "TextGrid Number",          # ✅ From: your 10DLC sending number
-        "TO": "Seller Phone Number",        # ✅ To: seller’s / prospect’s number
-        "BODY": "Message",                  # SMS body
-        "DIRECTION": "Direction",           # Inbound / Outbound
-        "STATUS": "Delivery Status",        # Sent / Failed / Delivered
-        "SENT_AT": "Sent At",               # Timestamp
-        "TEXTGRID_ID": "Message SID",       # Returned SID from TextGrid
-        "PROCESSED_BY": "Processed By",     # Campaign Runner / Autoresponder / Manual
+        "FROM": "TextGrid Number",  # ✅ From: your 10DLC sending number
+        "TO": "Seller Phone Number",  # ✅ To: seller’s / prospect’s number
+        "BODY": "Message",  # SMS body
+        "DIRECTION": "Direction",  # Inbound / Outbound
+        "STATUS": "Delivery Status",  # Sent / Failed / Delivered
+        "SENT_AT": "Sent At",  # Timestamp
+        "TEXTGRID_ID": "Message SID",  # Returned SID from TextGrid
+        "PROCESSED_BY": "Processed By",  # Campaign Runner / Autoresponder / Manual
     }
 
 
@@ -161,8 +166,10 @@ DELIVERY_STATUS_MAP = {
 # TABLE ACCESS HELPERS
 # =====================================================================
 
+
 class CONVERSATIONS_TABLE:
     """Default linked field names used in create_conversation()."""
+
     @staticmethod
     def field_names() -> Dict[str, str]:
         return {
@@ -174,6 +181,7 @@ class CONVERSATIONS_TABLE:
 
 class LEADS_TABLE:
     """Schema wrapper for leads table."""
+
     @staticmethod
     def field_names() -> Dict[str, str]:
         return leads_field_map()
@@ -181,6 +189,7 @@ class LEADS_TABLE:
 
 class CAMPAIGNS_TABLE:
     """Schema wrapper for campaigns table."""
+
     @staticmethod
     def field_names() -> Dict[str, str]:
         return campaigns_field_map()
@@ -188,6 +197,7 @@ class CAMPAIGNS_TABLE:
 
 class KPIS_TABLE:
     """Schema wrapper for KPIs table."""
+
     @staticmethod
     def field_names() -> Dict[str, str]:
         return kpi_field_map()
@@ -196,6 +206,7 @@ class KPIS_TABLE:
 # =====================================================================
 # DEFAULT PAYLOAD HELPER
 # =====================================================================
+
 
 def default_conversation_payload(
     from_number: str,
@@ -252,4 +263,3 @@ if __name__ == "__main__":
     print("✅ KPI Map:", kpi_field_map())
     sample = default_conversation_payload("+18334445555", "+14015556666", "Test message")
     print("🧠 Sample Payload:", sample)
-

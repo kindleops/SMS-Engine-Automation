@@ -15,14 +15,17 @@ from sms.datastore import CONNECTOR
 
 logger = get_logger("run_logger")
 
+
 # -----------------------------
 # Helpers
 # -----------------------------
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def _norm(s: str) -> str:
     return "".join(ch for ch in s.lower() if ch.isalnum())
+
 
 def _auto_map(tbl) -> Dict[str, str]:
     try:
@@ -32,9 +35,11 @@ def _auto_map(tbl) -> Dict[str, str]:
         keys = []
     return {_norm(k): k for k in keys}
 
+
 def _remap(tbl, data: Dict) -> Dict:
     amap = _auto_map(tbl)
     return {amap.get(_norm(k), k): v for k, v in data.items() if amap.get(_norm(k))}
+
 
 # -----------------------------
 # Public API

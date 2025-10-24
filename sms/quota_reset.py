@@ -14,17 +14,24 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 from sms.runtime import get_logger
+
 log = get_logger("quota_reset")
 
 try:
     from sms.logger import log_run
 except Exception:
-    def log_run(*_a, **_k): pass
+
+    def log_run(*_a, **_k):
+        pass
+
 
 try:
     from sms.kpi_logger import log_kpi
 except Exception:
-    def log_kpi(*_a, **_k): pass
+
+    def log_kpi(*_a, **_k):
+        pass
+
 
 # -------------------------------
 # Airtable setup
@@ -39,15 +46,19 @@ try:
 except Exception:
     pass
 
+
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
     if not (api_key and base_id):
         return None
     try:
-        if _PyTable: return _PyTable(api_key, base_id, table_name)
-        if _PyApi: return _PyApi(api_key).table(base_id, table_name)
+        if _PyTable:
+            return _PyTable(api_key, base_id, table_name)
+        if _PyApi:
+            return _PyApi(api_key).table(base_id, table_name)
     except Exception:
         log.error("Failed to init Airtable table", exc_info=True)
     return None
+
 
 # -------------------------------
 # ENV
@@ -67,14 +78,17 @@ F_LAST_USED = "Last Used"
 F_DAILY_RESET_CAP = "Daily Reset"
 F_NUMBER = "Number"
 
+
 # -------------------------------
 # Helpers
 # -------------------------------
 def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
@@ -84,13 +98,16 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         keys = []
     return {re.sub(r"[^a-z0-9]+", "", k.lower()): k for k in keys}
 
+
 def _existing_only(tbl, patch: Dict[str, Any]) -> Dict[str, Any]:
     amap = _auto_field_map(tbl)
     out = {}
     for k, v in patch.items():
         ak = amap.get(re.sub(r"[^a-z0-9]+", "", k.lower()))
-        if ak: out[ak] = v
+        if ak:
+            out[ak] = v
     return out
+
 
 def _cap_for_row(f: Dict[str, Any]) -> int:
     try:
@@ -99,11 +116,13 @@ def _cap_for_row(f: Dict[str, Any]) -> int:
     except Exception:
         return DAILY_LIMIT_DEFAULT
 
+
 def _init_table():
     if not (AIRTABLE_API_KEY and CONTROL_BASE):
         log.warning("⚠️ Missing Airtable credentials for quota_reset")
         return None
     return _make_table(AIRTABLE_API_KEY, CONTROL_BASE, NUMBERS_TABLE)
+
 
 # -------------------------------
 # Core
@@ -152,6 +171,7 @@ def reset_daily_quotas():
     log.info(f"✅ Reset complete — updated={updated}, errors={len(errors)}")
 
     return {"ok": True, "date": today, "updated": updated, "errors": errors}
+
 
 if __name__ == "__main__":
     reset_daily_quotas()

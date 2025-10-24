@@ -51,7 +51,7 @@ def _safe_update(table, rid: str, payload: Dict[str, str], retries: int = 3):
                 time.sleep(delay)
                 delay *= 2
                 continue
-            logger.warning(f"⚠️ Update failed ({i+1}/{retries}) for {rid}: {msg}")
+            logger.warning(f"⚠️ Update failed ({i + 1}/{retries}) for {rid}: {msg}")
             time.sleep(delay)
     logger.error(f"❌ Gave up updating record {rid}")
     return False
@@ -113,9 +113,7 @@ def run(limit: Optional[int] = None) -> Dict[str, int]:
             break
 
     duration = round(time.time() - start_time, 2)
-    logger.info(
-        f"✅ Intent worker complete — classified={classified}, skipped={skipped}, errors={errors}, duration={duration}s"
-    )
+    logger.info(f"✅ Intent worker complete — classified={classified}, skipped={skipped}, errors={errors}, duration={duration}s")
 
     return {
         "classified": classified,

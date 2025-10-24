@@ -53,9 +53,7 @@ try:
                     except Exception:
                         pass
 
-                sys.stderr.write(
-                    f"[sms.init] ⚠️ pyairtable shim failed: {e.__class__.__name__}: {e}\n"
-                )
+                sys.stderr.write(f"[sms.init] ⚠️ pyairtable shim failed: {e.__class__.__name__}: {e}\n")
                 raise
 
     # Monkey-patch pyairtable.Table globally

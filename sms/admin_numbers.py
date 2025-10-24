@@ -2,7 +2,7 @@
 🚀 Admin Numbers Manager
 ------------------------
 Handles number assignment, drip pacing, and quiet-hour enforcement
-for Drip Queue campaigns. 
+for Drip Queue campaigns.
 
 Features:
  • Market-based DID allocation
@@ -24,6 +24,7 @@ except Exception:
     ZoneInfo = None  # type: ignore
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS, PROSPECT_FIELD_MAP as PROSPECT_FIELDS
@@ -53,11 +54,13 @@ QUIET_START_HOUR = int(os.getenv("QUIET_START_HOUR", "21"))
 QUIET_END_HOUR = int(os.getenv("QUIET_END_HOUR", "9"))
 DAILY_LIMIT_FALLBACK = int(os.getenv("DAILY_LIMIT", "750"))
 
+
 # ==========================================================
 # TIME HELPERS
 # ==========================================================
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
 
 def _tz() -> Optional[Any]:
     try:
@@ -65,10 +68,12 @@ def _tz() -> Optional[Any]:
     except Exception:
         return None
 
+
 def _in_quiet_hours(dt_utc: datetime) -> bool:
     z = _tz()
     local = dt_utc.astimezone(z) if z else dt_utc
     return (local.hour >= QUIET_START_HOUR) or (local.hour < QUIET_END_HOUR)
+
 
 def _shift_to_window(dt_utc: datetime) -> datetime:
     """Shift UTC datetime to next allowed quiet-hour exit window."""
@@ -80,16 +85,20 @@ def _shift_to_window(dt_utc: datetime) -> datetime:
         local = local.replace(hour=QUIET_END_HOUR, minute=0)
     return local.astimezone(timezone.utc) if z else local
 
+
 def _local_naive_iso(dt_utc: datetime) -> str:
     """Return local-naive ISO string (Airtable-friendly)."""
     z = _tz()
     local = dt_utc.astimezone(z) if z else dt_utc
     return local.replace(tzinfo=None).isoformat(timespec="seconds")
 
+
 # ==========================================================
 # AIRTABLE CLIENT
 # ==========================================================
 _api_cache = None
+
+
 def _api():
     global _api_cache
     if not _Api or not AIRTABLE_KEY:
@@ -104,6 +113,7 @@ def _api():
             return None
     return _api_cache
 
+
 def _tbl(base_id: Optional[str], name: str):
     api = _api()
     if not (api and base_id):
@@ -115,6 +125,7 @@ def _tbl(base_id: Optional[str], name: str):
         traceback.print_exc()
         return None
 
+
 def _safe_all(tbl, **kwargs) -> List[Dict[str, Any]]:
     if not tbl:
         return []
@@ -124,6 +135,7 @@ def _safe_all(tbl, **kwargs) -> List[Dict[str, Any]]:
         traceback.print_exc()
         return []
 
+
 def _safe_update(tbl, rid: str, payload: Dict[str, Any]) -> None:
     try:
         if tbl and rid and payload:
@@ -131,11 +143,13 @@ def _safe_update(tbl, rid: str, payload: Dict[str, Any]) -> None:
     except Exception:
         traceback.print_exc()
 
+
 # ==========================================================
 # MARKET + NUMBER PICKER
 # ==========================================================
 def _digits_only(s: Any) -> Optional[str]:
     return "".join(re.findall(r"\d+", s)) if isinstance(s, str) else None
+
 
 def _to_e164(fields: Dict[str, Any]) -> Optional[str]:
     for key in ("Number", "A Number", "Phone", "E164", "Friendly Name"):
@@ -146,6 +160,7 @@ def _to_e164(fields: Dict[str, Any]) -> Optional[str]:
                 return v if v.strip().startswith("+") else f"+{digits}"
     return None
 
+
 def _supports_market(f: Dict[str, Any], market: Optional[str]) -> bool:
     if not market:
         return True
@@ -153,6 +168,7 @@ def _supports_market(f: Dict[str, Any], market: Optional[str]) -> bool:
         return True
     ms = f.get("Markets")
     return isinstance(ms, list) and (market in ms)
+
 
 def _remaining_calc(f: Dict[str, Any]) -> int:
     """Compute remaining sends for a DID."""
@@ -163,6 +179,7 @@ def _remaining_calc(f: Dict[str, Any]) -> int:
     sent_today = int(f.get("Sent Today") or 0)
     daily_cap = int(f.get("Daily Reset") or DAILY_LIMIT_FALLBACK)
     return max(0, daily_cap - sent_today)
+
 
 def _pick_number_for_market(market: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     nums = _tbl(CAMPAIGN_CONTROL_BASE, NUMBERS_TABLE)
@@ -187,6 +204,7 @@ def _pick_number_for_market(market: Optional[str]) -> Tuple[Optional[str], Optio
     chosen = elig[0][1]
     did = _to_e164(chosen.get("fields", {}))
     return (did, chosen.get("id")) if did else (None, None)
+
 
 # ==========================================================
 # PUBLIC FUNCTIONS
@@ -230,6 +248,7 @@ def backfill_numbers_for_existing_queue(per_number_rate: int = 20, respect_quiet
 
     print(f"[AdminNumbers] ✅ Backfill complete — scanned={scanned}, updated={updated}, skipped={skipped}")
     return {"scanned": scanned, "updated": updated, "skipped": skipped}
+
 
 def resequence_next_send(per_number_rate: int = 20, respect_quiet_hours: bool = True) -> Dict[str, int]:
     drip = _tbl(LEADS_CONVOS_BASE, DRIP_QUEUE_TABLE)

@@ -53,7 +53,7 @@ def _safe_update(table, rid: str, payload: Dict[str, str], retries: int = 3):
                 time.sleep(delay)
                 delay *= 2
                 continue
-            logger.warning(f"⚠️ Update failed ({i+1}/{retries}) for {rid}: {msg}")
+            logger.warning(f"⚠️ Update failed ({i + 1}/{retries}) for {rid}: {msg}")
             time.sleep(delay)
     logger.error(f"❌ Gave up updating record {rid}")
     return False
@@ -68,17 +68,7 @@ def run(limit: Optional[int] = None) -> Dict[str, int]:
     handle = CONNECTOR.conversations()
 
     # Formula: only pull inbound conversations that show interest and have no lead yet
-    formula = (
-        "AND("
-        "NOT({Lead}),"
-        "OR("
-        "{Intent}='followup_yes',"
-        "{Intent}='interest',"
-        "{Intent}='price_response',"
-        "{Intent}='condition_response'"
-        ")"
-        ")"
-    )
+    formula = "AND(NOT({Lead}),OR({Intent}='followup_yes',{Intent}='interest',{Intent}='price_response',{Intent}='condition_response'))"
 
     try:
         records = handle.table.all(formula=formula)  # type: ignore[attr-defined]
@@ -138,9 +128,7 @@ def run(limit: Optional[int] = None) -> Dict[str, int]:
             break
 
     duration = round(time.time() - start_time, 2)
-    logger.info(
-        f"✅ Lead promoter complete — promoted={promoted}, skipped={skipped}, errors={errors}, duration={duration}s"
-    )
+    logger.info(f"✅ Lead promoter complete — promoted={promoted}, skipped={skipped}, errors={errors}, duration={duration}s")
 
     return {
         "promoted": promoted,

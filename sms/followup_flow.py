@@ -56,25 +56,38 @@ FALLBACK_TEMPLATES = {
 }
 STATUS_ICON = {"QUEUED": "⏳", "READY": "⏳", "SENT": "✅", "FAILED": "❌"}
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _utcnow() -> datetime: return datetime.now(timezone.utc)
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _ct_naive(dt: Optional[datetime] = None) -> str:
     return (dt or _utcnow()).astimezone(QUIET_TZ).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
 def _plus_delay(now: datetime, delay: Optional[Tuple[str, int]]) -> datetime:
-    if not delay: return now
+    if not delay:
+        return now
     typ, val = delay
     return now + timedelta(minutes=val) if typ == "min" else now + timedelta(days=val)
+
+
 def _escalate(stage: str) -> str:
-    if stage not in NURTURE_CHAIN: return "NURTURE_30"
+    if stage not in NURTURE_CHAIN:
+        return "NURTURE_30"
     idx = NURTURE_CHAIN.index(stage)
     return NURTURE_CHAIN[min(idx + 1, len(NURTURE_CHAIN) - 1)]
+
+
 def _template_message(key: str, context: Dict[str, Any]) -> str:
     raw = FALLBACK_TEMPLATES.get(key, "Checking back on {Address}, {First}.")
     name = context.get("First") or "there"
     addr = context.get("Address") or "your property"
     return raw.format(First=name, Address=addr)
+
 
 # ---------------------------------------------------------------------------
 # Core Scheduling Logic
@@ -91,7 +104,8 @@ def schedule_from_response(
     """Trigger next follow-up based on response intent."""
     drip_tbl = CONNECTOR.drip_queue()
     leads_tbl = CONNECTOR.leads()
-    if not drip_tbl: return {"ok": False, "error": "Drip table unavailable"}
+    if not drip_tbl:
+        return {"ok": False, "error": "Drip table unavailable"}
 
     plan = INTENT_PLAN.get(intent.lower(), INTENT_PLAN["neutral"])
     next_stage = plan["stage"]
@@ -130,13 +144,18 @@ def schedule_from_response(
 
     create_record(drip_tbl, payload)
     if leads_tbl and lead_id:
-        update_record(leads_tbl, lead_id, {
-            "drip_stage": next_stage,
-            "Next Followup Date": send_at_local.split("T")[0],
-            "Last Followup": _utcnow().isoformat(),
-        })
+        update_record(
+            leads_tbl,
+            lead_id,
+            {
+                "drip_stage": next_stage,
+                "Next Followup Date": send_at_local.split("T")[0],
+                "Last Followup": _utcnow().isoformat(),
+            },
+        )
 
     return {"ok": True, "queued": 1, "stage": next_stage, "scheduled_local": send_at_local}
+
 
 # ---------------------------------------------------------------------------
 # Daily / Hourly Auto-Followups
@@ -160,10 +179,12 @@ def run_followups(limit: int = 1000) -> Dict[str, Any]:
     for r in leads:
         f = r.get("fields", {}) or {}
         nfd = str(f.get("Next Followup Date") or f.get("next_followup_date") or "")
-        if not nfd or nfd[:10] > today: continue
+        if not nfd or nfd[:10] > today:
+            continue
 
         phone = f.get("Phone") or f.get("Seller Phone Number")
-        if not phone: continue
+        if not phone:
+            continue
 
         stage = (f.get("drip_stage") or "NURTURE_30").upper()
         key = {
@@ -195,11 +216,15 @@ def run_followups(limit: int = 1000) -> Dict[str, Any]:
         if stage in NURTURE_CHAIN:
             next_stage = _escalate(stage)
             next_date = (_utcnow() + timedelta(days=30 if stage != "NURTURE_90" else 90)).date().isoformat()
-            update_record(leads_tbl, r["id"], {
-                "drip_stage": next_stage,
-                "Last Followup": _utcnow().isoformat(),
-                "Next Followup Date": next_date,
-            })
+            update_record(
+                leads_tbl,
+                r["id"],
+                {
+                    "drip_stage": next_stage,
+                    "Last Followup": _utcnow().isoformat(),
+                    "Next Followup Date": next_date,
+                },
+            )
         else:
             update_record(leads_tbl, r["id"], {"Last Followup": _utcnow().isoformat()})
 

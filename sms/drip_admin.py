@@ -24,21 +24,27 @@ logger = get_logger("drip_admin")
 
 QUIET_TZ = ZoneInfo("America/Chicago")
 
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
 
 def _to_ct_naive(dt_utc: datetime) -> str:
     """Convert UTC datetime → CT naive string for Airtable UI fields."""
     return dt_utc.astimezone(QUIET_TZ).replace(tzinfo=None).isoformat(timespec="seconds")
 
+
 def _parse_datetime(value: Any) -> Optional[datetime]:
     """Parse any ISO/CT/naive string into UTC datetime."""
-    if not value or not isinstance(value, str): return None
+    if not value or not isinstance(value, str):
+        return None
     try:
         s = value.strip()
-        if s.endswith("Z"): s = s[:-1] + "+00:00"
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
     except Exception:
         try:
@@ -47,9 +53,11 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
         except Exception:
             return None
 
+
 def _should_bump(dt_utc: Optional[datetime], now: datetime, force_now: bool) -> bool:
     """Decide if timestamp should be moved forward."""
     return force_now or dt_utc is None or dt_utc < now - timedelta(seconds=5)
+
 
 def normalize_next_send_dates(
     dry_run: bool = True,
@@ -78,10 +86,12 @@ def normalize_next_send_dates(
     }
 
     for r in rows:
-        if updated >= limit: break
+        if updated >= limit:
+            break
         fields = r.get("fields", {}) or {}
         status = str(fields.get("Status") or "").strip()
-        if status not in valid_statuses: continue
+        if status not in valid_statuses:
+            continue
         examined += 1
 
         # Extract and validate send time
@@ -102,10 +112,7 @@ def normalize_next_send_dates(
         }
 
         if dry_run:
-            logger.info(
-                "DRY-RUN: id=%s | status=%s → %s CT=%s",
-                r.get("id"), status, send_at_utc.isoformat(), ct_local_str
-            )
+            logger.info("DRY-RUN: id=%s | status=%s → %s CT=%s", r.get("id"), status, send_at_utc.isoformat(), ct_local_str)
         else:
             if update_record(table, r["id"], payload):
                 updated += 1

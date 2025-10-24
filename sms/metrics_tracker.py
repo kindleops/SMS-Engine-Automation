@@ -17,10 +17,12 @@ from functools import lru_cache
 from typing import List, Optional, Dict, Any
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS
 from sms.runtime import get_logger
+
 logger = get_logger("metrics_tracker")
 
 # ─────────────────────────── Optional imports ───────────────────────────
@@ -42,17 +44,23 @@ except Exception:
 try:
     from sms.kpi_logger import log_kpi
 except Exception:
-    def log_kpi(*_a, **_k): pass
+
+    def log_kpi(*_a, **_k):
+        pass
+
 
 try:
     from sms.logger import log_run
 except Exception:
-    def log_run(*_a, **_k): pass
+
+    def log_run(*_a, **_k):
+        pass
+
 
 # ─────────────────────────── Alerts / thresholds ───────────────────────────
 ALERT_PHONE = os.getenv("ALERT_PHONE")
 ALERT_WEBHOOK = os.getenv("ALERT_EMAIL_WEBHOOK")
-OPT_OUT_THRESHOLD = float(os.getenv("OPT_OUT_ALERT_THRESHOLD", "2.5"))   # %
+OPT_OUT_THRESHOLD = float(os.getenv("OPT_OUT_ALERT_THRESHOLD", "2.5"))  # %
 DELIVERY_THRESHOLD = float(os.getenv("DELIVERY_ALERT_THRESHOLD", "90"))  # %
 COOLDOWN_HOURS = int(os.getenv("OPT_OUT_ALERT_COOLDOWN_HOURS", "24"))
 
@@ -77,6 +85,7 @@ CONV_CAMPAIGN_FIELD = CONVERSATIONS_FIELDS.get("CAMPAIGN_LINK", "Campaign")
 DELIVERED_STATES = {"DELIVERED"}
 FAILED_STATES = {"FAILED", "UNDELIVERED", "UNDELIVERABLE"}
 
+
 # ─────────────────────────── Airtable factories ───────────────────────────
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
     if not (api_key and base_id):
@@ -90,54 +99,88 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
         logger.error(f"Airtable init failed for {table_name}: {e}", exc_info=True)
     return None
 
+
 @lru_cache(maxsize=None)
-def _t_campaigns(): return _make_table(MAIN_KEY, LEADS_BASE, CAMPAIGNS_TABLE)
+def _t_campaigns():
+    return _make_table(MAIN_KEY, LEADS_BASE, CAMPAIGNS_TABLE)
+
+
 @lru_cache(maxsize=None)
-def _t_convos():    return _make_table(MAIN_KEY, LEADS_BASE, CONVERSATIONS_TABLE)
+def _t_convos():
+    return _make_table(MAIN_KEY, LEADS_BASE, CONVERSATIONS_TABLE)
+
 
 # ─────────────────────────── Utilities ───────────────────────────
-def _now_iso(): return datetime.now(timezone.utc).isoformat()
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
 
 def _parse_dt(s: str | None) -> datetime | None:
-    if not s: return None
-    try: return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except Exception: return None
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
-def _norm(s: str): return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
 
-def _field(name: str) -> str: return "{" + name + "}"
+def _norm(s: str):
+    return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
+
+def _field(name: str) -> str:
+    return "{" + name + "}"
+
 
 def _campaign_formula(name: str) -> str:
     safe = (name or "").replace("'", "\\'")
     return f"{_field(CONV_CAMPAIGN_FIELD)}='{safe}'"
 
+
 def _try_fetch(table, formula: str) -> list:
-    try: return table.all(formula=formula)
+    try:
+        return table.all(formula=formula)
     except Exception as e:
         logger.warning(f"⚠️ Fetch failed for formula {formula[:40]}...: {e}")
         return []
 
-def _status(rec): return str(rec.get("fields", {}).get(CONV_STATUS_FIELD, "")).upper()
-def _body(rec): return str(rec.get("fields", {}).get(CONV_MESSAGE_FIELD, "")).lower()
-def _direction(rec): return str(rec.get("fields", {}).get(CONV_DIRECTION_FIELD, "")).upper()
+
+def _status(rec):
+    return str(rec.get("fields", {}).get(CONV_STATUS_FIELD, "")).upper()
+
+
+def _body(rec):
+    return str(rec.get("fields", {}).get(CONV_MESSAGE_FIELD, "")).lower()
+
+
+def _direction(rec):
+    return str(rec.get("fields", {}).get(CONV_DIRECTION_FIELD, "")).upper()
+
 
 def _notify(msg: str):
     logger.warning(f"🚨 ALERT: {msg}")
     if ALERT_PHONE and send_message:
-        try: send_message(ALERT_PHONE, msg)
-        except Exception as e: logger.warning(f"❌ SMS alert failed: {e}")
+        try:
+            send_message(ALERT_PHONE, msg)
+        except Exception as e:
+            logger.warning(f"❌ SMS alert failed: {e}")
     if ALERT_WEBHOOK and ALERT_WEBHOOK.startswith(("http://", "https://")):
         try:
             import requests
+
             requests.post(ALERT_WEBHOOK, json={"text": msg}, timeout=10)
         except Exception as e:
             logger.warning(f"❌ Webhook alert failed: {e}")
 
+
 def _should_alert(last_alert_at, rate: float, threshold: float) -> bool:
-    if rate < threshold: return False
+    if rate < threshold:
+        return False
     dt = _parse_dt(last_alert_at[0] if isinstance(last_alert_at, list) else last_alert_at)
-    if not dt: return True
+    if not dt:
+        return True
     return datetime.now(timezone.utc) - dt >= timedelta(hours=COOLDOWN_HOURS)
+
 
 # ─────────────────────────── Core ───────────────────────────
 def update_metrics() -> dict:
@@ -196,8 +239,10 @@ def update_metrics() -> dict:
                 "opt_out_rate": optout_rate,
                 "last_run_at": _now_iso(),
             }
-            try: campaigns.update(camp_id, patch)
-            except Exception as e: logger.warning(f"⚠️ Campaign update failed: {e}")
+            try:
+                campaigns.update(camp_id, patch)
+            except Exception as e:
+                logger.warning(f"⚠️ Campaign update failed: {e}")
 
             # Alerts
             last_alert_at = cf.get("last_alert_at") or cf.get("Last Alert At")
@@ -210,8 +255,10 @@ def update_metrics() -> dict:
                 _notify(f"⚠️ Low delivery rate for {camp_name}: {delivery_rate}% (sent={total_sent})")
                 alerted = True
             if alerted:
-                try: campaigns.update(camp_id, {"last_alert_at": _now_iso()})
-                except Exception as e: logger.warning(f"⚠️ Alert timestamp update failed: {e}")
+                try:
+                    campaigns.update(camp_id, {"last_alert_at": _now_iso()})
+                except Exception as e:
+                    logger.warning(f"⚠️ Alert timestamp update failed: {e}")
 
             # KPI logs
             for metric, value in [
@@ -225,16 +272,18 @@ def update_metrics() -> dict:
             ]:
                 log_kpi(metric, value, campaign=camp_name)
 
-            summary.append({
-                "campaign": camp_name,
-                "sent": total_sent,
-                "delivered": len(delivered),
-                "failed": len(failed),
-                "responses": responses,
-                "optouts": total_optouts,
-                "delivery_rate": delivery_rate,
-                "optout_rate": optout_rate,
-            })
+            summary.append(
+                {
+                    "campaign": camp_name,
+                    "sent": total_sent,
+                    "delivered": len(delivered),
+                    "failed": len(failed),
+                    "responses": responses,
+                    "optouts": total_optouts,
+                    "delivery_rate": delivery_rate,
+                    "optout_rate": optout_rate,
+                }
+            )
 
             # Global rollup
             global_stats["sent"] += total_sent

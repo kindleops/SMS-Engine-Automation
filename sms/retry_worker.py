@@ -22,12 +22,18 @@ log = get_logger("retry_worker")
 try:
     from sms.logger import log_run
 except Exception:
-    def log_run(*_a, **_k): pass
+
+    def log_run(*_a, **_k):
+        pass
+
 
 try:
     from sms.kpi_logger import log_kpi
 except Exception:
-    def log_kpi(*_a, **_k): pass
+
+    def log_kpi(*_a, **_k):
+        pass
+
 
 # ----------------- optional send backends -----------------
 try:
@@ -51,6 +57,7 @@ try:
 except Exception:
     pass
 
+
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
     if not (api_key and base_id and table_name):
         return None
@@ -62,6 +69,7 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
     except Exception:
         log.error("Failed to init Airtable Conversations table", exc_info=True)
     return None
+
 
 # ----------------- ENV / TABLES / FIELDS -----------------
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
@@ -84,50 +92,80 @@ PERMANENT_FAIL_FIELD = CONVERSATIONS_FIELDS.get("PERMANENT_FAIL", "permanent_fai
 
 FAILED_STATES = {"FAILED", "DELIVERY_FAILED", "UNDELIVERED", "UNDELIVERABLE", "THROTTLED", "NEEDS_RETRY"}
 
+
 # ----------------- helpers -----------------
-def _now() -> datetime: return datetime.now(timezone.utc)
-def _now_iso() -> str: return _now().isoformat()
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _now_iso() -> str:
+    return _now().isoformat()
+
 
 def _parse_dt(s: Any) -> Optional[datetime]:
-    if not s: return None
-    try: return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except Exception: return None
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
-def _norm(s: str) -> str: return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
         rows = tbl.all(max_records=1)
         keys = list(rows[0].get("fields", {}).keys()) if rows else []
-    except Exception: keys = []
+    except Exception:
+        keys = []
     return {_norm(k): k for k in keys}
+
 
 def _remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     amap = _auto_field_map(tbl)
-    if not amap: return dict(payload)
+    if not amap:
+        return dict(payload)
     return {amap[_norm(k)]: v for k, v in payload.items() if _norm(k) in amap}
+
 
 def _is_retryable(f: Dict[str, Any]) -> bool:
     dirn = str(f.get(DIRECTION_FIELD) or f.get("Direction") or "").upper()
-    if dirn not in ("OUT", "OUTBOUND"): return False
+    if dirn not in ("OUT", "OUTBOUND"):
+        return False
     status = str(f.get(STATUS_FIELD) or f.get("Status") or "").upper()
-    if status not in FAILED_STATES: return False
+    if status not in FAILED_STATES:
+        return False
     retries = int(f.get(RETRY_COUNT_FIELD) or f.get("retry_count") or 0)
-    if retries >= MAX_RETRIES: return False
+    if retries >= MAX_RETRIES:
+        return False
     ra = f.get(RETRY_AFTER_FIELD) or f.get("retry_after")
     ra_dt = _parse_dt(ra)
     return (ra_dt is None) or (ra_dt <= _now())
 
+
 def _backoff_delay(retry_count: int) -> timedelta:
     return timedelta(minutes=BASE_BACKOFF_MINUTES * max(1, 2 ** max(0, retry_count - 1)))
 
+
 def _is_permanent_error(err: str) -> bool:
     text = (err or "").lower()
-    for sig in ["invalid", "blacklisted", "landline", "blocked", "disconnected",
-                "unreachable", "unknown subscriber", "rejected by carrier"]:
+    for sig in [
+        "invalid",
+        "blacklisted",
+        "landline",
+        "blocked",
+        "disconnected",
+        "unreachable",
+        "unknown subscriber",
+        "rejected by carrier",
+    ]:
         if sig in text:
             return True
     return False
+
 
 def _send(phone: str, body: str) -> None:
     if _MP:
@@ -140,6 +178,7 @@ def _send(phone: str, body: str) -> None:
         return
     log.info(f"[MOCK] send → {phone}: {body[:100]}")
 
+
 # ----------------- Airtable client -----------------
 @lru_cache(maxsize=1)
 def _t_convos():
@@ -147,6 +186,7 @@ def _t_convos():
     if not tbl:
         log.warning("⚠️ RetryWorker: No Airtable config → mock mode")
     return tbl
+
 
 # ----------------- core -----------------
 def _pick_candidates(convos, limit: int, view: Optional[str]) -> List[Dict]:
@@ -158,6 +198,7 @@ def _pick_candidates(convos, limit: int, view: Optional[str]) -> List[Dict]:
     except Exception:
         log.error("Candidate selection failed", exc_info=True)
         return []
+
 
 # ----------------- main -----------------
 def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
@@ -180,7 +221,8 @@ def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
 
         try:
             pre = _remap_existing_only(convos, {STATUS_FIELD: "RETRYING"})
-            if pre: convos.update(rid, pre)
+            if pre:
+                convos.update(rid, pre)
         except Exception:
             pass
 
@@ -194,7 +236,8 @@ def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
                 RETRY_AFTER_FIELD: None,
             }
             safe = _remap_existing_only(convos, patch)
-            if safe: convos.update(rid, safe)
+            if safe:
+                convos.update(rid, safe)
             retried += 1
             log.info(f"📤 Retried → {phone} | attempt {retries_prev + 1}")
         except Exception as e:
@@ -213,7 +256,8 @@ def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
 
             safe = _remap_existing_only(convos, patch)
             try:
-                if safe: convos.update(rid, safe)
+                if safe:
+                    convos.update(rid, safe)
             except Exception:
                 failed_updates += 1
                 log.error("Update failed", exc_info=True)
@@ -233,10 +277,10 @@ def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
     log_kpi("RETRY_RETRIED", retried)
     log_kpi("RETRY_PERMANENT_FAILS", permanent)
 
-    log.info(f"✅ RetryWorker complete | retried={retried} | permanent={permanent} "
-             f"| update_errors={failed_updates} | duration={duration}s")
+    log.info(f"✅ RetryWorker complete | retried={retried} | permanent={permanent} | update_errors={failed_updates} | duration={duration}s")
 
     return summary
+
 
 if __name__ == "__main__":
     run_retry()

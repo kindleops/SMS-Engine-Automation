@@ -32,11 +32,23 @@ PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
 CONVOS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 
 PHONE_CANDIDATES = [
-    "phone", "Phone", "Mobile", "Cell", "Phone Number", "Primary Phone",
-    "Phone 1", "Phone 2", "Phone 3",
-    "Owner Phone", "Owner Phone 1", "Owner Phone 2",
-    "Phone 1 (from Linked Owner)", "Phone 2 (from Linked Owner)", "Phone 3 (from Linked Owner)",
+    "phone",
+    "Phone",
+    "Mobile",
+    "Cell",
+    "Phone Number",
+    "Primary Phone",
+    "Phone 1",
+    "Phone 2",
+    "Phone 3",
+    "Owner Phone",
+    "Owner Phone 1",
+    "Owner Phone 2",
+    "Phone 1 (from Linked Owner)",
+    "Phone 2 (from Linked Owner)",
+    "Phone 3 (from Linked Owner)",
 ]
+
 
 # ==========================================================
 # UTILITIES
@@ -44,9 +56,11 @@ PHONE_CANDIDATES = [
 def _digits(s: str) -> str:
     return "".join(re.findall(r"\d+", s or "")) if isinstance(s, str) else ""
 
+
 def last10(s: str) -> str:
     d = _digits(s)
     return d[-10:] if len(d) >= 10 else ""
+
 
 # ==========================================================
 # TABLE HANDLERS
@@ -63,7 +77,9 @@ def _safe_tbl(base_id: str, table_name: str) -> Optional[Table]:
         traceback.print_exc()
         return None
 
+
 _field_cache: Dict[str, List[str]] = {}
+
 
 def _existing_cols(tbl: Table) -> List[str]:
     """Cached Airtable field list to prevent repeated .all() calls."""
@@ -78,6 +94,7 @@ def _existing_cols(tbl: Table) -> List[str]:
     except Exception:
         traceback.print_exc()
         return []
+
 
 # ==========================================================
 # SAFE CRUD OPERATIONS (with retries)
@@ -96,8 +113,10 @@ def _with_retry(fn, *args, retries=3, delay=0.5, **kwargs):
             break
     return None
 
+
 def _safe_create(tbl: Table, fields: Dict) -> Optional[Dict]:
-    if not (tbl and fields): return None
+    if not (tbl and fields):
+        return None
     try:
         existing = set(_existing_cols(tbl))
         payload = {k: v for k, v in fields.items() if k in existing}
@@ -106,8 +125,10 @@ def _safe_create(tbl: Table, fields: Dict) -> Optional[Dict]:
         traceback.print_exc()
         return None
 
+
 def _safe_update(tbl: Table, rec_id: str, fields: Dict) -> Optional[Dict]:
-    if not (tbl and rec_id and fields): return None
+    if not (tbl and rec_id and fields):
+        return None
     try:
         existing = set(_existing_cols(tbl))
         payload = {k: v for k, v in fields.items() if k in existing}
@@ -115,6 +136,7 @@ def _safe_update(tbl: Table, rec_id: str, fields: Dict) -> Optional[Dict]:
     except Exception:
         traceback.print_exc()
         return None
+
 
 # ==========================================================
 # SCANNERS
@@ -136,6 +158,7 @@ def _scan_by_last10(tbl: Table, phone: str) -> Optional[Dict]:
     except Exception:
         traceback.print_exc()
     return None
+
 
 # ==========================================================
 # CORE FUNCTIONS
@@ -169,9 +192,7 @@ def upsert_lead_for_phone(from_number: str) -> Tuple[Optional[str], Optional[str
         if pr:
             pf = pr.get("fields", {}) or {}
             carry = {
-                k: pf.get(k)
-                for k in ("Owner Name", "Address", "Market", "Sync Source", "List", "Source List", "Property Type")
-                if k in pf
+                k: pf.get(k) for k in ("Owner Name", "Address", "Market", "Sync Source", "List", "Source List", "Property Type") if k in pf
             }
             property_id = pf.get("Property ID")
 

@@ -54,8 +54,10 @@ except Exception:  # pragma: no cover
 try:  # Optional follow-up hook
     from sms.followup_flow import schedule_from_response
 except Exception:  # pragma: no cover
+
     def schedule_from_response(**_: Any) -> None:
         pass
+
 
 try:  # Local fallback templates for tests
     from sms import templates as local_templates
@@ -67,6 +69,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Airtable facades
 # ---------------------------------------------------------------------------
+
 
 class TableFacade:
     def __init__(self, handle):
@@ -201,20 +204,17 @@ STATUS_ICON = {
 # You can map your templates to these keys:
 EVENT_TEMPLATE_POOLS: Dict[str, Tuple[str, ...]] = {
     # Stage 1 outcomes
-    "ownership_yes": ("stage2_interest_prompt",),         # "Great—are you open to an offer on {Address}?"
-    "ownership_no": tuple(),                               # no reply; DNC/stop
-    "interest_no_30d": ("followup_30d_queue",),           # text to be queued for 30 days (not sent now)
-
+    "ownership_yes": ("stage2_interest_prompt",),  # "Great—are you open to an offer on {Address}?"
+    "ownership_no": tuple(),  # no reply; DNC/stop
+    "interest_no_30d": ("followup_30d_queue",),  # text to be queued for 30 days (not sent now)
     # Stage 2 outcomes
-    "interest_yes": ("stage3_ask_price",),                # "Do you have a ballpark asking price?"
+    "interest_yes": ("stage3_ask_price",),  # "Do you have a ballpark asking price?"
     # interest_no_30d reused
-
     # Stage 3 outcomes
-    "ask_offer": ("stage4_condition_prompt",),            # "We’ll run numbers. Quick check—what’s the current condition?"
-    "price_provided": ("stage4_condition_ack_prompt",),   # "Thanks for that. What’s the current condition?"
-
+    "ask_offer": ("stage4_condition_prompt",),  # "We’ll run numbers. Quick check—what’s the current condition?"
+    "price_provided": ("stage4_condition_ack_prompt",),  # "Thanks for that. What’s the current condition?"
     # Stage 4 outcomes
-    "condition_info": ("handoff_ack",),                   # optional short acknowledgement (we don't advance beyond Stage 4)
+    "condition_info": ("handoff_ack",),  # optional short acknowledgement (we don't advance beyond Stage 4)
 }
 
 # ---------------------------------------------------------------------------
@@ -225,21 +225,27 @@ STOP_WORDS = {"stop", "unsubscribe", "remove", "quit", "cancel", "end"}
 WRONG_NUM_WORDS = {"wrong number", "not mine", "new number"}
 NOT_OWNER_PHRASES = {"not the owner", "i sold", "no longer own", "dont own", "do not own", "sold this", "wrong person"}
 INTEREST_NO_PHRASES = {
-    "not interested", "not selling", "dont want to sell", "don't want to sell", "no interest",
-    "keep for now", "holding for now", "keeping it", "not looking to sell",
+    "not interested",
+    "not selling",
+    "dont want to sell",
+    "don't want to sell",
+    "no interest",
+    "keep for now",
+    "holding for now",
+    "keeping it",
+    "not looking to sell",
 }
 ASK_OFFER_PHRASES = {"your offer", "what's your offer", "whats your offer", "what is your offer", "what can you offer"}
 COND_WORDS = {"condition", "repairs", "needs work", "renovated", "updated", "tenant", "vacant", "occupied", "as-is", "roof", "hvac"}
 YES_WORDS = {"yes", "yeah", "yep", "sure", "affirmative", "correct", "that's me", "that is me", "i am"}
 NO_WORDS = {"no", "nope", "nah"}
 
-PRICE_REGEX = re.compile(
-    r"(\$?\s?\d{2,3}(?:,\d{3})*(?:\.\d{1,2})?\b)|(\b\d+\s?k\b)|(\b\d{2,3}k\b)", re.IGNORECASE
-)
+PRICE_REGEX = re.compile(r"(\$?\s?\d{2,3}(?:,\d{3})*(?:\.\d{1,2})?\b)|(\b\d+\s?k\b)|(\b\d{2,3}k\b)", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Utils
 # ---------------------------------------------------------------------------
+
 
 def _get_first(fields: Dict[str, Any], candidates: Iterable[Optional[str]]) -> Optional[Any]:
     for key in candidates:
@@ -313,6 +319,7 @@ def _resolve_timezone(policy) -> timezone:
     if tz_name:
         try:
             from zoneinfo import ZoneInfo
+
             tz = ZoneInfo(tz_name)
         except Exception:
             tz = None
@@ -381,6 +388,7 @@ STAGE4 = ConversationStage.STAGE_4_PROPERTY_CONDITION.value
 STAGE_DNC = ConversationStage.DNC.value
 STAGE_OPTOUT = ConversationStage.OPT_OUT.value
 
+
 def _current_stage_label(fields: Dict[str, Any]) -> str:
     label = str(fields.get(CONV_STAGE_FIELD) or "").strip()
     if label in (STAGE1, STAGE2, STAGE3, STAGE4, STAGE_DNC, STAGE_OPTOUT):
@@ -392,11 +400,12 @@ def _current_stage_label(fields: Dict[str, Any]) -> str:
 # Intent classification (base intent), then stage-aware event mapping
 # ---------------------------------------------------------------------------
 
+
 def _base_intent(body: str) -> str:
     text = (body or "").lower().strip()
     if not text:
         return "neutral"
-    
+
     # detect neutral inquiry like "who is this" or "how did you get my number"
     if any(p in text for p in ["who is this", "how did you get", "why are you", "what is this about"]):
         return "inquiry"
@@ -485,6 +494,7 @@ AI_INTENT_MAP = {
 # Autoresponder
 # ---------------------------------------------------------------------------
 
+
 class Autoresponder:
     def __init__(self) -> None:
         self.settings = settings()
@@ -494,7 +504,9 @@ class Autoresponder:
         self.prospects = prospects_tbl()
         self.templates = templates_tbl()
         self.drip = drip_tbl()
-        self.processed_by = (os.getenv("PROCESSED_BY_LABEL") or ConversationProcessor.AUTORESPONDER.value).strip() or ConversationProcessor.AUTORESPONDER.value
+        self.processed_by = (
+            os.getenv("PROCESSED_BY_LABEL") or ConversationProcessor.AUTORESPONDER.value
+        ).strip() or ConversationProcessor.AUTORESPONDER.value
 
         self.summary: Dict[str, Any] = {"processed": 0, "breakdown": {}, "errors": [], "skipped": {}}
         self.templates_by_key = self._index_templates()
@@ -529,7 +541,9 @@ class Autoresponder:
             pools.setdefault(key, []).append(rec)
         return pools
 
-    def _pick_message(self, pool_keys: Tuple[str, ...], personalization: Dict[str, str], rand_key: str) -> Tuple[str, Optional[str], Optional[str]]:
+    def _pick_message(
+        self, pool_keys: Tuple[str, ...], personalization: Dict[str, str], rand_key: str
+    ) -> Tuple[str, Optional[str], Optional[str]]:
         for pool in pool_keys:
             items = self.templates_by_key.get(pool, [])
             if items:
@@ -611,7 +625,9 @@ class Autoresponder:
         return self._find_record_by_phone(self.prospects, self.prospect_phone_fields, phone)
 
     # -------------------------- Lead gating: only when interest confirmed (Stage 2+)
-    def _ensure_lead_if_interested(self, event: str, phone: str, conv_fields: Dict[str, Any], prospect: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    def _ensure_lead_if_interested(
+        self, event: str, phone: str, conv_fields: Dict[str, Any], prospect: Optional[Dict[str, Any]]
+    ) -> Tuple[Optional[str], Optional[str]]:
         promote_events = {"interest_yes", "price_provided", "ask_offer", "condition_info"}
         if event not in promote_events:
             return None, None
@@ -682,9 +698,7 @@ class Autoresponder:
         try:
             created = self.drip.create(payload)
         except Exception as exc:
-            self.summary["errors"].append(
-                {"conversation": record.get("id"), "error": f"Queue failed: {exc}"}
-            )
+            self.summary["errors"].append({"conversation": record.get("id"), "error": f"Queue failed: {exc}"})
             return False
 
         if created and created.get("id"):
@@ -700,7 +714,9 @@ class Autoresponder:
         return False
 
     # -------------------------- Immediate send (fallback if no drip engine)
-    def _send_immediate(self, from_number: str, body: str, to_number: Optional[str], lead_id: Optional[str], property_id: Optional[str]) -> None:
+    def _send_immediate(
+        self, from_number: str, body: str, to_number: Optional[str], lead_id: Optional[str], property_id: Optional[str]
+    ) -> None:
         if not MessageProcessor:
             return
         try:
@@ -1013,4 +1029,5 @@ if __name__ == "__main__":
     out = run_autoresponder(limit=limit)
     print("\n=== Autoresponder Summary ===")
     import pprint
+
     pprint.pprint(out)

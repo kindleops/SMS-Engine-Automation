@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
 from sms.airtable_schema import DripStatus
 from sms.runtime import get_logger
+
 log = get_logger("outbound")
 
 from sms.dispatcher import get_policy
@@ -23,17 +24,26 @@ from sms.dispatcher import get_policy
 try:
     from sms.kpi_logger import log_kpi
 except Exception:
-    def log_kpi(*_a, **_k): pass
+
+    def log_kpi(*_a, **_k):
+        pass
+
 
 try:
     from sms.logger import log_run
 except Exception:
-    def log_run(*_a, **_k): pass
+
+    def log_run(*_a, **_k):
+        pass
+
 
 try:
     from sms.number_pools import increment_sent
 except Exception:
-    def increment_sent(*_a, **_k): pass
+
+    def increment_sent(*_a, **_k):
+        pass
+
 
 try:
     from sms.message_processor import MessageProcessor
@@ -51,28 +61,43 @@ RATE_LIMIT_REQUEUE_SECONDS = float(os.getenv("RATE_LIMIT_REQUEUE_SECONDS", "30")
 NO_NUMBER_REQUEUE_SECONDS = float(os.getenv("NO_NUMBER_REQUEUE_SECONDS", "300"))
 AUTO_BACKFILL_FROM_NUMBER = os.getenv("AUTO_BACKFILL_FROM_NUMBER", "true").lower() in {"1", "true", "yes"}
 
+
 # ========== Utilities ==========
-def utcnow(): return datetime.now(timezone.utc)
-def _iso(dt: datetime): return dt.replace(microsecond=0).isoformat()
-def _parse_dt(val: Any, fallback: datetime): 
-    try: return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
-    except Exception: return fallback
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt: datetime):
+    return dt.replace(microsecond=0).isoformat()
+
+
+def _parse_dt(val: Any, fallback: datetime):
+    try:
+        return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+    except Exception:
+        return fallback
+
 
 _PHONE_RE = re.compile(r"^\+1\d{10}$")
-def _valid_us_e164(s: Optional[str]) -> bool: return bool(s and _PHONE_RE.match(s))
+
+
+def _valid_us_e164(s: Optional[str]) -> bool:
+    return bool(s and _PHONE_RE.match(s))
+
 
 # ========== Airtable Wrappers ==========
 from sms.outbound_batcher import get_table, build_limiter, _pick_number_for_market, is_quiet_hours_local
-from sms.airtable_schema import DripStatus
+
 
 def _safe_update(tbl, rid: str, payload: Dict[str, Any]) -> None:
     try:
-        whitelist = {DRIP_FIELDS[k] for k in ["STATUS","NEXT_SEND_DATE","SENT_AT","LAST_ERROR","FROM_NUMBER"]}
+        whitelist = {DRIP_FIELDS[k] for k in ["STATUS", "NEXT_SEND_DATE", "SENT_AT", "LAST_ERROR", "FROM_NUMBER"]}
         clean = {k: v for k, v in payload.items() if k in whitelist}
         if clean:
             tbl.update(rid, clean)
     except Exception as e:
         log.warning(f"⚠️ Update failed: {e}", exc_info=True)
+
 
 # ========== Core ==========
 def send_batch(campaign_id: str | None = None, limit: int = 500):
@@ -94,7 +119,8 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
 
     now = utcnow()
     due = [
-        r for r in rows
+        r
+        for r in rows
         if (status := str(r.get("fields", {}).get(DRIP_FIELDS["STATUS"], "")).strip())
         in (DripStatus.QUEUED.value, DripStatus.READY.value, DripStatus.SENDING.value)
         and _parse_dt(r.get("fields", {}).get(DRIP_FIELDS["NEXT_SEND_DATE"]), now) <= now
@@ -119,20 +145,28 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         property_id = f.get(DRIP_FIELDS["PROPERTY_ID"])
 
         if not _valid_us_e164(phone):
-            _safe_update(drip_tbl, rid, {
-                DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                DRIP_FIELDS["LAST_ERROR"]: "invalid_phone",
-                DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
+                    DRIP_FIELDS["LAST_ERROR"]: "invalid_phone",
+                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
+                },
+            )
             total_failed += 1
             continue
 
         if not body:
-            _safe_update(drip_tbl, rid, {
-                DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                DRIP_FIELDS["LAST_ERROR"]: "empty_message",
-                DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
+                    DRIP_FIELDS["LAST_ERROR"]: "empty_message",
+                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
+                },
+            )
             total_failed += 1
             continue
 
@@ -141,20 +175,28 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
             if did:
                 _safe_update(drip_tbl, rid, {DRIP_FIELDS["FROM_NUMBER"]: did})
         if not did:
-            _safe_update(drip_tbl, rid, {
-                DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                DRIP_FIELDS["LAST_ERROR"]: "no_did",
-                DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=NO_NUMBER_REQUEUE_SECONDS)),
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
+                    DRIP_FIELDS["LAST_ERROR"]: "no_did",
+                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=NO_NUMBER_REQUEUE_SECONDS)),
+                },
+            )
             total_failed += 1
             continue
 
         if not limiter.try_consume(did):
-            _safe_update(drip_tbl, rid, {
-                DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                DRIP_FIELDS["LAST_ERROR"]: "rate_limited",
-                DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=RATE_LIMIT_REQUEUE_SECONDS)),
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
+                    DRIP_FIELDS["LAST_ERROR"]: "rate_limited",
+                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=RATE_LIMIT_REQUEUE_SECONDS)),
+                },
+            )
             continue
 
         _safe_update(drip_tbl, rid, {DRIP_FIELDS["STATUS"]: DripStatus.SENDING.value})
@@ -169,20 +211,28 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
 
         if delivered:
             total_sent += 1
-            _safe_update(drip_tbl, rid, {
-                DRIP_FIELDS["STATUS"]: DripStatus.SENT.value,
-                DRIP_FIELDS["SENT_AT"]: _iso(utcnow()),
-                DRIP_FIELDS["LAST_ERROR"]: "",
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    DRIP_FIELDS["STATUS"]: DripStatus.SENT.value,
+                    DRIP_FIELDS["SENT_AT"]: _iso(utcnow()),
+                    DRIP_FIELDS["LAST_ERROR"]: "",
+                },
+            )
             increment_sent(did)
             log_kpi("OUTBOUND_SENT", 1, campaign=campaign_id or "ALL")
         else:
             total_failed += 1
-            _safe_update(drip_tbl, rid, {
-                DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                DRIP_FIELDS["LAST_ERROR"]: "send_failed",
-                DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
+                    DRIP_FIELDS["LAST_ERROR"]: "send_failed",
+                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
+                },
+            )
             log_kpi("OUTBOUND_FAILED_SOFT", 1)
 
         if SLEEP_BETWEEN_SENDS_SEC:
@@ -191,9 +241,7 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
     # Summary + telemetry
     delivery_rate = (total_sent / (total_sent + total_failed) * 100) if (total_sent + total_failed) else 0
     log_kpi("OUTBOUND_DELIVERY_RATE", delivery_rate)
-    log_run("OUTBOUND_BATCH", processed=total_sent, breakdown={
-        "sent": total_sent, "failed": total_failed, "errors": len(errors)
-    })
+    log_run("OUTBOUND_BATCH", processed=total_sent, breakdown={"sent": total_sent, "failed": total_failed, "errors": len(errors)})
     log.info(f"✅ Batch complete — sent={total_sent}, failed={total_failed}, rate={delivery_rate:.1f}%")
 
     return {"ok": True, "total_sent": total_sent, "total_failed": total_failed, "errors": errors}

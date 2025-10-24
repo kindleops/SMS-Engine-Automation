@@ -78,6 +78,7 @@ DRIP_UI_FIELD = DRIP_FIELDS.get("UI", "UI")
 DRIP_PROCESSOR_FIELD = DRIP_FIELDS.get("Processor", "Processor")
 DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS.get("Message Preview", "Message Preview")
 
+
 # -------------------------------------------------------------
 # HELPERS
 # -------------------------------------------------------------
@@ -89,17 +90,21 @@ def _parse_iso(v: Any) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def _campaign_start(fields: Dict[str, Any]) -> datetime:
     return _parse_iso(fields.get(CAMPAIGN_START_FIELD)) or datetime.now(timezone.utc)
 
+
 def _market_key(raw: Optional[str]) -> str:
     return (raw or "").strip().lower().replace(",", "").replace(".", "")
+
 
 # -------------------------------------------------------------
 # MARKET → NUMBER ROTATION
 # -------------------------------------------------------------
 _numbers_cache: Dict[str, List[str]] = {}
 _rotation_index: Dict[str, int] = {}
+
 
 def _fetch_number_pool(market: str) -> List[str]:
     mk = _market_key(market)
@@ -123,6 +128,7 @@ def _fetch_number_pool(market: str) -> List[str]:
     _numbers_cache[mk] = pool
     return pool
 
+
 def _fetch_global_pool() -> List[str]:
     if "_global" in _numbers_cache:
         return _numbers_cache["_global"]
@@ -141,6 +147,7 @@ def _fetch_global_pool() -> List[str]:
     _numbers_cache["_global"] = pool
     return pool
 
+
 def _choose_number(market: str) -> Optional[str]:
     mk = _market_key(market)
     pool = _fetch_number_pool(market) or _fetch_global_pool()
@@ -151,6 +158,7 @@ def _choose_number(market: str) -> Optional[str]:
     _rotation_index[mk] = idx + 1
     return choice
 
+
 # -------------------------------------------------------------
 # MESSAGE RENDERING
 # -------------------------------------------------------------
@@ -159,26 +167,38 @@ def _render_message(template: str, pf: Dict[str, Any]) -> str:
     first_name = name_raw.split()[0].replace(".", "") if isinstance(name_raw, str) and name_raw.strip() else ""
     addr = pf.get("Property Address")
     city = pf.get("Property City")
-    if isinstance(addr, list) and addr: addr = addr[0]
-    if isinstance(city, list) and city: city = city[0]
+    if isinstance(addr, list) and addr:
+        addr = addr[0]
+    if isinstance(city, list) and city:
+        city = city[0]
     msg = (template or "").replace("{First}", first_name).replace("{Address}", str(addr or "")).replace("{Property City}", str(city or ""))
     return msg.strip()
 
+
 def _best_phone(fields: Dict[str, Any]) -> Optional[str]:
     for key in [
-        "Phone", "Primary Phone", "Owner Phone", "Owner Phones",
-        "Phone 1", "Phone 2", "Phones",
-        "Phone 1 (from Linked Owner)", "Phone 2 (from Linked Owner)"
+        "Phone",
+        "Primary Phone",
+        "Owner Phone",
+        "Owner Phones",
+        "Phone 1",
+        "Phone 2",
+        "Phones",
+        "Phone 1 (from Linked Owner)",
+        "Phone 2 (from Linked Owner)",
     ]:
         val = fields.get(key)
         if isinstance(val, list):
             for v in val:
                 p = normalize_phone(v)
-                if p: return p
+                if p:
+                    return p
         elif isinstance(val, str):
             p = normalize_phone(val)
-            if p: return p
+            if p:
+                return p
     return None
+
 
 # -------------------------------------------------------------
 # MAIN SCHEDULER
@@ -204,9 +224,12 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
             now_utc = datetime.now(timezone.utc)
             existing = list_records(drip_h, page_size=100)
             existing_pairs = {
-                ((f.get("fields") or {}).get(DRIP_CAMPAIGN_LINK_FIELD, [None])[0],
-                 last_10_digits((f.get("fields") or {}).get(DRIP_SELLER_PHONE_FIELD)))
-                for f in existing if f.get("fields")
+                (
+                    (f.get("fields") or {}).get(DRIP_CAMPAIGN_LINK_FIELD, [None])[0],
+                    last_10_digits((f.get("fields") or {}).get(DRIP_SELLER_PHONE_FIELD)),
+                )
+                for f in existing
+                if f.get("fields")
             }
 
             for camp in sorted(campaigns, key=lambda c: _campaign_start(c.get("fields", {}))):
@@ -227,7 +250,9 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                 messages = []
                 for tid in template_ids:
                     try:
-                        resp = templates_h.table.api.request("get", templates_h.table.url, params={"filterByFormula": f"RECORD_ID()='{tid}'"})
+                        resp = templates_h.table.api.request(
+                            "get", templates_h.table.url, params={"filterByFormula": f"RECORD_ID()='{tid}'"}
+                        )
                         for rec in (resp or {}).get("records", []):
                             msg = (rec.get("fields", {}) or {}).get("Message")
                             if msg and isinstance(msg, str):
@@ -246,7 +271,7 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
 
                 prospects = []
                 for i in range(0, len(linked), 90):
-                    chunk = linked[i:i+90]
+                    chunk = linked[i : i + 90]
                     formula = "OR(" + ",".join([f"RECORD_ID()='{rid}'" for rid in chunk]) + ")"
                     try:
                         resp = prospects_h.table.api.request("get", prospects_h.table.url, params={"filterByFormula": formula})
@@ -266,16 +291,22 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                     pf = pr.get("fields", {}) or {}
                     phone = _best_phone(pf)
                     if not phone:
-                        skipped += 1; skip_reasons["missing_phone"] += 1; continue
+                        skipped += 1
+                        skip_reasons["missing_phone"] += 1
+                        continue
                     digits = last_10_digits(phone)
                     if (campaign_id, digits) in existing_pairs:
-                        skipped += 1; skip_reasons["duplicate_phone"] += 1; continue
+                        skipped += 1
+                        skip_reasons["duplicate_phone"] += 1
+                        continue
                     from_number = _choose_number(market)
                     if not from_number:
-                        skipped += 1; skip_reasons["no_textgrid_number"] += 1; continue
+                        skipped += 1
+                        skip_reasons["no_textgrid_number"] += 1
+                        continue
                     msg = random.choice(messages)
                     rendered = _render_message(msg, pf)
-                    send_time = (start_time.timestamp() + random.randint(0, PREQUEUE_JITTER_MAX_SEC))
+                    send_time = start_time.timestamp() + random.randint(0, PREQUEUE_JITTER_MAX_SEC)
                     next_send = datetime.fromtimestamp(send_time, tz=timezone.utc).isoformat()
                     payload = {
                         DRIP_STATUS_FIELD: "QUEUED",
@@ -295,16 +326,22 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
                             existing_pairs.add((campaign_id, digits))
                             queued += 1
                         else:
-                            skipped += 1; skip_reasons["create_failed"] += 1
+                            skipped += 1
+                            skip_reasons["create_failed"] += 1
                     except Exception as e:
-                        skipped += 1; skip_reasons["create_failed"] += 1
+                        skipped += 1
+                        skip_reasons["create_failed"] += 1
                         logger.warning("❌ Create failed for %s: %s", digits, e)
 
                 try:
-                    update_record(campaigns_h, campaign_id, {
-                        CAMPAIGN_STATUS_FIELD: "Active" if queued and now_utc >= start_time else "Scheduled",
-                        CAMPAIGN_LAST_RUN_FIELD: iso_now(),
-                    })
+                    update_record(
+                        campaigns_h,
+                        campaign_id,
+                        {
+                            CAMPAIGN_STATUS_FIELD: "Active" if queued and now_utc >= start_time else "Scheduled",
+                            CAMPAIGN_LAST_RUN_FIELD: iso_now(),
+                        },
+                    )
                 except Exception:
                     pass
 
@@ -318,8 +355,11 @@ def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
 
                 summary["queued"] += queued
                 summary["campaigns"][campaign_id] = {
-                    "queued": queued, "skipped": skipped, "processed": processed,
-                    "skip_reasons": dict(skip_reasons), "market": market,
+                    "queued": queued,
+                    "skipped": skipped,
+                    "processed": processed,
+                    "skip_reasons": dict(skip_reasons),
+                    "market": market,
                     "start_time": start_time.isoformat(),
                 }
 

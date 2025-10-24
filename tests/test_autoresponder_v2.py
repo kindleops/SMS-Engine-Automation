@@ -3,6 +3,7 @@ import builtins
 import types
 import sms.autoresponder as ar
 
+
 class FakeTable:
     def __init__(self, name, rows=None):
         self.name = name
@@ -14,7 +15,7 @@ class FakeTable:
         return list(self._rows)
 
     def create(self, payload):
-        rid = f"rec_{len(self.created)+1}"
+        rid = f"rec_{len(self.created) + 1}"
         self.created.append(payload)
         return {"id": rid, "fields": payload}
 
@@ -29,25 +30,32 @@ def fake_convo(from_num, body):
         "fields": {"Direction": "IN", "From": from_num, "To": "+18885551234", "Body": body},
     }
 
+
 def make_env():
     """Attach fake tables so autoresponder logic runs without Airtable."""
-    fake_conv = FakeTable("Conversations", [
-        fake_convo("+15551230001", "Who is this?"),
-        fake_convo("+15551230002", "Yes I own it"),
-        fake_convo("+15551230003", "Stop texting me"),
-        fake_convo("+15551230004", "Depends on price"),
-        fake_convo("+15551230005", "How did you get my number"),
-        fake_convo("+15551230006", "maybe later next week"),
-        fake_convo("+15551230007", "cash offer?"),
-        fake_convo("+15551230008", "wrong number"),
-    ])
+    fake_conv = FakeTable(
+        "Conversations",
+        [
+            fake_convo("+15551230001", "Who is this?"),
+            fake_convo("+15551230002", "Yes I own it"),
+            fake_convo("+15551230003", "Stop texting me"),
+            fake_convo("+15551230004", "Depends on price"),
+            fake_convo("+15551230005", "How did you get my number"),
+            fake_convo("+15551230006", "maybe later next week"),
+            fake_convo("+15551230007", "cash offer?"),
+            fake_convo("+15551230008", "wrong number"),
+        ],
+    )
     fake_leads = FakeTable("Leads")
     fake_props = FakeTable("Prospects")
-    fake_temps = FakeTable("Templates", [
-        {"id": "temp_yes", "fields": {"Internal ID": "followup_yes", "Message": "Awesome {First}, we’ll reach out!"}},
-        {"id": "temp_intro", "fields": {"Internal ID": "intro", "Message": "Hey {First}, do you still own {Address}?"}},
-        {"id": "temp_neutral", "fields": {"Internal ID": "neutral", "Message": "Got it, thanks {First}."}},
-    ])
+    fake_temps = FakeTable(
+        "Templates",
+        [
+            {"id": "temp_yes", "fields": {"Internal ID": "followup_yes", "Message": "Awesome {First}, we’ll reach out!"}},
+            {"id": "temp_intro", "fields": {"Internal ID": "intro", "Message": "Hey {First}, do you still own {Address}?"}},
+            {"id": "temp_neutral", "fields": {"Internal ID": "neutral", "Message": "Got it, thanks {First}."}},
+        ],
+    )
     fake_drip = FakeTable("Drip Queue")
 
     # monkeypatch getters
@@ -68,6 +76,7 @@ def test_run_autoresponder_basic(monkeypatch):
         def send(**kwargs):
             print(f"SMS → {kwargs['phone']}: {kwargs['body']}")
             return {"status": "sent"}
+
     ar.MessageProcessor = DummyMP
 
     result = ar.run_autoresponder(limit=10)

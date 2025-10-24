@@ -35,12 +35,15 @@ _DIGIT_PATTERN = re.compile(r"\d+")
 try:
     from sms.logger import log_run  # writes to Performance/Logs
 except Exception:  # pragma: no cover
+
     def log_run(*_a, **_k):  # type: ignore
         pass
+
 
 try:
     from sms.kpi_logger import log_kpi  # writes to Performance/KPIs
 except Exception:  # pragma: no cover
+
     def log_kpi(*_a, **_k):  # type: ignore
         pass
 
@@ -205,6 +208,7 @@ def normalize_phone(value: str | None) -> Optional[str]:
 # ────────────────────────────────────────────────
 class PerfTimer:
     """Context manager that records duration to logs + KPIs."""
+
     def __init__(self, label: str, *, kpi_name: str | None = None, campaign: str = "ALL"):
         self.label = label
         self.kpi = kpi_name or f"RUNTIME_{label.upper()}_DURATION"
@@ -227,6 +231,7 @@ class PerfTimer:
 
 class AsyncPerfTimer:
     """Async context manager for timing await blocks."""
+
     def __init__(self, label: str, *, kpi_name: str | None = None, campaign: str = "ALL"):
         self._inner = PerfTimer(label, kpi_name=kpi_name, campaign=campaign)
 
@@ -240,6 +245,7 @@ class AsyncPerfTimer:
 
 def timed(label: str, *, campaign: str = "ALL", kpi_name: str | None = None):
     """Decorator to time a sync function and emit KPI logs."""
+
     def deco(func: Callable[..., T]):
         def wrapper(*args, **kwargs) -> T:
             start = time.time()
@@ -252,12 +258,15 @@ def timed(label: str, *, campaign: str = "ALL", kpi_name: str | None = None):
                     log_kpi(kpi_name or f"{label.upper()}_DURATION", dur, campaign=campaign, overwrite=False)
                 except Exception:
                     pass
+
         return wrapper
+
     return deco
 
 
 def timed_async(label: str, *, campaign: str = "ALL", kpi_name: str | None = None):
     """Decorator to time an async function and emit KPI logs."""
+
     def deco(func: Callable[..., Awaitable[T]]):
         async def wrapper(*args, **kwargs) -> T:
             start = time.time()
@@ -270,7 +279,9 @@ def timed_async(label: str, *, campaign: str = "ALL", kpi_name: str | None = Non
                     log_kpi(kpi_name or f"{label.upper()}_DURATION", dur, campaign=campaign, overwrite=False)
                 except Exception:
                     pass
+
         return wrapper
+
     return deco
 
 
@@ -302,7 +313,7 @@ def retry(
                 except Exception:
                     pass
                 raise
-            delay = base_delay * (backoff ** attempt)
+            delay = base_delay * (backoff**attempt)
             log.warning("Retryable error (%s/%s): %s — sleeping %.2fs", attempt + 1, retries + 1, exc, delay)
             time.sleep(delay)
             attempt += 1
@@ -332,7 +343,7 @@ async def retry_async(
                 except Exception:
                     pass
                 raise
-            delay = base_delay * (backoff ** attempt)
+            delay = base_delay * (backoff**attempt)
             log.warning("Retryable async error (%s/%s): %s — sleeping %.2fs", attempt + 1, retries + 1, exc, delay)
             await asyncio.sleep(delay)
             attempt += 1

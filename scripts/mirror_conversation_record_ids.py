@@ -4,6 +4,7 @@ import os
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     pass
@@ -14,20 +15,22 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 BASE_ENV = "LEADS_CONVOS_BASE" if os.getenv("LEADS_CONVOS_BASE") else "LEADS_CONVO_BASE"
 
+
 def get_tbl(name, env_name):
     api = "AIRTABLE_API_KEY"
     assert os.getenv(api), f"Missing {api}"
     assert os.getenv(env_name), f"Missing {env_name}"
     return _get_table(api, BASE_ENV, env_name, name)
 
+
 def main():
     conv = get_tbl("Conversations", "CONVERSATIONS_TABLE")
 
     link_to_text = [
-        ("Lead",      "Lead Record ID"),
-        ("Template",  "Template Record ID"),
-        ("Campaign",  "Campaign Record ID"),
-        ("Prospect",  "Prospect Record ID"),
+        ("Lead", "Lead Record ID"),
+        ("Template", "Template Record ID"),
+        ("Campaign", "Campaign Record ID"),
+        ("Prospect", "Prospect Record ID"),
     ]
 
     updated = 0
@@ -72,6 +75,7 @@ def main():
     print(f"Updated: {updated}")
     print(f"No change: {already}")
     print("✅ Mirror complete.")
+
 
 if __name__ == "__main__":
     print(f"=== Mirror start (DRY_RUN={str(DRY_RUN).upper()}) ===")

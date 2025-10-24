@@ -120,7 +120,7 @@ class ConversationStage(str, Enum):
     STAGE_7_CONTRACT_READY = "Stage 7 - Offer Follow Up"
     STAGE_8_NEGOTIATION = "Stage 8 - Negotiation"
     STAGE_9_CONTRACT_FOLLOW_UP = "Stage 9 - Contract Sent"
-    STAGE_10_CONTRACT_FOLLOW_UP= "Stage 10 - Contract Follow Up" 
+    STAGE_10_CONTRACT_FOLLOW_UP = "Stage 10 - Contract Follow Up"
     OPT_OUT = "Opt-Out"
     DNC = "DNC"
 

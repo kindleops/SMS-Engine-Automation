@@ -15,6 +15,7 @@ JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT_SEC", "600"))  # default 10 min
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
+
 # -------------------------------------------------------------------
 # Auth Guard
 # -------------------------------------------------------------------
@@ -28,6 +29,7 @@ def _extract_token(request: Request, qp_token: str | None, h_cron: str | None) -
         return auth.split(" ", 1)[1]
     return ""
 
+
 def require_cron(
     request: Request,
     token: str | None = Query(default=None),
@@ -39,6 +41,7 @@ def require_cron(
     provided = _extract_token(request, token, x_cron_token)
     if provided != CRON_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # -------------------------------------------------------------------
 # Helpers
@@ -61,6 +64,7 @@ def _run_python_module(mod: str, args: list[str] | None = None) -> dict:
         log.error(f"❌ Job {mod} failed: {e}")
         return {"ok": False, "module": mod, "error": text}
 
+
 # -------------------------------------------------------------------
 # Job Registry
 # -------------------------------------------------------------------
@@ -70,11 +74,13 @@ JOB_MAP = {
     "lead-promoter": "sms.workers.lead_promoter",
 }
 
+
 def _launch(job_key: str, *extra_args: str):
     mod = JOB_MAP.get(job_key)
     if not mod:
         raise HTTPException(status_code=404, detail=f"Unknown job: {job_key}")
     return _run_python_module(mod, list(extra_args))
+
 
 # -------------------------------------------------------------------
 # Routes

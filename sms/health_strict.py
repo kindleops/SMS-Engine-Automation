@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sms.datastore import CONNECTOR
 
+
 def strict_health(mode: str = "prospects") -> dict:
     valid_modes = {"prospects", "leads", "inbounds"}
     if mode not in valid_modes:

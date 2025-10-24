@@ -24,6 +24,7 @@ else:
 
 logger = get_logger("dispatcher")
 
+
 # ---------------------------------------------------------------------------
 @dataclass
 class DispatchPolicy:
@@ -82,21 +83,28 @@ class DispatchPolicy:
 # Global policy instance + accessors
 _POLICY = DispatchPolicy.load_from_env()
 
+
 def get_policy() -> DispatchPolicy:
     return _POLICY
+
 
 def refresh_policy() -> DispatchPolicy:
     global _POLICY
     _POLICY = DispatchPolicy.load_from_env()
     return _POLICY
 
+
 # ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
 
+
 def _safe_int(v: Any, default: int = 0) -> int:
-    try: return int(v)
-    except Exception: return default
+    try:
+        return int(v)
+    except Exception:
+        return default
+
 
 def _std_envelope(ok: bool, typ: str, payload: Dict[str, Any], started_at: float) -> Dict[str, Any]:
     return {
@@ -111,6 +119,7 @@ def _std_envelope(ok: bool, typ: str, payload: Dict[str, Any], started_at: float
 # Core Engine
 # ---------------------------------------------------------------------------
 
+
 async def run_engine(mode: str, **kwargs) -> Dict[str, Any]:
     """Unified dispatcher entrypoint."""
     started = time.time()
@@ -121,6 +130,7 @@ async def run_engine(mode: str, **kwargs) -> Dict[str, Any]:
         # Outbound Campaign Engine
         if mode == "prospects":
             from sms.campaign_runner import run_campaigns_sync
+
             send_after_queue = kwargs.get("send_after_queue", True)
             limit = kwargs.get("limit", 50)
 
@@ -129,47 +139,64 @@ async def run_engine(mode: str, **kwargs) -> Dict[str, Any]:
                 logger.info(f"🌙 Quiet hours active — delaying send until {policy.next_quiet_end()}")
             result = run_campaigns_sync(limit=limit, send_after_queue=send_after_queue)
 
-            return _std_envelope(True, "Prospect", {
-                "result": result,
-                "quiet_hours": policy.is_quiet(),
-            }, started)
+            return _std_envelope(
+                True,
+                "Prospect",
+                {
+                    "result": result,
+                    "quiet_hours": policy.is_quiet(),
+                },
+                started,
+            )
 
         # Lead Retry Engine
         elif mode == "leads":
             from sms.retry_runner import run_retry
+
             retry_limit = _safe_int(kwargs.get("retry_limit", 100))
             retry_result = run_retry(limit=retry_limit)
 
             followups = {}
             try:
                 from sms.followup_flow import run_followups
+
                 followups = run_followups()
             except Exception:
                 logger.warning("Followups failed or not enabled")
 
-            return _std_envelope(True, "Lead", {
-                "retries": retry_result,
-                "followups": followups or None,
-            }, started)
+            return _std_envelope(
+                True,
+                "Lead",
+                {
+                    "retries": retry_result,
+                    "followups": followups or None,
+                },
+                started,
+            )
 
         # Inbound Autoresponder
         elif mode == "inbounds":
             from sms.autoresponder import run_autoresponder
+
             limit = _safe_int(kwargs.get("limit", 50))
             view = kwargs.get("view", "Unprocessed Inbounds")
             result = run_autoresponder(limit=limit, view=view)
             return _std_envelope(True, "Inbound", {"result": result}, started)
 
         else:
-            return _std_envelope(False, "Unknown", {
-                "error": f"Unknown mode: {mode}",
-                "supported": ["prospects", "leads", "inbounds"]
-            }, started)
+            return _std_envelope(
+                False, "Unknown", {"error": f"Unknown mode: {mode}", "supported": ["prospects", "leads", "inbounds"]}, started
+            )
 
     except Exception as e:
         logger.error(f"Dispatcher error in mode={mode}: {e}")
         traceback.print_exc()
-        return _std_envelope(False, mode, {
-            "error": str(e),
-            "stack": traceback.format_exc(),
-        }, started)
+        return _std_envelope(
+            False,
+            mode,
+            {
+                "error": str(e),
+                "stack": traceback.format_exc(),
+            },
+            started,
+        )

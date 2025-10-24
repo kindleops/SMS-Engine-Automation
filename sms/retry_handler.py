@@ -24,12 +24,18 @@ log = get_logger("retry_handler")
 try:
     from sms.logger import log_run
 except Exception:
-    def log_run(*_a, **_k): pass
+
+    def log_run(*_a, **_k):
+        pass
+
 
 try:
     from sms.kpi_logger import log_kpi
 except Exception:
-    def log_kpi(*_a, **_k): pass
+
+    def log_kpi(*_a, **_k):
+        pass
+
 
 # -----------------------------
 # Airtable setup
@@ -44,6 +50,7 @@ try:
 except Exception:
     pass
 
+
 def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str):
     if not (api_key and base_id and table_name):
         return None
@@ -55,6 +62,7 @@ def _make_table(api_key: Optional[str], base_id: Optional[str], table_name: str)
     except Exception:
         log.error("Failed to init Airtable Conversations table", exc_info=True)
     return None
+
 
 # -----------------------------
 # Env-driven Field Mapping
@@ -69,14 +77,17 @@ CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 
+
 # -----------------------------
 # Helpers
 # -----------------------------
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.strip().lower()) if isinstance(s, str) else s
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     try:
@@ -86,13 +97,16 @@ def _auto_field_map(tbl) -> Dict[str, str]:
         keys = []
     return {_norm(k): k for k in keys}
 
+
 def _remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     amap = _auto_field_map(tbl)
     out = {}
     for k, v in payload.items():
         ak = amap.get(_norm(k))
-        if ak: out[ak] = v
+        if ak:
+            out[ak] = v
     return out
+
 
 @lru_cache(maxsize=1)
 def get_convos():
@@ -100,6 +114,7 @@ def get_convos():
     if not tbl:
         log.warning("⚠️ RetryHandler: No Airtable config → mock mode")
     return tbl
+
 
 # -----------------------------
 # Core API

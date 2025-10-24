@@ -42,4 +42,3 @@ async def require_cron_token(request: Request) -> None:
 
     if provided != expected:
         raise HTTPException(status_code=401, detail="Invalid cron token")
-

@@ -100,38 +100,57 @@ def get_performance_table(name: str):
 
 # ---------------- shortcuts ----------------
 @lru_cache(maxsize=None)
-def get_convos(): return get_leads_table(os.getenv("CONVERSATIONS_TABLE", "Conversations"))
+def get_convos():
+    return get_leads_table(os.getenv("CONVERSATIONS_TABLE", "Conversations"))
+
 
 @lru_cache(maxsize=None)
-def get_leads(): return get_leads_table(os.getenv("LEADS_TABLE", "Leads"))
+def get_leads():
+    return get_leads_table(os.getenv("LEADS_TABLE", "Leads"))
+
 
 @lru_cache(maxsize=None)
-def get_prospects(): return get_leads_table(os.getenv("PROSPECTS_TABLE", "Prospects"))
+def get_prospects():
+    return get_leads_table(os.getenv("PROSPECTS_TABLE", "Prospects"))
+
 
 @lru_cache(maxsize=None)
-def get_drip(): return get_leads_table(os.getenv("DRIP_QUEUE_TABLE", "Drip Queue"))
+def get_drip():
+    return get_leads_table(os.getenv("DRIP_QUEUE_TABLE", "Drip Queue"))
+
 
 @lru_cache(maxsize=None)
-def get_campaigns(): return get_campaigns_table(os.getenv("CAMPAIGNS_TABLE", "Campaigns"))
+def get_campaigns():
+    return get_campaigns_table(os.getenv("CAMPAIGNS_TABLE", "Campaigns"))
+
 
 @lru_cache(maxsize=None)
-def get_numbers(): return get_campaigns_table(os.getenv("NUMBERS_TABLE", "Numbers"))
+def get_numbers():
+    return get_campaigns_table(os.getenv("NUMBERS_TABLE", "Numbers"))
+
 
 @lru_cache(maxsize=None)
-def get_optouts(): return get_campaigns_table(os.getenv("OPTOUTS_TABLE", "Opt-Outs"))
+def get_optouts():
+    return get_campaigns_table(os.getenv("OPTOUTS_TABLE", "Opt-Outs"))
+
 
 @lru_cache(maxsize=None)
-def get_kpis(): return get_performance_table(os.getenv("KPIS_TABLE", "KPIs"))
+def get_kpis():
+    return get_performance_table(os.getenv("KPIS_TABLE", "KPIs"))
+
 
 @lru_cache(maxsize=None)
-def get_runs(): return get_performance_table(os.getenv("RUNS_TABLE", "Logs"))
+def get_runs():
+    return get_performance_table(os.getenv("RUNS_TABLE", "Logs"))
 
 
 # ---------------- field utilities ----------------
 _field_cache: Dict[str, Dict[str, str]] = {}
 
+
 def _norm(s: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(s).strip().lower())
+
 
 def _auto_field_map(tbl) -> Dict[str, str]:
     """Caches Airtable field maps per table ID for faster safe updates."""
@@ -148,6 +167,7 @@ def _auto_field_map(tbl) -> Dict[str, str]:
     except Exception:
         traceback.print_exc()
         return {}
+
 
 def remap_existing_only(tbl, payload: Dict[str, Any]) -> Dict[str, Any]:
     amap = _auto_field_map(tbl)

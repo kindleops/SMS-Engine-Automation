@@ -39,26 +39,31 @@ from sms.airtable_schema import ConversationDirection, ConversationDeliveryStatu
 
 # Central logger
 from sms.runtime import get_logger
+
 logger = get_logger("message_processor")
 
 # Best-effort telemetry imports (won't crash if missing)
 try:
     from sms.kpi_logger import log_kpi  # -> log_kpi(metric, value, ...)
 except Exception:
+
     def log_kpi(*_a, **_k):  # type: ignore
         return {"ok": False, "action": "skipped", "error": "kpi_logger unavailable"}
+
 
 try:
     from sms.logger import log_run  # -> log_run(run_type, processed, breakdown, ...)
 except Exception:
+
     def log_run(*_a, **_k):  # type: ignore
         pass
+
 
 # ---------------------------
 # Field mappings (canonical)
 # ---------------------------
-FROM_FIELD = CONV_FIELDS["FROM"]                 # Seller phone
-TO_FIELD = CONV_FIELDS["TO"]                     # Our TextGrid number (DID)
+FROM_FIELD = CONV_FIELDS["FROM"]  # Seller phone
+TO_FIELD = CONV_FIELDS["TO"]  # Our TextGrid number (DID)
 MSG_FIELD = CONV_FIELDS["BODY"]
 STATUS_FIELD = CONV_FIELDS["STATUS"]
 DIR_FIELD = CONV_FIELDS["DIRECTION"]
@@ -189,9 +194,16 @@ class MessageProcessor:
         if not phone or not body:
             logger.warning("Skipping send: missing phone or body")
             return {
-                "ok": False, "status": "skipped", "sid": None, "phone": phone, "body": body,
-                "convo_id": None, "provider_status": None, "error": "missing phone or body",
-                "timestamp": utcnow_iso(), "property_id": property_id,
+                "ok": False,
+                "status": "skipped",
+                "sid": None,
+                "phone": phone,
+                "body": body,
+                "convo_id": None,
+                "provider_status": None,
+                "error": "missing phone or body",
+                "timestamp": utcnow_iso(),
+                "property_id": property_id,
             }
 
         convos = get_convos()
@@ -224,9 +236,16 @@ class MessageProcessor:
             except Exception:
                 pass
             return {
-                "ok": False, "status": "failed", "sid": None, "phone": phone, "body": body,
-                "convo_id": convo_id, "provider_status": None, "error": err,
-                "timestamp": utcnow_iso(), "property_id": property_id,
+                "ok": False,
+                "status": "failed",
+                "sid": None,
+                "phone": phone,
+                "body": body,
+                "convo_id": convo_id,
+                "provider_status": None,
+                "error": err,
+                "timestamp": utcnow_iso(),
+                "property_id": property_id,
             }
 
         # --- 2) Normalize provider response
@@ -251,9 +270,7 @@ class MessageProcessor:
 
         # --- 4) Lead activity update (safe)
         if lead_id and leads:
-            MessageProcessor._update_lead_activity(
-                leads, lead_id, body, direction, property_id=property_id
-            )
+            MessageProcessor._update_lead_activity(leads, lead_id, body, direction, property_id=property_id)
 
         # --- 5) Retry hook if provider signaled non-ok
         if not ok:
@@ -261,9 +278,7 @@ class MessageProcessor:
 
         # telemetry (best-effort)
         try:
-            log_run("OUTBOUND_MESSAGE", processed=1, breakdown={
-                "phone": phone, "sid": sid, "provider_status": provider_status, "ok": ok
-            })
+            log_run("OUTBOUND_MESSAGE", processed=1, breakdown={"phone": phone, "sid": sid, "provider_status": provider_status, "ok": ok})
             log_kpi("OUTBOUND_SENT" if ok else "OUTBOUND_FAILED", 1)
         except Exception:
             pass
@@ -317,19 +332,21 @@ class MessageProcessor:
         }
         canonical_status = status_map.get(status.upper(), status)
 
-        payload = _compact({
-            FROM_FIELD: phone,
-            TO_FIELD: from_number,
-            MSG_FIELD: body,
-            DIR_FIELD: canonical_dir,
-            STATUS_FIELD: canonical_status,
-            SENT_AT_FIELD: utcnow_iso(),
-            TEXTGRID_ID_FIELD: sid,
-            CAMPAIGN_LINK_FIELD: [campaign_id] if campaign_id else None,
-            TEMPLATE_LINK_FIELD: [template_id] if template_id else None,
-            DRIP_QUEUE_LINK_FIELD: [drip_queue_id] if drip_queue_id else None,
-            **(metadata or {}),
-        })
+        payload = _compact(
+            {
+                FROM_FIELD: phone,
+                TO_FIELD: from_number,
+                MSG_FIELD: body,
+                DIR_FIELD: canonical_dir,
+                STATUS_FIELD: canonical_status,
+                SENT_AT_FIELD: utcnow_iso(),
+                TEXTGRID_ID_FIELD: sid,
+                CAMPAIGN_LINK_FIELD: [campaign_id] if campaign_id else None,
+                TEMPLATE_LINK_FIELD: [template_id] if template_id else None,
+                DRIP_QUEUE_LINK_FIELD: [drip_queue_id] if drip_queue_id else None,
+                **(metadata or {}),
+            }
+        )
 
         if not convos:
             # no Airtable → keep running without side-effects
@@ -357,14 +374,16 @@ class MessageProcessor:
             if direction.upper().startswith("IN")
             else direction
         )
-        patch = _compact({
-            LEAD_LAST_ACTIVITY_FIELD: now,
-            LEAD_LAST_MESSAGE_FIELD: body[:500] if body else "",
-            LEAD_LAST_DIRECTION_FIELD: canonical_dir,
-            LEAD_LAST_OUTBOUND_FIELD: now if canonical_dir == ConversationDirection.OUTBOUND.value else None,
-            LEAD_LAST_INBOUND_FIELD: now if canonical_dir == ConversationDirection.INBOUND.value else None,
-            LEAD_PROPERTY_ID_FIELD: property_id,
-        })
+        patch = _compact(
+            {
+                LEAD_LAST_ACTIVITY_FIELD: now,
+                LEAD_LAST_MESSAGE_FIELD: body[:500] if body else "",
+                LEAD_LAST_DIRECTION_FIELD: canonical_dir,
+                LEAD_LAST_OUTBOUND_FIELD: now if canonical_dir == ConversationDirection.OUTBOUND.value else None,
+                LEAD_LAST_INBOUND_FIELD: now if canonical_dir == ConversationDirection.INBOUND.value else None,
+                LEAD_PROPERTY_ID_FIELD: property_id,
+            }
+        )
 
         try:
             leads_tbl.update(lead_id, _remap_existing_only(leads_tbl, patch))
