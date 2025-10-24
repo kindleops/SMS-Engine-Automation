@@ -1,4 +1,3 @@
-# sms/campaign_runner.py
 from __future__ import annotations
 import random, traceback
 from datetime import datetime, timedelta
@@ -22,7 +21,7 @@ STATUS_ICON = {
     "DNC": "⛔",
 }
 
-# ──────────────────────────────── helpers ────────────────────────────────
+# ─────────────────────────────── helpers ───────────────────────────────
 def _ct_future_iso_naive(min_s: int = 2, max_s: int = 12) -> str:
     dt = datetime.now(QUIET_TZ) + timedelta(seconds=random.randint(min_s, max_s))
     return dt.replace(tzinfo=None).isoformat(timespec="seconds")
@@ -140,7 +139,18 @@ def _fetch_active_campaigns(table) -> List[Dict[str, Any]]:
     if not table:
         return []
     try:
-        return table.all(formula="OR({Status}=TRUE(), {Status}!='Scheduled')")
+        # Only include campaigns explicitly marked Active, Scheduled, or Running
+        formula = "OR({Status}='Active', {Status}='Scheduled', {Status}='Running')"
+        active = table.all(formula=formula)
+        log.info(f"📊 Found {len(active)} eligible campaigns (Active/Scheduled).")
+        if not active:
+            log.info("⚠️ No active campaigns matched filter.")
+        else:
+            for c in active:
+                name = c.get("fields", {}).get("Name") or "Unnamed Campaign"
+                status = c.get("fields", {}).get("Status")
+                log.info(f"✅ Queued candidate → {name} [Status={status}]")
+        return active
     except Exception as e:
         log.error(f"❌ Failed to fetch active campaigns: {e}")
         return []
@@ -160,9 +170,22 @@ def run_campaigns(limit="ALL", send_after_queue: bool = True) -> Dict[str, Any]:
 
     for camp in active_campaigns:
         try:
+            status = (camp.get("fields") or {}).get("Status", "")
+            name = (camp.get("fields") or {}).get("Name", "Unnamed Campaign")
+            if status not in ("Active", "Scheduled", "Running"):
+                log.info(f"⏸️ Skipping paused/inactive campaign → {name} [Status={status}]")
+                continue
+
             queued = _build_campaign_queue(camp, 10000 if limit == "ALL" else int(limit))
             total_queued += queued
             campaigns_processed += 1
+
+            # update Last Run timestamp in Airtable
+            try:
+                campaigns_table.update(camp["id"], {"Last Run": datetime.utcnow().isoformat()})
+            except Exception as e:
+                log.debug(f"Last Run update failed for {name}: {e}")
+
         except Exception as e:
             err = f"Campaign queue failed: {e}"
             log.error(err)
