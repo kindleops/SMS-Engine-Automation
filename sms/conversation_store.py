@@ -1,4 +1,4 @@
-"""Shared Airtable helpers for Conversations/Leads/Prospects operations."""
+"""Shared Airtable helpers for Conversations/Leads/Prospects operations (Enhanced Version)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,12 @@ from sms.airtable_schema import (
 from sms.tables import get_convos, get_leads, get_prospects
 
 
+# -----------------------------------------------------------
+# Time + Phone Utilities
+# -----------------------------------------------------------
+
 def utcnow_iso() -> str:
+    """Return current UTC time in ISO8601 Zulu format."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
@@ -27,8 +32,7 @@ def _digits_only(phone: Optional[str]) -> str:
 
 
 def normalize_phone(phone: Optional[str]) -> Optional[str]:
-    """Return an E.164-ish phone number (US-biased fallback)."""
-
+    """Normalize to E.164-like format (US bias fallback)."""
     digits = _digits_only(phone)
     if not digits:
         return None
@@ -46,6 +50,10 @@ def last10(phone: Optional[str]) -> Optional[str]:
     return digits[-10:] if len(digits) >= 10 else None
 
 
+# -----------------------------------------------------------
+# Cached Airtable Handles
+# -----------------------------------------------------------
+
 @lru_cache(maxsize=1)
 def _conversation_table():
     return get_convos()
@@ -61,6 +69,10 @@ def _prospects_table():
     return get_prospects()
 
 
+# -----------------------------------------------------------
+# Airtable Helpers (Safe CRUD)
+# -----------------------------------------------------------
+
 def _safe_create(tbl, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not tbl:
         return None
@@ -69,7 +81,7 @@ def _safe_create(tbl, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     try:
         return tbl.create(body)
-    except Exception as exc:  # pragma: no cover - network failure path
+    except Exception as exc:
         print(f"⚠️ Airtable create failed: {exc}")
         return None
 
@@ -82,12 +94,18 @@ def _safe_update(tbl, record_id: str, payload: Dict[str, Any]) -> Optional[Dict[
         return None
     try:
         return tbl.update(record_id, body)
-    except Exception as exc:  # pragma: no cover - network failure path
+    except Exception as exc:
         print(f"⚠️ Airtable update failed: {exc}")
         return None
 
 
+# -----------------------------------------------------------
+# Lookup Helpers
+# -----------------------------------------------------------
+
+@lru_cache(maxsize=512)
 def _find_record_by_phone(tbl, phone: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Search for a record by last 10 digits across all common phone fields."""
     if not tbl or not phone:
         return None
     want = last10(phone)
@@ -97,9 +115,9 @@ def _find_record_by_phone(tbl, phone: Optional[str]) -> Optional[Dict[str, Any]]
         for record in tbl.all():
             fields = record.get("fields", {}) or {}
             for candidate in (
+                "Seller Phone Number",
                 "Phone",
                 "phone",
-                "Seller Phone Number",
                 "Mobile",
                 "Cell",
                 "Primary Phone",
@@ -108,43 +126,48 @@ def _find_record_by_phone(tbl, phone: Optional[str]) -> Optional[Dict[str, Any]]
             ):
                 if last10(fields.get(candidate)) == want:
                     return record
-    except Exception as exc:  # pragma: no cover - network failure path
+    except Exception as exc:
         print(f"⚠️ Failed to scan Airtable rows: {exc}")
     return None
 
 
 def _find_conversation_by_sid(sid: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Find conversation record by TextGrid SID."""
     tbl = _conversation_table()
     if not tbl or not sid:
         return None
     try:
         for record in tbl.all():
             fields = record.get("fields", {}) or {}
-            if str(fields.get(CONVERSATIONS.textgrid_id) or "") == sid:
+            if str(fields.get(CONVERSATIONS.textgrid_id) or "") == sid or str(fields.get("TextGrid ID") or "") == sid:
                 return record
-            if str(fields.get("TextGrid ID") or "") == sid:
-                return record
-    except Exception as exc:  # pragma: no cover - network failure path
+    except Exception as exc:
         print(f"⚠️ Failed to scan Conversations for SID {sid}: {exc}")
     return None
 
+
+# -----------------------------------------------------------
+# Core Upserts + Links
+# -----------------------------------------------------------
 
 _LOCAL_IDEMPOTENCY_CACHE: set[str] = set()
 
 
 def upsert_conversation(payload: Dict[str, Any], textgrid_id: Optional[str]) -> Optional[str]:
-    """Create/update a Conversations row, enforcing idempotency on TextGrid ID."""
-
+    """Create or update a Conversations row, enforcing idempotency on TextGrid ID."""
     tbl = _conversation_table()
     if tbl:
         existing = _find_conversation_by_sid(textgrid_id)
         if existing:
+            print(f"↩️ Updating existing conversation for TextGrid ID {textgrid_id}")
             _safe_update(tbl, existing["id"], payload)
             return existing["id"]
+
+        print(f"🆕 Creating new conversation for TextGrid ID {textgrid_id}")
         created = _safe_create(tbl, payload)
         return (created or {}).get("id")
 
-    # Local fallback: prevent duplicates during tests without Airtable
+    # Fallback (no Airtable)
     if textgrid_id:
         if textgrid_id in _LOCAL_IDEMPOTENCY_CACHE:
             return None
@@ -153,6 +176,7 @@ def upsert_conversation(payload: Dict[str, Any], textgrid_id: Optional[str]) -> 
 
 
 def find_or_create_prospect(phone: str) -> Optional[Dict[str, Any]]:
+    """Find existing or create new Prospect for phone."""
     tbl = _prospects_table()
     if not phone:
         return None
@@ -170,7 +194,6 @@ def find_or_create_prospect(phone: str) -> Optional[Dict[str, Any]]:
 
 def resolve_contact_links(phone: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Return (lead_record, prospect_record) for a seller phone."""
-
     normalized = normalize_phone(phone)
     lead_record = _find_record_by_phone(_leads_table(), normalized)
     if lead_record:
@@ -181,8 +204,7 @@ def resolve_contact_links(phone: Optional[str]) -> Tuple[Optional[Dict[str, Any]
 
 
 def promote_to_lead(phone: str, *, source: str, campaign_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Create or fetch a lead for the seller phone number."""
-
+    """Create or fetch a Lead for the seller phone number."""
     tbl = _leads_table()
     if not phone or not tbl:
         return None
@@ -205,8 +227,7 @@ def promote_to_lead(phone: str, *, source: str, campaign_id: Optional[str] = Non
     if campaign_id:
         fields[LEADS.campaigns] = [campaign_id]
 
-    created = _safe_create(tbl, fields)
-    return created
+    return _safe_create(tbl, fields)
 
 
 def update_conversation_links(
@@ -216,6 +237,7 @@ def update_conversation_links(
     prospect: Optional[Dict[str, Any]] = None,
     textgrid_id: Optional[str] = None,
 ):
+    """Attach conversation record to a Lead or Prospect (mutually exclusive)."""
     tbl = _conversation_table()
     if not tbl or not conversation_id:
         return
@@ -246,6 +268,10 @@ def update_conversation_links(
     _safe_update(tbl, conversation_id, payload)
 
 
+# -----------------------------------------------------------
+# Lead Activity Tracking
+# -----------------------------------------------------------
+
 def update_lead_activity(
     lead: Optional[Dict[str, Any]],
     *,
@@ -256,6 +282,7 @@ def update_lead_activity(
     send_increment: bool = False,
     status_changed: bool = True,
 ):
+    """Increment lead counters and timestamps after message activity."""
     if not lead:
         return
     tbl = _leads_table()
@@ -275,6 +302,7 @@ def update_lead_activity(
         LEADS.last_direction: direction,
         LEADS.last_delivery_status: delivery_status,
     }
+
     if direction == "INBOUND":
         patch[LEADS.last_inbound] = utcnow_iso()
         if reply_increment:
@@ -293,6 +321,10 @@ def update_lead_activity(
     _safe_update(tbl, lead_id, patch)
 
 
+# -----------------------------------------------------------
+# Conversation Payload Builder
+# -----------------------------------------------------------
+
 def base_conversation_payload(
     *,
     seller_phone: Optional[str],
@@ -308,8 +340,7 @@ def base_conversation_payload(
     campaign_id: Optional[str] = None,
     template_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Create a normalised payload ready for ``upsert_conversation``."""
-
+    """Normalize a Conversation payload for Airtable insert/update."""
     payload = {
         CONVERSATIONS.seller_phone_number: normalize_phone(seller_phone),
         CONVERSATIONS.textgrid_phone_number: normalize_phone(textgrid_phone),
