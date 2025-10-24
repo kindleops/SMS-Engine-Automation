@@ -1,83 +1,97 @@
 """
-Campaign Runner — REI SMS Engine
-------------------------------------------------
-Scans Airtable Campaigns, auto-activates scheduled ones,
-queues outbound messages into the Drip Queue,
-and triggers send batches if `send_after_queue=True`.
+=====================================================================
+📣 CAMPAIGN RUNNER — FINAL BULLETPROOF VERSION
+=====================================================================
+Auto-activates scheduled campaigns, queues active ones,
+and triggers outbound SMS batches.
+
+Key Features:
+-------------
+✅ Reads directly from environment (no external dependency)
+✅ Uses pyairtable for Campaigns table in LEADS_CONVOS_BASE
+✅ Auto-activates scheduled campaigns at start time
+✅ Queues active campaigns safely
+✅ Triggers outbound send_batch() automatically
+✅ Fully compatible with Render Cron or manual execution
+=====================================================================
 """
 
-from __future__ import annotations
+import os
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict
 
-from sms.tables import get_campaigns, get_leads, get_drip
+from pyairtable import Table
 from sms.runtime import get_logger
-from sms.templates import get_template
-from sms.textgrid_sender import queue_message
 
 log = get_logger("campaign_runner")
 
+# ==============================================================
+# ENVIRONMENT SETUP
+# ==============================================================
 
-# ───────────────────────────────────────────────
-def _within_window(fields: dict) -> bool:
-    """Return True if campaign is within its Start/End window."""
-    now = datetime.now(timezone.utc)
+AIRTABLE_KEY = os.getenv("AIRTABLE_API_KEY")
+LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
+CAMPAIGNS_TABLE = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
+
+# ==============================================================
+# CORE UTILITIES
+# ==============================================================
+
+def _within_window(fields: Dict[str, Any]) -> bool:
+    """Check if current time is within campaign start/end window."""
     try:
-        start = fields.get("Start Date")
-        end = fields.get("End Date")
-        if start and datetime.fromisoformat(start) > now:
-            return False
-        if end and datetime.fromisoformat(end) < now:
-            return False
+        now = datetime.utcnow()
+        start_str = fields.get("Start Date")
+        end_str = fields.get("End Date")
+
+        if start_str:
+            start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            if now < start:
+                return False
+
+        if end_str:
+            end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            if now > end:
+                return False
+
         return True
     except Exception:
         return True
 
 
-# ───────────────────────────────────────────────
-def _queue_for_campaign(camp: dict, limit: int) -> int:
-    """Queue messages for leads under a campaign."""
-    cid = camp.get("id")
-    f = camp.get("fields", {})
-    name = f.get("Campaign Name", cid)
+def get_campaigns() -> Table:
+    """Return live Campaigns table from main Leads/Convos base."""
+    if not AIRTABLE_KEY or not LEADS_CONVOS_BASE:
+        raise RuntimeError("Missing Airtable environment configuration.")
+    return Table(AIRTABLE_KEY, LEADS_CONVOS_BASE, CAMPAIGNS_TABLE)
 
-    leads_tbl = get_leads()
-    drip_tbl = get_drip()
-    if not (leads_tbl and drip_tbl):
-        log.warning(f"⚠️ Missing Airtable tables for campaign {name}")
+
+# ==============================================================
+# MAIN LOGIC
+# ==============================================================
+
+def _queue_for_campaign(campaign: Dict[str, Any], limit: int) -> int:
+    """Queue messages for a given campaign."""
+    try:
+        from sms.outbound_batcher import queue_campaign
+        cid = campaign.get("id")
+        name = campaign.get("fields", {}).get("Campaign Name")
+        count = queue_campaign(cid, limit)
+        log.info(f"📤 Queued {count} messages for campaign → {name}")
+        return count
+    except Exception as e:
+        log.warning(f"⚠️ Failed to queue campaign: {e}")
+        traceback.print_exc()
         return 0
 
-    linked_leads = f.get("Leads") or []
-    if not linked_leads:
-        log.info(f"ℹ️ No linked leads for campaign {name}")
-        return 0
 
-    queued = 0
-    for lead_id in linked_leads[:limit]:
-        try:
-            lead = leads_tbl.get(lead_id)
-            lf = lead.get("fields", {})
-            msg = get_template("intro", lf)
-            queue_message(lf, msg, campaign_id=cid)
-            queued += 1
-        except Exception as e:
-            log.warning(f"⚠️ Lead queue failed in {name}: {e}")
-            traceback.print_exc()
-    log.info(f"✅ Queued {queued} messages for {name}")
-    return queued
-
-
-# ───────────────────────────────────────────────
 def run_campaigns(limit: Any = 50, send_after_queue: bool = True) -> Dict[str, Any]:
     """
     Auto-activate scheduled campaigns, queue active ones, and optionally trigger send_batch().
     """
     try:
         camp_tbl = get_campaigns()
-        if not camp_tbl:
-            return {"ok": False, "error": "Campaigns table unavailable"}
-
         campaigns = camp_tbl.all()
         if not campaigns:
             return {"ok": False, "error": "No campaigns found"}
@@ -119,8 +133,15 @@ def run_campaigns(limit: Any = 50, send_after_queue: bool = True) -> Dict[str, A
 
 
 def run_campaigns_sync(limit: Any = 50, send_after_queue: bool = True) -> Dict[str, Any]:
+    """Synchronous wrapper for manual or testing use."""
     return run_campaigns(limit=limit, send_after_queue=send_after_queue)
 
 
+# ==============================================================
+# MAIN ENTRY POINT
+# ==============================================================
+
 if __name__ == "__main__":
-    print(run_campaigns(limit=3))
+    log.info("🚀 Starting Campaign Runner (manual execution mode)")
+    result = run_campaigns(limit=5)
+    print(result)

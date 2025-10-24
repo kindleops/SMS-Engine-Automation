@@ -1,56 +1,80 @@
 """
-🚀 Outbound Message Batcher v3.1 (Telemetry Edition)
-────────────────────────────────────────────
-Adds:
- - KPI + Run telemetry
- - NumberPool counter sync
- - Structured logging
+🚀 Outbound Message Batcher v3.2 (Telemetry + No-Circulars Edition)
+────────────────────────────────────────────────────────────────────
+- No self-imports / circular imports
+- Quiet hours via DispatchPolicy
+- Per-number + global rate limiting
+- Robust Airtable read/update with field whitelist
+- Optional integrations (KPI, run logs, number pools, message sender)
 """
 
 from __future__ import annotations
-import os, re, time, traceback
+import os
+import re
+import time
+import traceback
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
-from sms.airtable_schema import DripStatus
+# ──────────────────────────────────────────────────────────────────────────────
+# Logging / policy
+# ──────────────────────────────────────────────────────────────────────────────
 from sms.runtime import get_logger
-
 log = get_logger("outbound")
 
-from sms.dispatcher import get_policy
+from sms.dispatcher import get_policy  # provides quiet hours + rate caps
 
-# Optional integrations
+# ──────────────────────────────────────────────────────────────────────────────
+# Schema + config
+# ──────────────────────────────────────────────────────────────────────────────
+from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
+from sms.airtable_schema import DripStatus
+
+# Optional integrations (all safe fallbacks)
 try:
     from sms.kpi_logger import log_kpi
-except Exception:
-
-    def log_kpi(*_a, **_k):
+except Exception:  # pragma: no cover
+    def log_kpi(*_a, **_k):  # type: ignore
         pass
-
 
 try:
     from sms.logger import log_run
-except Exception:
-
-    def log_run(*_a, **_k):
+except Exception:  # pragma: no cover
+    def log_run(*_a, **_k):  # type: ignore
         pass
-
 
 try:
     from sms.number_pools import increment_sent
-except Exception:
-
-    def increment_sent(*_a, **_k):
+except Exception:  # pragma: no cover
+    def increment_sent(*_a, **_k):  # type: ignore
         pass
 
-
+# Primary sender candidates (MessageProcessor preferred; fallback to textgrid_sender)
+MessageProcessor = None
 try:
-    from sms.message_processor import MessageProcessor
+    from sms.message_processor import MessageProcessor as _MP  # type: ignore
+    MessageProcessor = _MP
 except Exception:
-    MessageProcessor = None
+    try:
+        # Fallback: legacy sender with a simple signature
+        from sms.textgrid_sender import send_message as _legacy_send  # type: ignore
+        class _LegacyAdapter:
+            @staticmethod
+            def send(*, phone: str, body: str, from_number: str, property_id: Optional[str] = None, direction: str = "OUT") -> Dict[str, Any]:
+                # Legacy API often returns a SID or a dict. Normalize to {status: "sent"|...}
+                try:
+                    res = _legacy_send(to=phone, body=body, from_number=from_number)  # type: ignore
+                    ok = bool(res)
+                    return {"status": "sent" if ok else "failed", "raw": res}
+                except Exception as e:
+                    return {"status": "failed", "error": str(e)}
+        MessageProcessor = _LegacyAdapter
+    except Exception:
+        MessageProcessor = None  # no sender available
 
-# ========== CONFIG ==========
+# ──────────────────────────────────────────────────────────────────────────────
+# Runtime constants
+# ──────────────────────────────────────────────────────────────────────────────
 LEADS_BASE_ENV = "LEADS_CONVOS_BASE"
 DRIP_TABLE_NAME = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 NUMBERS_TABLE_NAME = os.getenv("NUMBERS_TABLE", "Numbers")
@@ -61,56 +85,175 @@ RATE_LIMIT_REQUEUE_SECONDS = float(os.getenv("RATE_LIMIT_REQUEUE_SECONDS", "30")
 NO_NUMBER_REQUEUE_SECONDS = float(os.getenv("NO_NUMBER_REQUEUE_SECONDS", "300"))
 AUTO_BACKFILL_FROM_NUMBER = os.getenv("AUTO_BACKFILL_FROM_NUMBER", "true").lower() in {"1", "true", "yes"}
 
-
-# ========== Utilities ==========
-def utcnow():
+# ──────────────────────────────────────────────────────────────────────────────
+# Utilities
+# ──────────────────────────────────────────────────────────────────────────────
+def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-
-def _iso(dt: datetime):
+def _iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat()
 
-
-def _parse_dt(val: Any, fallback: datetime):
+def _parse_dt(val: Any, fallback: datetime) -> datetime:
     try:
         return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
     except Exception:
         return fallback
 
-
 _PHONE_RE = re.compile(r"^\+1\d{10}$")
-
-
 def _valid_us_e164(s: Optional[str]) -> bool:
     return bool(s and _PHONE_RE.match(s))
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Airtable thin wrappers (no circulars)
+# ──────────────────────────────────────────────────────────────────────────────
+def _env(name: str, default: Optional[str] = None) -> Optional[str]:
+    v = os.getenv(name)
+    if v is None or not str(v).strip():
+        return default
+    return v.strip()
 
-# ========== Airtable Wrappers ==========
-from sms.outbound_batcher import get_table, build_limiter, _pick_number_for_market, is_quiet_hours_local
+def get_table(base_env_name: str, table_name: str):
+    """
+    Create a pyairtable.Table from env vars without touching other local modules.
+    """
+    try:
+        from pyairtable import Table  # type: ignore
+    except Exception as e:
+        log.error(f"pyairtable not available: {e}")
+        return None
 
+    api_key = _env("AIRTABLE_API_KEY")
+    if not api_key:
+        log.error("AIRTABLE_API_KEY missing")
+        return None
+
+    base_id = _env(base_env_name)
+    if not base_id:
+        log.error(f"{base_env_name} missing")
+        return None
+
+    try:
+        return Table(api_key, base_id, table_name)
+    except Exception as e:
+        log.error(f"Failed to init Table({base_env_name}, {table_name}): {e}")
+        return None
 
 def _safe_update(tbl, rid: str, payload: Dict[str, Any]) -> None:
+    """
+    Only allow updates to known DRIP fields. Avoids 422 from unknown fields.
+    """
     try:
-        whitelist = {DRIP_FIELDS[k] for k in ["STATUS", "NEXT_SEND_DATE", "SENT_AT", "LAST_ERROR", "FROM_NUMBER"]}
-        clean = {k: v for k, v in payload.items() if k in whitelist}
+        allow_keys = {k for k in [
+            "STATUS", "NEXT_SEND_DATE", "SENT_AT", "LAST_ERROR", "FROM_NUMBER"
+        ] if k in DRIP_FIELDS}
+
+        clean = {DRIP_FIELDS[k]: v for k, v in payload.items() if k in allow_keys}
         if clean:
             tbl.update(rid, clean)
     except Exception as e:
         log.warning(f"⚠️ Update failed: {e}", exc_info=True)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Rate limiter (per-DID + global) using DispatchPolicy caps
+# ──────────────────────────────────────────────────────────────────────────────
+class _RateLimiter:
+    def __init__(self, per_did_per_min: int, global_per_min: int):
+        self.per = max(1, per_did_per_min)
+        self.glob = max(1, global_per_min)
+        self._per_counts: Dict[str, Tuple[int, float]] = {}   # did -> (count, window_start_epoch)
+        self._global: Tuple[int, float] = (0, time.time())
 
-# ========== Core ==========
-def send_batch(campaign_id: str | None = None, limit: int = 500):
+    def _tick(self, key: str) -> bool:
+        now = time.time()
+        # per DID window
+        cnt, start = self._per_counts.get(key, (0, now))
+        if now - start >= 60.0:
+            cnt, start = 0, now
+        if cnt + 1 > self.per:
+            return False
+        # global window
+        gcnt, gstart = self._global
+        if now - gstart >= 60.0:
+            gcnt, gstart = 0, now
+        if gcnt + 1 > self.glob:
+            return False
+
+        # commit
+        self._per_counts[key] = (cnt + 1, start)
+        self._global = (gcnt + 1, gstart)
+        return True
+
+    def try_consume(self, did: str) -> bool:
+        return self._tick(did)
+
+def build_limiter() -> _RateLimiter:
+    p = get_policy()
+    return _RateLimiter(p.rate_per_number_per_min, p.global_rate_per_min)
+
+def is_quiet_hours_local() -> bool:
+    return get_policy().is_quiet()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Number selection (simple, robust)
+# ──────────────────────────────────────────────────────────────────────────────
+def _pick_number_for_market(market: Optional[str]) -> Optional[str]:
+    """
+    Pick an active sender DID from Numbers table, preferring the specified market.
+    Falls back to any active number if none found for the market.
+    """
+    tbl = get_table(LEADS_BASE_ENV, NUMBERS_TABLE_NAME)
+    if not tbl:
+        return None
+
+    def _first_or_none(records: List[Dict[str, Any]]) -> Optional[str]:
+        for r in records or []:
+            fields = r.get("fields", {})
+            # Allow common field names
+            did = fields.get("Number") or fields.get("phone") or fields.get("Name")
+            active = fields.get("Active")
+            status = (fields.get("Status") or "").strip().lower()
+            if did and (active is True or str(active).lower() in {"1", "true", "yes"} or status == "active"):
+                s = str(did).strip()
+                if s.startswith("+1") and len(s) == 12:
+                    return s
+        return None
+
+    try:
+        # Prefer market match
+        if market:
+            recs = tbl.all(filterByFormula=f"LOWER({{Market}}) = '{str(market).strip().lower()}'")
+            did = _first_or_none(recs)
+            if did:
+                return did
+
+        # Fallback: any active
+        recs = tbl.all(filterByFormula="OR({Active} = 1, LOWER({Status}) = 'active')")
+        return _first_or_none(recs)
+    except Exception as e:  # pragma: no cover
+        log.warning(f"Number pick failed: {e}")
+        return None
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Core batch sender
+# ──────────────────────────────────────────────────────────────────────────────
+def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str, Any]:
+    """
+    Process due rows in Drip Queue and attempt to send messages.
+    Respects quiet hours and rate limits. Never crashes the process.
+    """
     drip_tbl = get_table(LEADS_BASE_ENV, DRIP_TABLE_NAME)
     if not drip_tbl:
-        return {"ok": False, "error": "missing drip table", "total_sent": 0}
+        return {"ok": False, "error": "missing_drip_table", "total_sent": 0}
 
+    # Quiet hours guard
     if is_quiet_hours_local():
         log.info("⏸️ Quiet hours active — skipping send cycle.")
         log_kpi("BATCH_SKIPPED_QUIET", 1)
         log_run("OUTBOUND_BATCH", processed=0, breakdown={"quiet_hours": True})
         return {"ok": True, "quiet_hours": True, "total_sent": 0}
 
+    # Read queue
     try:
         rows = drip_tbl.all()
     except Exception as e:
@@ -118,130 +261,150 @@ def send_batch(campaign_id: str | None = None, limit: int = 500):
         return {"ok": False, "error": "read_failed", "total_sent": 0}
 
     now = utcnow()
-    due = [
-        r
-        for r in rows
-        if (status := str(r.get("fields", {}).get(DRIP_FIELDS["STATUS"], "")).strip())
-        in (DripStatus.QUEUED.value, DripStatus.READY.value, DripStatus.SENDING.value)
-        and _parse_dt(r.get("fields", {}).get(DRIP_FIELDS["NEXT_SEND_DATE"]), now) <= now
-    ]
 
-    if campaign_id:
-        due = [r for r in due if campaign_id in {str(x) for x in (r["fields"].get(DRIP_FIELDS["CAMPAIGN_LINK"]) or [])}]
+    # Determine canonical field names safely
+    F = DRIP_FIELDS  # shorthand
+
+    status_key          = F.get("STATUS", "Status")
+    next_send_date_key  = F.get("NEXT_SEND_DATE", "Next Send Date")
+    seller_phone_key    = F.get("SELLER_PHONE", "Seller Phone Number")
+    from_number_key     = F.get("FROM_NUMBER", "TextGrid Phone Number")
+    market_key          = F.get("MARKET", "Market")
+    message_preview_key = F.get("MESSAGE_PREVIEW", "Message Preview")
+    property_id_key     = F.get("PROPERTY_ID", "Property ID")
+    campaign_link_key   = F.get("CAMPAIGN_LINK", "Campaign")
+
+    # Filter for due rows
+    due: List[Dict[str, Any]] = []
+    for r in rows:
+        f = r.get("fields", {})
+        status = str(f.get(status_key, "")).strip()
+        if status not in (DripStatus.QUEUED.value, DripStatus.READY.value, DripStatus.SENDING.value):
+            continue
+        due_at = _parse_dt(f.get(next_send_date_key), now)
+        if due_at <= now:
+            if campaign_id:
+                links = f.get(campaign_link_key) or []
+                link_ids = {str(x) for x in links} if isinstance(links, list) else {str(links)}
+                if campaign_id not in link_ids:
+                    continue
+            due.append(r)
 
     if not due:
         return {"ok": True, "total_sent": 0, "note": "no_due_messages"}
 
-    due = sorted(due, key=lambda x: _parse_dt(x["fields"].get(DRIP_FIELDS["NEXT_SEND_DATE"]), now))[:limit]
+    # Order oldest first, respect limit
+    due = sorted(due, key=lambda x: _parse_dt(x.get("fields", {}).get(next_send_date_key), now))[: max(1, int(limit))]
+
     limiter = build_limiter()
-    total_sent, total_failed, errors = 0, 0, []
+    total_sent = 0
+    total_failed = 0
+    errors: List[str] = []
 
     for r in due:
-        rid, f = r["id"], r.get("fields", {})
-        phone = (f.get(DRIP_FIELDS["SELLER_PHONE"]) or "").strip()
-        did = (f.get(DRIP_FIELDS["FROM_NUMBER"]) or "").strip()
-        market = f.get(DRIP_FIELDS["MARKET"])
-        body = (f.get(DRIP_FIELDS["MESSAGE_PREVIEW"]) or "").strip()
-        property_id = f.get(DRIP_FIELDS["PROPERTY_ID"])
+        rid = r.get("id")
+        f = r.get("fields", {}) or {}
 
+        phone = (f.get(seller_phone_key) or "").strip()
+        did = (f.get(from_number_key) or "").strip()
+        market = f.get(market_key)
+        body = (f.get(message_preview_key) or "").strip()
+        property_id = f.get(property_id_key)
+
+        # Validate phone
         if not _valid_us_e164(phone):
-            _safe_update(
-                drip_tbl,
-                rid,
-                {
-                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                    DRIP_FIELDS["LAST_ERROR"]: "invalid_phone",
-                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
-                },
-            )
+            _safe_update(drip_tbl, rid, {
+                "STATUS": DripStatus.READY.value,
+                "LAST_ERROR": "invalid_phone",
+                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
+            })
             total_failed += 1
             continue
 
+        # Validate body
         if not body:
-            _safe_update(
-                drip_tbl,
-                rid,
-                {
-                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                    DRIP_FIELDS["LAST_ERROR"]: "empty_message",
-                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
-                },
-            )
+            _safe_update(drip_tbl, rid, {
+                "STATUS": DripStatus.READY.value,
+                "LAST_ERROR": "empty_message",
+                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
+            })
             total_failed += 1
             continue
 
+        # Ensure DID
         if not did and AUTO_BACKFILL_FROM_NUMBER:
             did = _pick_number_for_market(market)
             if did:
-                _safe_update(drip_tbl, rid, {DRIP_FIELDS["FROM_NUMBER"]: did})
+                _safe_update(drip_tbl, rid, {"FROM_NUMBER": did})
+
         if not did:
-            _safe_update(
-                drip_tbl,
-                rid,
-                {
-                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                    DRIP_FIELDS["LAST_ERROR"]: "no_did",
-                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=NO_NUMBER_REQUEUE_SECONDS)),
-                },
-            )
+            _safe_update(drip_tbl, rid, {
+                "STATUS": DripStatus.READY.value,
+                "LAST_ERROR": "no_did",
+                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=NO_NUMBER_REQUEUE_SECONDS)),
+            })
             total_failed += 1
             continue
 
+        # Rate limit
         if not limiter.try_consume(did):
-            _safe_update(
-                drip_tbl,
-                rid,
-                {
-                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                    DRIP_FIELDS["LAST_ERROR"]: "rate_limited",
-                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=RATE_LIMIT_REQUEUE_SECONDS)),
-                },
-            )
+            _safe_update(drip_tbl, rid, {
+                "STATUS": DripStatus.READY.value,
+                "LAST_ERROR": "rate_limited",
+                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=RATE_LIMIT_REQUEUE_SECONDS)),
+            })
             continue
 
-        _safe_update(drip_tbl, rid, {DRIP_FIELDS["STATUS"]: DripStatus.SENDING.value})
+        # Transition to SENDING
+        _safe_update(drip_tbl, rid, {"STATUS": DripStatus.SENDING.value})
+
         delivered = False
         try:
-            if MessageProcessor:
-                res = MessageProcessor.send(phone=phone, body=body, from_number=did, property_id=property_id, direction="OUT")
-                delivered = bool(res and res.get("status") == "sent")
-        except Exception as e:
+            if MessageProcessor is None:
+                raise RuntimeError("no_sender_available")
+            res = MessageProcessor.send(  # type: ignore[attr-defined]
+                phone=phone,
+                body=body,
+                from_number=did,
+                property_id=property_id,
+                direction="OUT",
+            )
+            delivered = bool(res and str(res.get("status", "")).lower() in {"sent", "delivered"})
+        except Exception as e:  # pragma: no cover
             errors.append(str(e))
             delivered = False
 
         if delivered:
             total_sent += 1
-            _safe_update(
-                drip_tbl,
-                rid,
-                {
-                    DRIP_FIELDS["STATUS"]: DripStatus.SENT.value,
-                    DRIP_FIELDS["SENT_AT"]: _iso(utcnow()),
-                    DRIP_FIELDS["LAST_ERROR"]: "",
-                },
-            )
-            increment_sent(did)
+            _safe_update(drip_tbl, rid, {
+                "STATUS": DripStatus.SENT.value,
+                "SENT_AT": _iso(utcnow()),
+                "LAST_ERROR": "",
+            })
+            try:
+                increment_sent(did)
+            except Exception:
+                pass
             log_kpi("OUTBOUND_SENT", 1, campaign=campaign_id or "ALL")
         else:
             total_failed += 1
-            _safe_update(
-                drip_tbl,
-                rid,
-                {
-                    DRIP_FIELDS["STATUS"]: DripStatus.READY.value,
-                    DRIP_FIELDS["LAST_ERROR"]: "send_failed",
-                    DRIP_FIELDS["NEXT_SEND_DATE"]: _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
-                },
-            )
+            _safe_update(drip_tbl, rid, {
+                "STATUS": DripStatus.READY.value,
+                "LAST_ERROR": "send_failed",
+                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
+            })
             log_kpi("OUTBOUND_FAILED_SOFT", 1)
 
-        if SLEEP_BETWEEN_SENDS_SEC:
+        if SLEEP_BETWEEN_SENDS_SEC > 0:
             time.sleep(SLEEP_BETWEEN_SENDS_SEC)
 
-    # Summary + telemetry
-    delivery_rate = (total_sent / (total_sent + total_failed) * 100) if (total_sent + total_failed) else 0
+    # Telemetry
+    attempts = total_sent + total_failed
+    delivery_rate = (total_sent / attempts * 100.0) if attempts else 0.0
     log_kpi("OUTBOUND_DELIVERY_RATE", delivery_rate)
-    log_run("OUTBOUND_BATCH", processed=total_sent, breakdown={"sent": total_sent, "failed": total_failed, "errors": len(errors)})
+    log_run("OUTBOUND_BATCH", processed=total_sent, breakdown={
+        "sent": total_sent, "failed": total_failed, "errors": len(errors)
+    })
     log.info(f"✅ Batch complete — sent={total_sent}, failed={total_failed}, rate={delivery_rate:.1f}%")
 
     return {"ok": True, "total_sent": total_sent, "total_failed": total_failed, "errors": errors}
