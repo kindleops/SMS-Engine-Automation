@@ -1,6 +1,6 @@
 """
-📦 TextGrid Delivery Status Handler (bulletproof)
--------------------------------------------------
+📦 TextGrid Delivery Status Handler (v2.1 – Spec-Aligned)
+---------------------------------------------------------
 Unified webhook that logs delivery/failure KPIs safely into Airtable.
 Fully idempotent, provider-agnostic, and telemetry-rich.
 """
@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, Request, Header
 
-# ---------------- optional deps ----------------
+# ────────────────────────────────────────────────
+# Optional deps
+# ────────────────────────────────────────────────
 try:
     from pyairtable import Table as _AirTable
 except ImportError:
@@ -27,10 +29,20 @@ try:
 except ImportError:
     requests = None
 
-# ---------------- router ----------------
+# ────────────────────────────────────────────────
+# Internal imports (shared spec)
+# ────────────────────────────────────────────────
+try:
+    from sms.spec import normalize_delivery_status
+except ImportError:
+    def normalize_delivery_status(v: str) -> str:
+        return str(v or "").upper()
+
+# ────────────────────────────────────────────────
+# Router & ENV
+# ────────────────────────────────────────────────
 router = APIRouter(tags=["Status"])
 
-# ---------------- env ----------------
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
 TEMPLATES_TABLE_NAME = os.getenv("TEMPLATES_TABLE", "Templates")
@@ -39,7 +51,11 @@ CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 TEMPLATE_DELIVERED_FIELD = os.getenv("TEMPLATE_DELIVERED_FIELD", "Delivered")
 TEMPLATE_FAILED_FIELD = os.getenv("TEMPLATE_FAILED_FIELD", "Failed Deliveries")
 
-WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN") or os.getenv("TEXTGRID_AUTH_TOKEN") or os.getenv("CRON_TOKEN")
+WEBHOOK_TOKEN = (
+    os.getenv("WEBHOOK_TOKEN")
+    or os.getenv("TEXTGRID_AUTH_TOKEN")
+    or os.getenv("CRON_TOKEN")
+)
 
 REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
 REDIS_TLS = os.getenv("REDIS_TLS", "true").lower() in ("1", "true", "yes")
@@ -48,7 +64,9 @@ UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
 KEY_PREFIX = os.getenv("RATE_LIMIT_KEY_PREFIX", "sms")
 
-# ---------------- helpers ----------------
+# ────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -74,9 +92,7 @@ def _auto_field_map(tbl) -> Dict[str, str]:
 
 def _remap_existing_only(tbl, patch: Dict) -> Dict:
     amap = _auto_field_map(tbl)
-    if not amap:
-        return patch
-    return {amap.get(_norm(k), k): v for k, v in patch.items() if amap.get(_norm(k))}
+    return {amap.get(_norm(k), k): v for k, v in patch.items() if amap.get(_norm(k))} if amap else patch
 
 def _safe_update(tbl, rec_id: str, patch: Dict):
     try:
@@ -112,14 +128,19 @@ def _increment_numeric(tbl, rec_id: str, field_name: str, by: int = 1) -> bool:
         traceback.print_exc()
         return False
 
-# ---------------- idempotency store ----------------
+# ────────────────────────────────────────────────
+# Idempotency layer
+# ────────────────────────────────────────────────
 class _Idempotency:
     def __init__(self):
         self.mem = set()
         self.r = None
         if REDIS_URL and _redis:
             try:
-                self.r = _redis.from_url(REDIS_URL, ssl=REDIS_TLS, decode_responses=True, socket_timeout=3)
+                self.r = _redis.from_url(
+                    REDIS_URL, ssl=REDIS_TLS, decode_responses=True, socket_timeout=3
+                )
+                print("✅ Redis connected for status handler")
             except Exception:
                 traceback.print_exc()
                 self.r = None
@@ -130,32 +151,44 @@ class _Idempotency:
         return f"{KEY_PREFIX}:status:{h}"
 
     def seen(self, sid: Optional[str]) -> bool:
-        """Returns True if duplicate (already processed)."""
+        """Return True if duplicate (already processed)."""
         if not sid:
             return False
         key = self._key(sid)
+
         # Redis direct
         if self.r:
             try:
                 with self.r.pipeline() as p:
                     p.setnx(key, "1")
-                    p.expire(key, 6 * 60 * 60)
+                    p.expire(key, 21600)  # 6h
                     rv = p.execute()
                 return not bool(rv and rv[0])
             except Exception:
+                print("⚠️ Redis error, falling back to memory cache")
                 traceback.print_exc()
+
         # Upstash REST
         if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and requests:
             try:
-                g = requests.post(f"{UPSTASH_REDIS_REST_URL}/get/{key}",
-                    headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}, timeout=2)
+                g = requests.post(
+                    f"{UPSTASH_REDIS_REST_URL}/get/{key}",
+                    headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+                    timeout=2,
+                )
                 if g.ok and g.json().get("result") is not None:
                     return True
-                requests.post(f"{UPSTASH_REDIS_REST_URL}/pipeline",
+                requests.post(
+                    f"{UPSTASH_REDIS_REST_URL}/pipeline",
                     json=[["SETNX", key, "1"], ["EXPIRE", key, "21600"]],
-                    headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"}, timeout=2)
+                    headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+                    timeout=2,
+                )
+                return False
             except Exception:
+                print("⚠️ Upstash fallback error")
                 traceback.print_exc()
+
         # In-memory fallback
         if key in self.mem:
             return True
@@ -164,23 +197,21 @@ class _Idempotency:
 
 IDEM = _Idempotency()
 
-# ---------------- payload extraction ----------------
+# ────────────────────────────────────────────────
+# Payload extraction
+# ────────────────────────────────────────────────
 def _extract_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize across Twilio, TextGrid, Telnyx, etc."""
     def pick(d, *keys): return next((d[k] for k in keys if k in d), None)
     sid = pick(data, "sid", "message_sid", "MessageSid", "id")
     status = str(pick(data, "status", "message_status", "MessageStatus") or "").lower()
     template_id = pick(data, "template_id", "Template", "TemplateId", "template")
+    provider = pick(data, "provider", "source") or "textgrid"
+    return {"sid": sid, "status": status, "template_id": template_id, "provider": provider}
 
-    if status in {"delivered", "success", "delivrd"}:
-        norm = "delivered"
-    elif status in {"failed", "undelivered", "error", "blocked", "expired"}:
-        norm = "failed"
-    else:
-        norm = status or "sent"
-    return {"sid": sid, "status": norm, "template_id": template_id}
-
-# ---------------- fallback: resolve template from Conversations ----------------
+# ────────────────────────────────────────────────
+# Template fallback lookup
+# ────────────────────────────────────────────────
 def _resolve_template_from_convos(sid: Optional[str]) -> Optional[str]:
     if not sid or not (AIRTABLE_API_KEY and LEADS_CONVOS_BASE and _AirTable):
         return None
@@ -203,7 +234,9 @@ def _resolve_template_from_convos(sid: Optional[str]) -> Optional[str]:
         traceback.print_exc()
         return None
 
-# ---------------- KPI logger ----------------
+# ────────────────────────────────────────────────
+# KPI logger
+# ────────────────────────────────────────────────
 def log_template_kpi(template_id: str, delivered: bool):
     """Increment Template KPIs safely."""
     if not template_id:
@@ -222,18 +255,16 @@ def log_template_kpi(template_id: str, delivered: bool):
     else:
         print(f"⚠️ Field '{field}' not found on Templates table")
 
-# ---------------- route ----------------
+# ────────────────────────────────────────────────
+# Endpoint
+# ────────────────────────────────────────────────
 @router.post("/status")
-async def delivery_status(
-    req: Request,
-    x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
-):
+async def delivery_status(req: Request, x_webhook_token: Optional[str] = Header(None, convert_underscores=False)):
     """Universal webhook endpoint for all SMS provider delivery receipts."""
-    # --- Auth check ---
     if WEBHOOK_TOKEN and x_webhook_token != WEBHOOK_TOKEN:
         return {"ok": False, "error": "unauthorized"}
 
-    # --- Parse incoming payload ---
+    # Parse payload
     try:
         try:
             data = await req.json()
@@ -247,22 +278,40 @@ async def delivery_status(
         data = {}
 
     parsed = _extract_payload(data)
-    sid, status, template_id = parsed.get("sid"), parsed.get("status"), parsed.get("template_id")
+    sid = parsed.get("sid")
+    provider = parsed.get("provider") or "unknown"
+    raw_status = parsed.get("status", "")
+    template_id = parsed.get("template_id")
 
-    print(f"📡 Delivery Status → sid={sid or 'N/A'} | status={status or 'N/A'}")
+    normalized = normalize_delivery_status(raw_status)
 
-    # --- Idempotency check ---
+    print(f"📡 {provider.upper()} Delivery → sid={sid or 'N/A'} | status={normalized}")
+
+    # Idempotency
     if IDEM.seen(sid):
-        return {"ok": True, "sid": sid, "status": status, "note": "duplicate ignored"}
+        return {
+            "ok": True,
+            "sid": sid,
+            "status": normalized,
+            "note": "duplicate ignored",
+            "processed_at": _now_iso(),
+        }
 
-    # --- Fallback: resolve missing template link ---
+    # Resolve missing template
     if not template_id:
         template_id = _resolve_template_from_convos(sid)
 
-    # --- KPI tracking ---
-    if status == "delivered":
+    # KPI tracking
+    if normalized == "DELIVERED":
         log_template_kpi(template_id, True)
-    elif status == "failed":
+    elif normalized in {"FAILED", "UNDELIVERED"}:
         log_template_kpi(template_id, False)
 
-    return {"ok": True, "sid": sid, "status": status, "template_id": template_id}
+    return {
+        "ok": True,
+        "sid": sid,
+        "status": normalized,
+        "provider": provider,
+        "template_id": template_id,
+        "processed_at": _now_iso(),
+    }

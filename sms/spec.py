@@ -1,40 +1,32 @@
-"""Authoritative schema and runtime policy derived from README2.md.
+"""
+🧠 Authoritative Schema & Runtime Policy (v3.1 – Telemetry Edition)
+────────────────────────────────────────────────────────────────────
+Central source of truth for field names, allowed values, and behavioural
+rules across the SMS Engine.
 
-This module centralises the canonical field names, select options, and
-behavioural rules for the SMS engine.  Every other module imports from this
-file to guarantee that the implementation matches the product specification.
-
-The intent of concentrating the specification here is twofold:
-
-1.  Provide a single source of truth for field names so that Airtable tables
-    and in-memory fallbacks stay aligned with the README contract.
-2.  Expose helper utilities (stage progression, intent promotion, quiet-hour
-    checks, etc.) that orchestrators can rely on without duplicating logic.
-
-Whenever the README contract changes we only need to update this module; the
-rest of the code automatically follows the new policy.
+Every module (scheduler, dispatcher, AI router, etc.) imports from here to
+stay consistent with the product contract. Updating this file automatically
+propagates schema and logic changes to the rest of the system.
 """
 
 from __future__ import annotations
-
-import os
-import re
+import os, re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Iterable, Optional
-
+from enum import Enum
 
 # ---------------------------------------------------------------------------
-# Field helpers
+# Env helper
 # ---------------------------------------------------------------------------
-
 
 def _env(name: str, default: str) -> str:
-    value = os.getenv(name)
-    if value is None or str(value).strip() == "":
-        return default
-    return str(value)
+    v = os.getenv(name)
+    return default if not v or not str(v).strip() else str(v)
 
+# ---------------------------------------------------------------------------
+# Field definitions
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class ConversationFields:
@@ -113,78 +105,77 @@ LEAD_FIELDS = LeadFields()
 NUMBER_FIELDS = NumbersFields()
 CAMPAIGN_FIELDS = CampaignFields()
 
+# ---------------------------------------------------------------------------
+# Enumerations
+# ---------------------------------------------------------------------------
+
+class Stage(str, Enum):
+    STAGE_1 = "STAGE 1 - OWNERSHIP CONFIRMATION"
+    STAGE_2 = "STAGE 2 - INTEREST FEELER"
+    STAGE_3 = "STAGE 3 - PRICE QUALIFICATION"
+    STAGE_4 = "STAGE 4 - PROPERTY CONDITION"
+    STAGE_5 = "STAGE 5 - MOTIVATION / TIMELINE"
+    STAGE_6 = "STAGE 6 - OFFER FOLLOW UP"
+    STAGE_7 = "STAGE 7 - CONTRACT READY"
+    STAGE_8 = "STAGE 8 - CONTRACT SENT"
+    STAGE_9 = "STAGE 9 - CONTRACT FOLLOW UP"
+    OPT_OUT = "OPT OUT"
+    DNC = "DNC"
+
+
+class Intent(str, Enum):
+    POSITIVE = "Positive"
+    NEUTRAL = "Neutral"
+    DELAY = "Delay"
+    REJECT = "Reject"
+    DNC = "DNC"
+
+
+class AIIntent(str, Enum):
+    INTRO = "intro"
+    WHO_IS_THIS = "who_is_this"
+    HOW_GOT_NUMBER = "how_got_number"
+    INTEREST = "interest_detected"
+    ASK_PRICE = "ask_price"
+    OFFER_DISCUSSION = "offer_discussion"
+    MOTIVATION = "motivation_detected"
+    CONDITION = "condition_question"
+    NOT_INTERESTED = "not_interested"
+    WRONG_NUMBER = "wrong_number"
+    DELAY = "delay"
+    NEUTRAL = "neutral"
+    OTHER = "other"
+    TIMELINE = "timeline_question"
+
+
+class DeliveryStatus(str, Enum):
+    QUEUED = "QUEUED"
+    SENT = "SENT"
+    DELIVERED = "DELIVERED"
+    FAILED = "FAILED"
+    UNDELIVERED = "UNDELIVERED"
+    OPT_OUT = "OPT OUT"
+
+# Canonical stage constants (for readability)
+STAGE_OWNERSHIP = Stage.STAGE_1.value
+STAGE_INTEREST = Stage.STAGE_2.value
 
 # ---------------------------------------------------------------------------
-# Enumerations & policy constants
+# Static tuples and mappings (backward compatible)
 # ---------------------------------------------------------------------------
 
-STAGES: tuple[str, ...] = (
-    "STAGE 1 - OWNERSHIP CONFIRMATION",
-    "STAGE 2 - INTEREST FEELER",
-    "STAGE 3 - PRICE QUALIFICATION",
-    "STAGE 4 - PROPERTY CONDITION",
-    "STAGE 5 - MOTIVATION / TIMELINE",
-    "STAGE 6 - OFFER FOLLOW UP",
-    "STAGE 7 - CONTRACT READY",
-    "STAGE 8 - CONTRACT SENT",
-    "STAGE 9 - CONTRACT FOLLOW UP",
-    "OPT OUT",
-    "DNC",
-)
-
-INTENTS: tuple[str, ...] = (
-    "Positive",
-    "Neutral",
-    "Delay",
-    "Reject",
-    "DNC",
-)
-
-AI_INTENTS: tuple[str, ...] = (
-    "intro",
-    "who_is_this",
-    "how_got_number",
-    "interest_detected",
-    "ask_price",
-    "offer_discussion",
-    "motivation_detected",
-    "condition_question",
-    "not_interested",
-    "wrong_number",
-    "delay",
-    "neutral",
-    "other",
-    "timeline_question",
-)
+STAGES = tuple(s.value for s in Stage)
+INTENTS = tuple(i.value for i in Intent)
+AI_INTENTS = tuple(a.value for a in AIIntent)
 
 STOP_TERMS = {
-    "stop",
-    "unsubscribe",
-    "remove",
-    "opt out",
-    "opt-out",
-    "optout",
-    "quit",
+    "stop", "unsubscribe", "remove", "opt out", "opt-out", "optout", "quit",
 }
 
-PROMOTION_INTENTS = {
-    "Positive",
-    "interest_detected",
-    "offer_discussion",
-    "ask_price",
-}
+PROMOTION_INTENTS = {"Positive", "interest_detected", "offer_discussion", "ask_price"}
+PROMOTION_MIN_STAGE_INDEX = STAGES.index(Stage.STAGE_3.value)
 
-PROMOTION_MIN_STAGE_INDEX = STAGES.index("STAGE 3 - PRICE QUALIFICATION")
-
-DELIVERY_STATUS_VALUES = {
-    "QUEUED",
-    "SENT",
-    "DELIVERED",
-    "FAILED",
-    "UNDELIVERED",
-    "OPT OUT",
-}
-
+DELIVERY_STATUS_VALUES = set(s.value for s in DeliveryStatus)
 NORMALIZED_DELIVERY_STATUSES = {
     "queued": "QUEUED",
     "sent": "SENT",
@@ -197,6 +188,11 @@ NORMALIZED_DELIVERY_STATUSES = {
     "canceled": "FAILED",
 }
 
+MODEL_PRIORITY = ("AI: Phi-3 Mini", "AI: Mistral 7B", "AI: Gemma 2", "AI: GPT-4o")
+
+# ---------------------------------------------------------------------------
+# Delivery & stage logic
+# ---------------------------------------------------------------------------
 
 def normalize_delivery_status(value: str) -> str:
     if not value:
@@ -204,95 +200,47 @@ def normalize_delivery_status(value: str) -> str:
     key = re.sub(r"[^a-z]", "", value.strip().lower())
     return NORMALIZED_DELIVERY_STATUSES.get(key, value.upper())
 
+STAGE_INDEX: Dict[str, int] = {s: i for i, s in enumerate(STAGES)}
 
-MODEL_PRIORITY = (
-    "AI: Phi-3 Mini",
-    "AI: Mistral 7B",
-    "AI: Gemma 2",
-    "AI: GPT-4o",
-)
-
-
-# ---------------------------------------------------------------------------
-# Time helpers & quiet hours
-# ---------------------------------------------------------------------------
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def iso_now() -> str:
-    return utc_now().isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def quiet_hours_enforced() -> bool:
-    value = os.getenv("QUIET_HOURS_ENFORCED", "true").strip().lower()
-    return value in {"1", "true", "yes", "on"}
-
-
-def quiet_hour_window() -> tuple[int, int]:
-    start = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))
-    end = int(os.getenv("QUIET_END_HOUR_LOCAL", "9"))
-    return start, end
-
-
-def is_quiet_hours(now: Optional[datetime] = None) -> bool:
-    if not quiet_hours_enforced():
-        return False
-    now = now or datetime.now()
-    start, end = quiet_hour_window()
-    hour = now.hour
-    return (hour >= start) or (hour < end)
-
-
-# ---------------------------------------------------------------------------
-# Stage logic helpers
-# ---------------------------------------------------------------------------
-
-
-STAGE_INDEX: Dict[str, int] = {stage: idx for idx, stage in enumerate(STAGES)}
-
-
-def max_stage(current_stage: Optional[str], candidate_stage: Optional[str]) -> str:
-    """Return the highest-priority stage between current and candidate."""
-
-    if candidate_stage is None and current_stage is None:
+def max_stage(current: Optional[str], candidate: Optional[str]) -> str:
+    """Return higher-priority stage between current and candidate."""
+    if candidate is None and current is None:
         return STAGES[0]
-    if candidate_stage is None:
-        return current_stage or STAGES[0]
-    if current_stage is None:
-        return candidate_stage
+    if candidate is None:
+        return current or STAGES[0]
+    if current is None:
+        return candidate
+    ci, ni = STAGE_INDEX.get(current, -1), STAGE_INDEX.get(candidate, -1)
+    return candidate if ni > ci else current
 
-    current_index = STAGE_INDEX.get(current_stage, -1)
-    candidate_index = STAGE_INDEX.get(candidate_stage, -1)
-    return candidate_stage if candidate_index > current_index else current_stage
-
+def next_stage(stage: str) -> Optional[str]:
+    """Return next sequential stage or None if at final."""
+    idx = STAGE_INDEX.get(stage, -1)
+    if idx >= 0 and idx + 1 < len(STAGES):
+        return STAGES[idx + 1]
+    return None
 
 def stage_for_intent(intent: Optional[str]) -> Optional[str]:
     if not intent:
         return None
     normalized = intent.strip().lower()
     if normalized in {"interest_detected", "offer_discussion", "ask_price"}:
-        return "STAGE 3 - PRICE QUALIFICATION"
+        return Stage.STAGE_3.value
     if normalized in {"motivation_detected", "timeline_question"}:
-        return "STAGE 5 - MOTIVATION / TIMELINE"
+        return Stage.STAGE_5.value
     if normalized in {"condition_question"}:
-        return "STAGE 4 - PROPERTY CONDITION"
+        return Stage.STAGE_4.value
     if normalized in {"intro", "who_is_this", "how_got_number"}:
-        return "STAGE 1 - OWNERSHIP CONFIRMATION"
+        return Stage.STAGE_1.value
     if normalized in {"delay", "neutral"}:
-        return "STAGE 2 - INTEREST FEELER"
-    if normalized in {"other"}:
-        return None
+        return Stage.STAGE_2.value
     if normalized in {"not_interested", "wrong_number"}:
-        return "STAGE 2 - INTEREST FEELER"
+        return Stage.STAGE_2.value
     return None
 
-
 def should_promote(intent_detected: Optional[str], ai_intent: Optional[str], stage: Optional[str]) -> bool:
-    stage_index = STAGE_INDEX.get(stage or "", -1)
-    if stage_index >= PROMOTION_MIN_STAGE_INDEX:
+    idx = STAGE_INDEX.get(stage or "", -1)
+    if idx >= PROMOTION_MIN_STAGE_INDEX:
         return True
     if intent_detected and intent_detected.strip() in PROMOTION_INTENTS:
         return True
@@ -300,11 +248,26 @@ def should_promote(intent_detected: Optional[str], ai_intent: Optional[str], sta
         return True
     return False
 
-
 # ---------------------------------------------------------------------------
-# Rate limit configuration
+# Quiet hours / rate limits
 # ---------------------------------------------------------------------------
 
+def quiet_hours_enforced() -> bool:
+    v = os.getenv("QUIET_HOURS_ENFORCED", "true").strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+def quiet_hour_window() -> tuple[int, int]:
+    start = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))
+    end = int(os.getenv("QUIET_END_HOUR_LOCAL", "9"))
+    return start, end
+
+def is_quiet_hours(now: Optional[datetime] = None) -> bool:
+    if not quiet_hours_enforced():
+        return False
+    now = now or datetime.now()
+    s, e = quiet_hour_window()
+    h = now.hour
+    return (h >= s) or (h < e)
 
 def rate_limits() -> Dict[str, int]:
     return {
@@ -314,29 +277,16 @@ def rate_limits() -> Dict[str, int]:
         "jitter_seconds": int(os.getenv("JITTER_SECONDS", "2")),
     }
 
-
 # ---------------------------------------------------------------------------
-# Auth helpers
+# STOP / phone / misc helpers
 # ---------------------------------------------------------------------------
 
-
-def webhook_token() -> Optional[str]:
-    return os.getenv("WEBHOOK_TOKEN")
-
-
-def cron_token() -> Optional[str]:
-    return os.getenv("CRON_TOKEN")
-
+def detect_opt_out(message: str) -> bool:
+    msg = (message or "").lower().strip()
+    return any(term in msg for term in STOP_TERMS)
 
 def valid_stop_payload(body: str) -> bool:
-    normalized = re.sub(r"\s+", " ", body or "").strip().lower()
-    return normalized in STOP_TERMS
-
-
-# ---------------------------------------------------------------------------
-# Phone normalisation helpers
-# ---------------------------------------------------------------------------
-
+    return detect_opt_out(body)
 
 def normalize_phone(raw: Optional[str]) -> Optional[str]:
     if raw is None:
@@ -356,42 +306,52 @@ def normalize_phone(raw: Optional[str]) -> Optional[str]:
         return raw
     return "+" + digits if digits else None
 
-
 def last_10_digits(phone: Optional[str]) -> Optional[str]:
     digits = re.sub(r"\D", "", phone or "")
-    if len(digits) >= 10:
-        return digits[-10:]
-    return None
-
+    return digits[-10:] if len(digits) >= 10 else None
 
 PHONE_FIELD_CANDIDATES = (
     "Seller Phone Number",
-    "Phone",
-    "Mobile",
-    "Cell",
-    "Phone Number",
-    "Primary Phone",
-    "Owner Phone",
+    "Phone", "Mobile", "Cell", "Phone Number",
+    "Primary Phone", "Owner Phone",
 )
 
-
-def record_matches_phone(record_fields: Dict[str, object], phone: str) -> bool:
+def record_matches_phone(fields: Dict[str, object], phone: str) -> bool:
     wanted = last_10_digits(phone)
     if not wanted:
         return False
-    for field in PHONE_FIELD_CANDIDATES:
-        value = record_fields.get(field)
-        if value and last_10_digits(str(value)) == wanted:
+    for f in PHONE_FIELD_CANDIDATES:
+        val = fields.get(f)
+        if val and last_10_digits(str(val)) == wanted:
             return True
     return False
 
+def merge_iterable(it: Iterable[str]) -> str:
+    return ", ".join(sorted(set(it)))
 
 # ---------------------------------------------------------------------------
-# Misc helpers
+# Runtime diagnostics
 # ---------------------------------------------------------------------------
 
+def summary() -> Dict[str, object]:
+    s, e = quiet_hour_window()
+    return {
+        "quiet_hours_enforced": quiet_hours_enforced(),
+        "quiet_start_hour": s,
+        "quiet_end_hour": e,
+        "rate_limits": rate_limits(),
+        "promotion_min_stage": STAGES[PROMOTION_MIN_STAGE_INDEX],
+        "model_priority": MODEL_PRIORITY,
+        "stop_terms": sorted(STOP_TERMS),
+    }
 
-def merge_iterable(iterable: Iterable[str]) -> str:
-    return ", ".join(sorted(set(iterable)))
+# ---------------------------------------------------------------------------
+# Time helpers
+# ---------------------------------------------------------------------------
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+def iso_now() -> str:
+    return utc_now().isoformat(timespec="seconds").replace("+00:00", "Z")
 
