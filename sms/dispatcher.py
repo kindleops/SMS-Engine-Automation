@@ -25,12 +25,9 @@ else:
 logger = get_logger("dispatcher")
 
 # ---------------------------------------------------------------------------
-@dataclass(frozen=True)
+@dataclass
 class DispatchPolicy:
     quiet_tz: Optional["ZoneInfo"]
-    quiet_start_hour: int
-class DispatchPolicy:
-    quiet_tz: Optional[ZoneInfo]
     quiet_start_hour: int
     quiet_end_hour: int
     quiet_enforced: bool
@@ -38,11 +35,10 @@ class DispatchPolicy:
     global_rate_per_min: int
     daily_limit: int
     jitter_seconds: int
-    send_batch_limit: int
     retry_limit: int
 
     @classmethod
-    def load_from_env(cls) -> DispatchPolicy:
+    def load_from_env(cls):
         tz = ZoneInfo(os.getenv("QUIET_TZ", "America/Chicago")) if ZoneInfo else None
         return cls(
             quiet_tz=tz,
@@ -53,7 +49,6 @@ class DispatchPolicy:
             global_rate_per_min=int(os.getenv("GLOBAL_RATE_PER_MIN", "5000")),
             daily_limit=int(os.getenv("DAILY_LIMIT", "750")),
             jitter_seconds=int(os.getenv("JITTER_SECONDS", "2")),
-            send_batch_limit=int(os.getenv("SEND_BATCH_LIMIT", "500")),
             retry_limit=int(os.getenv("RETRY_LIMIT", "3")),
         )
 
@@ -84,11 +79,16 @@ class DispatchPolicy:
         return self.jitter_seconds
 
 
+# Global policy instance + accessors
 _POLICY = DispatchPolicy.load_from_env()
-def get_policy() -> DispatchPolicy: return _POLICY
-def refresh_policy() -> DispatchPolicy:
-    global _POLICY; _POLICY = DispatchPolicy.load_from_env(); return _POLICY
 
+def get_policy() -> DispatchPolicy:
+    return _POLICY
+
+def refresh_policy() -> DispatchPolicy:
+    global _POLICY
+    _POLICY = DispatchPolicy.load_from_env()
+    return _POLICY
 
 # ---------------------------------------------------------------------------
 # Utility
