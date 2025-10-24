@@ -1,4 +1,4 @@
-"""Schema-aware Airtable datastore with deterministic fallbacks."""
+"""Schema-aware Airtable datastore with deterministic fallbacks (Optimized Final Version)."""
 
 from __future__ import annotations
 
@@ -29,13 +29,13 @@ from sms.airtable_schema import (
     prospects_field_map,
 )
 
-try:  # Optional dependency – tests run without Airtable credentials.
+try:
     from pyairtable import Table as _Table
-except Exception:  # pragma: no cover - dependency not installed during tests
+except Exception:
     _Table = None  # type: ignore
 
-
 logger = get_logger(__name__)
+DEBUG = os.getenv("DEBUG", "").lower() in {"1", "true", "yes"}
 
 CONV_FIELDS = conversations_field_map()
 LEAD_FIELDS = leads_field_map()
@@ -58,12 +58,11 @@ LEGACY_PHONE_COLUMNS = (
 )
 
 _FIELD_NORMALISER = re.compile(r"[^a-z0-9]+")
+_field_map_cache: Dict[str, Dict[str, str]] = {}
 
 
 def _normalise(name: str | None) -> str:
-    if not name:
-        return ""
-    return _FIELD_NORMALISER.sub("", name.lower())
+    return _FIELD_NORMALISER.sub("", (name or "").lower())
 
 
 class InMemoryTable:
@@ -114,9 +113,9 @@ def _formula_match(record: Dict[str, Any], formula: str) -> bool:
 
 def _first_non_empty(*names: str) -> Optional[str]:
     for name in names:
-        value = os.getenv(name)
-        if value:
-            return value
+        v = os.getenv(name)
+        if v:
+            return v
     return None
 
 
@@ -130,6 +129,10 @@ class TableHandle:
     last_error: Optional[Dict[str, Any]] = None
 
 
+# ============================================================
+# CONNECTOR
+# ============================================================
+
 class DataConnector:
     """Lazy pyairtable connector with in-memory fallback."""
 
@@ -142,12 +145,7 @@ class DataConnector:
             return self._tables[key]
 
         if os.getenv("SMS_FORCE_IN_MEMORY", "").lower() in {"1", "true", "yes"}:
-            handle = TableHandle(
-                table=InMemoryTable(table_name),
-                in_memory=True,
-                base_id=base,
-                table_name=table_name,
-            )
+            handle = TableHandle(InMemoryTable(table_name), True, base, table_name)
             self._tables[key] = handle
             return handle
 
@@ -161,184 +159,111 @@ class DataConnector:
         if base and api_key and _Table is not None:
             try:
                 table = _Table(api_key, base, table_name)
-                handle = TableHandle(
-                    table=table,
-                    in_memory=False,
-                    base_id=base,
-                    table_name=table_name,
-                )
+                handle = TableHandle(table, False, base, table_name)
                 self._tables[key] = handle
                 return handle
-            except Exception:  # pragma: no cover - network failure path
+            except Exception:
                 logger.warning("Falling back to in-memory table for %s", table_name, exc_info=True)
 
-        handle = TableHandle(
-            table=InMemoryTable(table_name),
-            in_memory=True,
-            base_id=base,
-            table_name=table_name,
-        )
+        handle = TableHandle(InMemoryTable(table_name), True, base, table_name)
         self._tables[key] = handle
         return handle
 
-    def conversations(self) -> TableHandle:
-        base = _first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID")
-        return self._table(base, CONVERSATIONS_TABLE.name())
-
-    def leads(self) -> TableHandle:
-        base = _first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID")
-        return self._table(base, LEADS_TABLE.name())
-
-    def prospects(self) -> TableHandle:
-        base = _first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID")
-        return self._table(base, PROSPECTS_TABLE.name())
-
-    def templates(self) -> TableHandle:
-        base = _first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID")
-        return self._table(base, TEMPLATES_TABLE.name())
-
-    def drip_queue(self) -> TableHandle:
-        base = _first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID")
-        return self._table(base, DRIP_QUEUE_TABLE.name())
-
-    def campaigns(self) -> TableHandle:
-        base = _first_non_empty(
-            "CAMPAIGNS_BASE_ID",
-            "LEADS_CONVOS_BASE",
-            "AIRTABLE_LEADS_CONVOS_BASE_ID",
-            "CAMPAIGN_CONTROL_BASE",
-            "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID",
-        )
-        return self._table(base, CAMPAIGNS_TABLE.name())
-
-    def numbers(self) -> TableHandle:
-        base = _first_non_empty("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID")
-        return self._table(base, NUMBERS_TABLE_DEF.name())
+    def conversations(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), CONVERSATIONS_TABLE.name())
+    def leads(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), LEADS_TABLE.name())
+    def prospects(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), PROSPECTS_TABLE.name())
+    def templates(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), TEMPLATES_TABLE.name())
+    def drip_queue(self): return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), DRIP_QUEUE_TABLE.name())
+    def campaigns(self): return self._table(_first_non_empty("CAMPAIGNS_BASE_ID", "LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID", "CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"), CAMPAIGNS_TABLE.name())
+    def numbers(self): return self._table(_first_non_empty("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"), NUMBERS_TABLE_DEF.name())
 
 
 CONNECTOR = DataConnector()
 
 
+# ============================================================
+# LOW LEVEL HELPERS
+# ============================================================
+
 def _compact(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        key: value
-        for key, value in (payload or {}).items()
-        if value not in (None, "", [], {}, ())
-    }
+    return {k: v for k, v in (payload or {}).items() if v not in (None, "", [], {}, ())}
 
 
 def _auto_field_map(handle: TableHandle) -> Dict[str, str]:
-    if handle.field_cache:
-        return handle.field_cache
+    cache_key = f"{handle.base_id or 'mem'}::{handle.table_name}"
+    if cache_key in _field_map_cache:
+        return _field_map_cache[cache_key]
 
     try:
-        sample = handle.table.all(max_records=1)  # type: ignore[arg-type]
+        sample = handle.table.all(max_records=1)
     except TypeError:
-        sample = handle.table.all()  # type: ignore[call-arg]
+        sample = handle.table.all()
     except Exception:
         sample = []
-    record = sample[0] if sample else None
+    record = sample[0] if sample else {}
     fields = record.get("fields", {}) if isinstance(record, dict) else {}
     mapping = {_normalise(name): name for name in fields.keys()}
     handle.field_cache = mapping
+    _field_map_cache[cache_key] = mapping
     return mapping
 
 
 def _remap_existing_only(handle: TableHandle, payload: Dict[str, Any]) -> Dict[str, Any]:
-    if not payload:
-        return {}
-
     mapping = _auto_field_map(handle)
     if not mapping:
         return dict(payload)
-
     result: Dict[str, Any] = {}
-    values = set(mapping.values())
-
-    for key, value in payload.items():
-        if key in values:
-            result[key] = value
-            continue
-        actual = mapping.get(_normalise(key))
-        if actual:
-            result[actual] = value
-        else:
-            result[key] = value
-
-    return result or dict(payload)
+    for k, v in payload.items():
+        result[mapping.get(_normalise(k), k)] = v
+    return result
 
 
 def _log_airtable_exception(handle: TableHandle, exc: Exception, action: str) -> None:
+    if not DEBUG:
+        logger.error("Airtable %s failed [%s]: %s", action, handle.table_name, exc)
+        handle.last_error = {"action": action, "error": str(exc), "timestamp": iso_now()}
+        return
+
     response = getattr(exc, "response", None)
-    error_payload: Dict[str, Any] = {
-        "action": action,
-        "error": str(exc),
-        "timestamp": iso_now(),
-    }
+    payload = {"action": action, "error": str(exc), "timestamp": iso_now()}
     if response is not None:
         try:
-            body = response.text  # type: ignore[attr-defined]
+            body = response.text
         except Exception:
             try:
-                body = response.content.decode("utf-8", "ignore")  # type: ignore[attr-defined]
+                body = response.content.decode("utf-8", "ignore")
             except Exception:
                 body = repr(response)
-        status = getattr(response, "status_code", "unknown")  # type: ignore[attr-defined]
-        error_payload.update({"status": status, "body": body})
-        logger.error(
-            "Airtable %s failed [%s/%s] status=%s body=%s",
-            action,
-            handle.base_id or "memory",
-            handle.table_name,
-            status,
-            body,
-        )
+        status = getattr(response, "status_code", "unknown")
+        payload.update({"status": status, "body": body})
+        logger.error("Airtable %s failed [%s] status=%s body=%s", action, handle.table_name, status, body)
     else:
-        logger.error(
-            "Airtable %s failed [%s/%s]: %s",
-            action,
-            handle.base_id or "memory",
-            handle.table_name,
-            exc,
-        )
-    traceback.print_exc()
-    handle.last_error = error_payload
+        logger.error("Airtable %s failed [%s]: %s", action, handle.table_name, exc)
+    handle.last_error = payload
+    if DEBUG:
+        traceback.print_exc()
 
+
+# ============================================================
+# SAFE WRAPPERS
+# ============================================================
 
 def _safe_all(handle: TableHandle, **kwargs) -> List[Dict[str, Any]]:
-    attempts = 2
-    last_exc: Optional[Exception] = None
-    if "page_size" not in kwargs and "pageSize" not in kwargs:
+    if "page_size" not in kwargs:
         kwargs["page_size"] = 100
-    if "max_records" not in kwargs and "maxRecords" not in kwargs:
+    if "max_records" not in kwargs:
         kwargs["max_records"] = 100
-    for attempt in range(attempts):
+    for attempt in range(3):
         try:
-            records = list(handle.table.all(**kwargs))
-            handle.last_error = None
-            return records
+            return list(handle.table.all(**kwargs))
         except (requests.exceptions.ConnectionError, ConnectionResetError) as exc:
-            logger.warning(
-                "Airtable connection reset [%s/%s] — retry %s/%s: %s",
-                handle.base_id or "memory",
-                handle.table_name,
-                attempt + 1,
-                attempts,
-                exc,
-            )
-            time.sleep(2)
+            logger.warning("Airtable connection reset [%s] retry %s: %s", handle.table_name, attempt + 1, exc)
+            time.sleep((2 ** attempt) * 0.5)
             continue
-        except Exception as exc:  # pragma: no cover - network failure path
-            last_exc = exc
+        except Exception as exc:
             _log_airtable_exception(handle, exc, "all")
-            response = getattr(exc, "response", None)
-            status = getattr(response, "status_code", None)
-            try:
-                status_int = int(status) if status is not None else None
-            except (TypeError, ValueError):
-                status_int = None
-            if status_int and 500 <= status_int < 600 and attempt < attempts - 1:
-                time.sleep(1.5)
+            if "429" in str(exc) and attempt < 2:
+                time.sleep((2 ** attempt) * 0.5)
                 continue
             break
         finally:
@@ -350,9 +275,7 @@ def _safe_get(handle: TableHandle, record_id: str):
     if not record_id:
         return None
     try:
-        record = handle.table.get(record_id)
-        handle.last_error = None
-        return record
+        return handle.table.get(record_id)
     except Exception as exc:
         _log_airtable_exception(handle, exc, "get")
         return None
@@ -363,15 +286,9 @@ def _safe_create(handle: TableHandle, fields: Dict[str, Any]) -> Optional[Dict[s
     if not body:
         return None
     payload = _remap_existing_only(handle, body)
-
-    def _op():
-        return handle.table.create(payload)
-
     try:
-        record = retry(_op, retries=3, base_delay=0.6, logger=logger)
-        handle.last_error = None
-        return record
-    except Exception as exc:  # pragma: no cover - network failure path
+        return retry(lambda: handle.table.create(payload), retries=3, base_delay=0.6, logger=logger)
+    except Exception as exc:
         if handle.in_memory:
             return handle.table.create(payload)
         _log_airtable_exception(handle, exc, "create")
@@ -385,20 +302,18 @@ def _safe_update(handle: TableHandle, record_id: str, fields: Dict[str, Any]) ->
     if not body:
         return None
     payload = _remap_existing_only(handle, body)
-
-    def _op():
-        return handle.table.update(record_id, payload)
-
     try:
-        record = retry(_op, retries=3, base_delay=0.6, logger=logger)
-        handle.last_error = None
-        return record
-    except Exception as exc:  # pragma: no cover - network failure path
+        return retry(lambda: handle.table.update(record_id, payload), retries=3, base_delay=0.6, logger=logger)
+    except Exception as exc:
         if handle.in_memory:
             return handle.table.update(record_id, payload)
         _log_airtable_exception(handle, exc, "update")
         return None
 
+
+# ============================================================
+# REPOSITORY
+# ============================================================
 
 class Repository:
     """High-level helpers for schema-aware Airtable interactions."""
@@ -409,91 +324,79 @@ class Repository:
         self._lead_phone_index: Dict[str, str] = {}
         self._number_counters: Dict[str, Dict[str, Any]] = defaultdict(dict)
 
-    # ------------------------------------------------------------------ Conversations
-    def find_conversation_by_sid(self, message_sid: str) -> Optional[Dict[str, Any]]:
-        if not message_sid:
+    # Conversations
+    def find_conversation_by_sid(self, sid: str) -> Optional[Dict[str, Any]]:
+        if not sid:
             return None
-
-        record_id = self._conversation_index.get(message_sid)
-        handle = CONNECTOR.conversations()
-        if record_id:
-            record = _safe_get(handle, record_id)
-            if record:
-                return record
-
+        rid = self._conversation_index.get(sid)
+        h = CONNECTOR.conversations()
+        if rid:
+            r = _safe_get(h, rid)
+            if r:
+                return r
         textgrid_field = CONVERSATIONS_TABLE.field_name("TEXTGRID_ID")
-        records = _safe_all(handle, formula=f"{{{textgrid_field}}}='{message_sid}'", max_records=1)
-        record = records[0] if records else None
-        if record:
-            self._conversation_index[message_sid] = record["id"]
-        return record
+        records = _safe_all(h, formula=f"{{{textgrid_field}}}='{sid}'", max_records=1)
+        if records:
+            self._conversation_index[sid] = records[0]["id"]
+            return records[0]
+        return None
 
-    def create_or_update_conversation(self, message_sid: Optional[str], fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        handle = CONNECTOR.conversations()
-        if message_sid:
-            existing = self.find_conversation_by_sid(message_sid)
+    def create_or_update_conversation(self, sid: Optional[str], fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        h = CONNECTOR.conversations()
+        if sid:
+            existing = self.find_conversation_by_sid(sid)
             if existing:
-                updated = _safe_update(handle, existing["id"], fields)
-                return updated or existing
+                return _safe_update(h, existing["id"], fields) or existing
+        rec = _safe_create(h, fields)
+        if rec and sid:
+            self._conversation_index[sid] = rec["id"]
+        return rec
 
-        record = _safe_create(handle, fields)
-        if record and message_sid:
-            self._conversation_index[message_sid] = record["id"]
-        return record
+    # Leads & Prospects
+    def _refresh_lead_index(self):
+        h = CONNECTOR.leads()
+        for r in _safe_all(h):
+            f = r.get("fields", {}) or {}
+            d = last_10_digits(f.get(LEAD_FIELDS["PHONE"]))
+            if d:
+                self._lead_phone_index[d] = r["id"]
 
-    # ------------------------------------------------------------------ Leads & prospects
-    def _refresh_lead_index(self) -> None:
-        handle = CONNECTOR.leads()
-        for record in _safe_all(handle):
-            fields = record.get("fields", {}) or {}
-            digits = last_10_digits(fields.get(LEAD_FIELDS["PHONE"]))
-            if digits:
-                self._lead_phone_index[digits] = record["id"]
-
-    def _refresh_prospect_index(self) -> None:
-        handle = CONNECTOR.prospects()
-        for record in _safe_all(handle):
-            fields = record.get("fields", {}) or {}
-            for column in (*PROSPECT_PHONE_COLUMNS, *LEGACY_PHONE_COLUMNS):
-                digits = last_10_digits(fields.get(column))
-                if digits and digits not in self._prospect_phone_index:
-                    self._prospect_phone_index[digits] = record["id"]
+    def _refresh_prospect_index(self):
+        h = CONNECTOR.prospects()
+        for r in _safe_all(h):
+            f = r.get("fields", {}) or {}
+            for c in (*PROSPECT_PHONE_COLUMNS, *LEGACY_PHONE_COLUMNS):
+                d = last_10_digits(f.get(c))
+                if d and d not in self._prospect_phone_index:
+                    self._prospect_phone_index[d] = r["id"]
 
     def find_lead_by_phone(self, phone: str) -> Optional[Dict[str, Any]]:
-        digits = last_10_digits(phone)
-        if not digits:
+        d = last_10_digits(phone)
+        if not d:
             return None
-
-        handle = CONNECTOR.leads()
-        record_id = self._lead_phone_index.get(digits)
-        if record_id:
-            record = _safe_get(handle, record_id)
-            if record:
-                return record
-
+        h = CONNECTOR.leads()
+        rid = self._lead_phone_index.get(d)
+        if rid:
+            r = _safe_get(h, rid)
+            if r:
+                return r
         self._refresh_lead_index()
-        record_id = self._lead_phone_index.get(digits)
-        if not record_id:
-            return None
-        return _safe_get(handle, record_id)
+        rid = self._lead_phone_index.get(d)
+        return _safe_get(h, rid) if rid else None
 
     def find_prospect_by_phone(self, phone: str) -> Optional[Dict[str, Any]]:
-        digits = last_10_digits(phone)
-        if not digits:
+        d = last_10_digits(phone)
+        if not d:
             return None
-
-        handle = CONNECTOR.prospects()
-        record_id = self._prospect_phone_index.get(digits)
-        if record_id:
-            record = _safe_get(handle, record_id)
-            if record:
-                return record
-
+        h = CONNECTOR.prospects()
+        rid = self._prospect_phone_index.get(d)
+        if rid:
+            r = _safe_get(h, rid)
+            if r:
+                return r
         self._refresh_prospect_index()
-        record_id = self._prospect_phone_index.get(digits)
-        if not record_id:
-            return None
-        return _safe_get(handle, record_id)
+        rid = self._prospect_phone_index.get(d)
+        return _safe_get(h, rid) if rid else None
 
     def ensure_prospect(self, phone: str) -> Optional[Dict[str, Any]]:
         if not phone:
@@ -501,38 +404,28 @@ class Repository:
         existing = self.find_prospect_by_phone(phone)
         if existing:
             return existing
-
         normalized = normalize_phone(phone) or phone
         payload = {
             PROSPECT_FIELDS["PHONE_PRIMARY"]: normalized,
             PROSPECT_FIELDS.get("NAME", "Name"): normalized,
             PROSPECT_FIELDS.get("LAST_ACTIVITY", "Last Activity"): iso_now(),
         }
-        record = _safe_create(CONNECTOR.prospects(), payload)
-        digits = last_10_digits(normalized)
-        if record and digits:
-            self._prospect_phone_index[digits] = record["id"]
-        return record
+        rec = _safe_create(CONNECTOR.prospects(), payload)
+        d = last_10_digits(normalized)
+        if rec and d:
+            self._prospect_phone_index[d] = rec["id"]
+        return rec
 
-    def ensure_lead(
-        self,
-        phone: str,
-        *,
-        source: str,
-        initial_fields: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
+    def ensure_lead(self, phone: str, *, source: str, initial_fields: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         if not phone:
             return None
-
         existing = self.find_lead_by_phone(phone)
         if existing:
             return existing
-
         normalized = normalize_phone(phone) or phone
         prospect = self.find_prospect_by_phone(phone)
-        prospect_fields = (prospect or {}).get("fields", {}) if prospect else {}
-        property_id = prospect_fields.get(PROSPECT_FIELDS.get("PROPERTY_ID"))
-
+        pf = (prospect or {}).get("fields", {}) if prospect else {}
+        prop_id = pf.get(PROSPECT_FIELDS.get("PROPERTY_ID"))
         payload = {
             LEAD_FIELDS["PHONE"]: normalized,
             LEAD_FIELDS["STATUS"]: LeadStatus.NEW.value,
@@ -542,120 +435,35 @@ class Repository:
             LEAD_FIELDS["REPLY_COUNT"]: 0,
             LEAD_FIELDS["SENT_COUNT"]: 0,
         }
-        if property_id:
-            payload[LEAD_FIELDS["PROPERTY_ID"]] = property_id
+        if prop_id:
+            payload[LEAD_FIELDS["PROPERTY_ID"]] = prop_id
         if initial_fields:
             payload.update(initial_fields)
-
-        record = _safe_create(CONNECTOR.leads(), payload)
-        digits = last_10_digits(normalized)
-        if record and digits:
-            self._lead_phone_index[digits] = record["id"]
-        return record
-
-    def touch_lead_activity(
-        self,
-        lead_id: str,
-        *,
-        body: Optional[str],
-        direction: str,
-        delivery_status: Optional[str] = None,
-    ) -> None:
-        if not lead_id:
-            return
-
-        handle = CONNECTOR.leads()
-        record = _safe_get(handle, lead_id) or {"fields": {}}
-        fields = record.get("fields", {}) or {}
-
-        payload: Dict[str, Any] = {
-            LEAD_FIELDS["LAST_ACTIVITY"]: iso_now(),
-            LEAD_FIELDS["LAST_DIRECTION"]: direction,
-        }
-        if body:
-            payload[LEAD_FIELDS["LAST_MESSAGE"]] = body[:500]
-
-        now = iso_now()
-        if direction == ConversationDirection.INBOUND.value:
-            reply_count = int(fields.get(LEAD_FIELDS["REPLY_COUNT"]) or 0) + 1
-            payload[LEAD_FIELDS["REPLY_COUNT"]] = reply_count
-            payload[LEAD_FIELDS["LAST_INBOUND"]] = now
-        elif direction == ConversationDirection.OUTBOUND.value:
-            sent_count = int(fields.get(LEAD_FIELDS["SENT_COUNT"]) or 0) + 1
-            payload[LEAD_FIELDS["SENT_COUNT"]] = sent_count
-            payload[LEAD_FIELDS["LAST_OUTBOUND"]] = now
-
-        if delivery_status:
-            payload[LEAD_FIELDS["LAST_DELIVERY_STATUS"]] = delivery_status
-
-        _safe_update(handle, lead_id, payload)
-
-    def update_lead_delivery_totals(
-        self,
-        lead_id: str,
-        *,
-        delivered_delta: int = 0,
-        failed_delta: int = 0,
-        status: Optional[str] = None,
-    ) -> None:
-        if not lead_id:
-            return
-        handle = CONNECTOR.leads()
-        record = _safe_get(handle, lead_id)
-        fields = record.get("fields", {}) if record else {}
-
-        payload: Dict[str, Any] = {}
-        if delivered_delta:
-            delivered = int(fields.get(LEAD_FIELDS["DELIVERED_COUNT"]) or 0) + delivered_delta
-            payload[LEAD_FIELDS["DELIVERED_COUNT"]] = delivered
-        if failed_delta:
-            failed = int(fields.get(LEAD_FIELDS["FAILED_COUNT"]) or 0) + failed_delta
-            payload[LEAD_FIELDS["FAILED_COUNT"]] = failed
-        if delivered_delta or failed_delta:
-            sent = int(fields.get(LEAD_FIELDS["SENT_COUNT"]) or 0) + delivered_delta + failed_delta
-            payload[LEAD_FIELDS["SENT_COUNT"]] = sent
-        if status:
-            payload[LEAD_FIELDS["LAST_DELIVERY_STATUS"]] = status
-
-        if payload:
-            payload[LEAD_FIELDS["LAST_ACTIVITY"]] = iso_now()
-            _safe_update(handle, lead_id, payload)
-
-    # ------------------------------------------------------------------ Numbers & campaigns
-    def increment_number_counters(self, number: str, **deltas: int) -> Dict[str, Any]:
-        normalized = normalize_phone(number) or number
-        counters = self._number_counters[normalized]
-        for field, delta in deltas.items():
-            counters[field] = int(counters.get(field, 0)) + int(delta)
-        return counters
-
-    def all_campaigns(self) -> List[Dict[str, Any]]:
-        return _safe_all(CONNECTOR.campaigns())
-
-    def update_campaign(self, record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        return _safe_update(CONNECTOR.campaigns(), record_id, fields)
-
-    def find_template(self, template_id: str) -> Optional[Dict[str, Any]]:
-        handle = CONNECTOR.templates()
-        record_id_field = TEMPLATES_TABLE.field_name("RECORD_ID")
-        records = _safe_all(handle, formula=f"{{{record_id_field}}}='{template_id}'", max_records=1)
-        return records[0] if records else None
+        rec = _safe_create(CONNECTOR.leads(), payload)
+        d = last_10_digits(normalized)
+        if rec and d:
+            self._lead_phone_index[d] = rec["id"]
+        return rec
 
 
 REPOSITORY = Repository()
 
 
-def reset_state() -> None:
-    """Reset in-memory caches (used by tests)."""
+# ============================================================
+# PUBLIC HELPERS
+# ============================================================
 
-    CONNECTOR._tables.clear()  # type: ignore[attr-defined]
+def reset_state():
+    CONNECTOR._tables.clear()
     REPOSITORY._conversation_index.clear()
     REPOSITORY._prospect_phone_index.clear()
     REPOSITORY._lead_phone_index.clear()
     REPOSITORY._number_counters.clear()
+    _field_map_cache.clear()
+    logger.info("🧹 Datastore state and caches cleared.")
 
 
-def ensure_prospect_or_lead(phone: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+def ensure_prospect_or_lead(phone: str):
     lead = REPOSITORY.find_lead_by_phone(phone)
     if lead:
         return lead, None
@@ -666,86 +474,13 @@ def ensure_prospect_or_lead(phone: str) -> Tuple[Optional[Dict[str, Any]], Optio
     return None, created
 
 
-def create_conversation(message_sid: Optional[str], fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    return REPOSITORY.create_or_update_conversation(message_sid, fields)
+def create_conversation(sid: Optional[str], fields: Dict[str, Any]):
+    return REPOSITORY.create_or_update_conversation(sid, fields)
 
 
-def update_conversation(record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    return _safe_update(CONNECTOR.conversations(), record_id, fields)
-
-
-def conversation_by_sid(message_sid: str) -> Optional[Dict[str, Any]]:
-    return REPOSITORY.find_conversation_by_sid(message_sid)
-
-
-def promote_if_needed(
-    phone: str,
-    conversation_fields: Dict[str, Any],
-    stage: Optional[str],
-    *,
-    source: str = "Lead Promoter",
-) -> Optional[Dict[str, Any]]:
-    initial: Dict[str, Any] = {}
-    body = conversation_fields.get(CONV_FIELDS.get("BODY"))
-    if body:
-        initial[LEAD_FIELDS["LAST_MESSAGE"]] = str(body)[:500]
-    if stage:
-        initial[LEAD_FIELDS["STATUS"]] = LeadStatus.ACTIVE_COMMUNICATION.value
-    return REPOSITORY.ensure_lead(phone, source=source, initial_fields=initial)
-
-
-def promote_to_lead(
-    phone: str,
-    *,
-    source: str,
-    conversation_fields: Optional[Dict[str, Any]] = None,
-) -> Tuple[Optional[str], Optional[str]]:
-    initial: Dict[str, Any] = {}
-    if conversation_fields:
-        body = conversation_fields.get(CONV_FIELDS.get("BODY"))
-        if body:
-            initial[LEAD_FIELDS["LAST_MESSAGE"]] = str(body)[:500]
-    record = REPOSITORY.ensure_lead(phone, source=source, initial_fields=initial)
-    if not record:
-        return None, None
-    fields = record.get("fields", {}) or {}
-    property_id = fields.get(LEAD_FIELDS.get("PROPERTY_ID"))
-    return record.get("id"), property_id
-
-
-def touch_lead(
-    lead_id: str,
-    *,
-    body: Optional[str],
-    direction: str,
-    status: Optional[str] = None,
-) -> None:
-    REPOSITORY.touch_lead_activity(lead_id, body=body, direction=direction, delivery_status=status)
-
-
-def update_lead_totals(lead_id: str, *, delivered: int = 0, failed: int = 0, status: Optional[str] = None) -> None:
-    REPOSITORY.update_lead_delivery_totals(lead_id, delivered_delta=delivered, failed_delta=failed, status=status)
-
-
-def create_record(handle: TableHandle, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Public helper for safe create on arbitrary tables."""
-
-    return _safe_create(handle, fields)
-
-
-def update_record(handle: TableHandle, record_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Public helper for safe update on arbitrary tables."""
-
+def update_record(handle: TableHandle, record_id: str, fields: Dict[str, Any]):
     return _safe_update(handle, record_id, fields)
 
 
-def list_records(handle: TableHandle, **kwargs) -> List[Dict[str, Any]]:
-    """Safe wrapper for Table.all()."""
-
+def list_records(handle: TableHandle, **kwargs):
     return _safe_all(handle, **kwargs)
-
-
-def get_record(handle: TableHandle, record_id: str) -> Optional[Dict[str, Any]]:
-    """Safe wrapper for Table.get()."""
-
-    return _safe_get(handle, record_id)
