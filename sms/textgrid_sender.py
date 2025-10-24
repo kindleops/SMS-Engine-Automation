@@ -1,15 +1,18 @@
 """
 =======================================================================
- 📡  AIRTABLE SCHEMA — FINAL VERIFIED BUILD
+ 📡  AIRTABLE SCHEMA — FINAL OPTIMIZED BUILD
 =======================================================================
 Central definition for all Airtable table mappings, field names,
 and enum constants used across the REI SMS Engine.
 
-Key Fix:
---------
-✅ Corrected SMS send direction for TextGrid integration
-   → FROM = "TextGrid Number"      (our sending DID / 10DLC)
-   → TO   = "Seller Phone Number"  (prospect’s number)
+Key Improvements:
+-----------------
+✅ Canonical direction mapping for TextGrid (FROM vs TO)
+✅ Added FIELD_ALIAS for unified lookups
+✅ Added DELIVERY_STATUS_MAP normalization
+✅ Added TABLE_NAMES constants for consistency
+✅ Added default_conversation_payload() helper for DRY record creation
+✅ Added __all__ for clean imports
 
 Used by:
 ---------
@@ -53,14 +56,14 @@ class ConversationProcessor(str, Enum):
 
 
 # =====================================================================
-# CONVERSATIONS TABLE FIELD MAP
+# FIELD MAPS
 # =====================================================================
 
 def conversations_field_map() -> Dict[str, str]:
     """
-    Returns canonical Airtable field names for the Conversations table.
+    Canonical Airtable field names for the Conversations table.
 
-    ⚙️ Correct direction mapping for TextGrid:
+    ⚙️ Correct TextGrid direction mapping:
         FROM = our TextGrid Number (sending DID)
         TO   = Seller Phone Number (prospect / lead)
     """
@@ -76,15 +79,8 @@ def conversations_field_map() -> Dict[str, str]:
     }
 
 
-# =====================================================================
-# LEADS, CAMPAIGNS, AND KPI SCHEMAS (EXTENSIBLE)
-# =====================================================================
-
 def leads_field_map() -> Dict[str, str]:
-    """
-    Defines canonical field names for the Leads table.
-    Extend as needed for future AI tagging or scoring.
-    """
+    """Defines canonical field names for the Leads table."""
     return {
         "NAME": "Seller Name",
         "PHONE": "Seller Phone Number",
@@ -126,46 +122,127 @@ def kpi_field_map() -> Dict[str, str]:
 
 
 # =====================================================================
-# TABLE ACCESS HELPERS (USED BY OTHER MODULES)
+# CONSTANTS / ALIASES
+# =====================================================================
+
+FIELD_ALIAS = {
+    "from": "TextGrid Number",
+    "to": "Seller Phone Number",
+    "body": "Message",
+    "status": "Delivery Status",
+    "sent_at": "Sent At",
+    "textgrid_id": "Message SID",
+    "processor": "Processed By",
+}
+
+TABLE_NAMES = {
+    "CONVERSATIONS": "Conversations",
+    "LEADS": "Leads",
+    "CAMPAIGNS": "Campaigns",
+    "KPIS": "KPIs",
+}
+
+DELIVERY_STATUS_MAP = {
+    "queued": ConversationDeliveryStatus.QUEUED,
+    "sending": ConversationDeliveryStatus.SENT,
+    "sent": ConversationDeliveryStatus.SENT,
+    "delivered": ConversationDeliveryStatus.DELIVERED,
+    "success": ConversationDeliveryStatus.DELIVERED,
+    "received": ConversationDeliveryStatus.RECEIVED,
+    "failed": ConversationDeliveryStatus.FAILED,
+    "undelivered": ConversationDeliveryStatus.FAILED,
+    "error": ConversationDeliveryStatus.FAILED,
+    "blocked": ConversationDeliveryStatus.FAILED,
+    "expired": ConversationDeliveryStatus.FAILED,
+}
+
+
+# =====================================================================
+# TABLE ACCESS HELPERS
 # =====================================================================
 
 class CONVERSATIONS_TABLE:
-    """
-    Provides default field names for linked relationships
-    used in create_conversation() and textgrid_sender logging.
-    """
+    """Default linked field names used in create_conversation()."""
     @staticmethod
     def field_names() -> Dict[str, str]:
         return {
-            "LEAD_LINK": "Lead",            # Linked Lead record
-            "TEMPLATE_LINK": "Template",    # Linked Template
-            "CAMPAIGN_LINK": "Campaign",    # Linked Campaign
+            "LEAD_LINK": "Lead",
+            "TEMPLATE_LINK": "Template",
+            "CAMPAIGN_LINK": "Campaign",
         }
 
 
 class LEADS_TABLE:
-    """Placeholder for leads schema resolution."""
+    """Schema wrapper for leads table."""
     @staticmethod
     def field_names() -> Dict[str, str]:
         return leads_field_map()
 
 
 class CAMPAIGNS_TABLE:
-    """Placeholder for campaigns schema resolution."""
+    """Schema wrapper for campaigns table."""
     @staticmethod
     def field_names() -> Dict[str, str]:
         return campaigns_field_map()
 
 
 class KPIS_TABLE:
-    """Placeholder for KPI schema resolution."""
+    """Schema wrapper for KPIs table."""
     @staticmethod
     def field_names() -> Dict[str, str]:
         return kpi_field_map()
 
 
 # =====================================================================
-# SELF-TEST (OPTIONAL LOCAL VALIDATION)
+# DEFAULT PAYLOAD HELPER
+# =====================================================================
+
+def default_conversation_payload(
+    from_number: str,
+    to_number: str,
+    body: str,
+    processor: ConversationProcessor = ConversationProcessor.CAMPAIGN_RUNNER,
+) -> Dict[str, str]:
+    """
+    Provides a canonical payload structure for new outbound conversation records.
+    Ensures consistent naming across all sender modules.
+    """
+    f = conversations_field_map()
+    return {
+        f["FROM"]: from_number,
+        f["TO"]: to_number,
+        f["BODY"]: body,
+        f["DIRECTION"]: ConversationDirection.OUTBOUND.value,
+        f["STATUS"]: ConversationDeliveryStatus.QUEUED.value,
+        f["PROCESSED_BY"]: processor.value,
+    }
+
+
+# =====================================================================
+# EXPORTS
+# =====================================================================
+
+__all__ = [
+    "ConversationDirection",
+    "ConversationDeliveryStatus",
+    "ConversationProcessor",
+    "FIELD_ALIAS",
+    "TABLE_NAMES",
+    "DELIVERY_STATUS_MAP",
+    "conversations_field_map",
+    "leads_field_map",
+    "campaigns_field_map",
+    "kpi_field_map",
+    "CONVERSATIONS_TABLE",
+    "LEADS_TABLE",
+    "CAMPAIGNS_TABLE",
+    "KPIS_TABLE",
+    "default_conversation_payload",
+]
+
+
+# =====================================================================
+# SELF-TEST (LOCAL VALIDATION)
 # =====================================================================
 
 if __name__ == "__main__":
@@ -173,4 +250,6 @@ if __name__ == "__main__":
     print("✅ Leads Map:", leads_field_map())
     print("✅ Campaigns Map:", campaigns_field_map())
     print("✅ KPI Map:", kpi_field_map())
+    sample = default_conversation_payload("+18334445555", "+14015556666", "Test message")
+    print("🧠 Sample Payload:", sample)
 

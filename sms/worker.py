@@ -1,22 +1,19 @@
 """
-🚀 Advanced SMS Worker (Bulletproof Edition)
---------------------------------------------
-Handles:
-  • Campaign scheduling & hydration
-  • Outbound batch sending
-  • Retry handling
-  • Autoresponder
-  • Metrics aggregation
-  • Health heartbeat + distributed locks
-
-Safe for multi-instance operation using Redis NX locks.
+🚀 Advanced SMS Worker (Bulletproof Edition) — ++HARDENED++
+- Per-runner timeouts (prevents hangs)
+- Adaptive backoff on failure streaks
+- Optional system metrics (psutil if available)
+- Startup warmup jitter
+- Final metrics flush on shutdown
+- Same ENV toggles / Redis locks / telemetry
 """
 
 from __future__ import annotations
 import os, time, json, uuid, signal, traceback, random
 from datetime import datetime, timezone
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
+import concurrent.futures
 
 try:
     import redis as _redis
@@ -38,12 +35,29 @@ def _env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
 # ────────────────────────────────────────────────
 # ENV VARIABLES
 # ────────────────────────────────────────────────
 INTERVAL_SEC = _env_int("WORKER_INTERVAL_SEC", 30)
 IDLE_INTERVAL_SEC = _env_int("WORKER_IDLE_INTERVAL_SEC", INTERVAL_SEC)
 JITTER_SEC = _env_int("WORKER_JITTER_SEC", 5)
+
+# Warmup (helps on cold deploys). If 0 → disabled.
+WARMUP_MIN_SEC = _env_int("WORKER_WARMUP_MIN_SEC", 5)
+WARMUP_MAX_SEC = _env_int("WORKER_WARMUP_MAX_SEC", 15)
+
+# Per-task timeout (seconds)
+RUNNER_TIMEOUT_SEC = _env_int("WORKER_RUNNER_TIMEOUT_SEC", 120)
+
+# Adaptive backoff (on failure streak)
+BACKOFF_MAX_EXP = _env_int("WORKER_BACKOFF_MAX_EXP", 3)  # caps 2^exp multiplier
+BACKOFF_BASE = _env_float("WORKER_BACKOFF_BASE", 1.0)    # multiplier base on INTERVAL
 
 ENABLE_CAMPAIGNS = _env_bool("ENABLE_CAMPAIGNS", True)
 ENABLE_SEND = _env_bool("ENABLE_SEND", True)
@@ -109,6 +123,22 @@ def _update_metrics():
     try:
         from sms.metrics_tracker import update_metrics
         return update_metrics()
+    except Exception as e:
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}
+
+# ────────────────────────────────────────────────
+# RUNNER SAFETY WRAPPER (timeouts)
+# ────────────────────────────────────────────────
+def _run_safely(fn: Callable[[], Dict[str, Any]], timeout_sec: int = RUNNER_TIMEOUT_SEC) -> Dict[str, Any]:
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(fn)
+            return fut.result(timeout=timeout_sec) or {}
+    except concurrent.futures.TimeoutError:
+        msg = f"Timeout after {timeout_sec}s"
+        print(f"⏱️ {fn.__name__} {msg}")
+        return {"ok": False, "error": msg}
     except Exception as e:
         traceback.print_exc()
         return {"ok": False, "error": str(e)}
@@ -183,7 +213,7 @@ signal.signal(signal.SIGTERM, _signal_handler)
 # ────────────────────────────────────────────────
 # UTILITIES
 # ────────────────────────────────────────────────
-def _sleep_with_jitter(base: int):
+def _sleep_with_jitter(base: float):
     """Sleep with jitter to avoid multiple workers aligning."""
     j = random.randint(0, max(0, JITTER_SEC))
     time.sleep(min(3600, base + j))
@@ -215,88 +245,137 @@ def _compact(res: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Trim result payloads for cleaner cycle logs."""
     if not isinstance(res, dict):
         return {}
-    keep = ("ok", "processed", "total_sent", "retried", "errors")
+    keep = ("ok", "processed", "total_sent", "retried", "errors", "queued")
     filtered = {k: v for k, v in res.items() if k in keep}
     return filtered
+
+def _sys_metrics() -> Optional[Dict[str, Any]]:
+    """Lightweight system metrics (optional)."""
+    try:
+        import psutil  # optional
+        return {
+            "cpu": psutil.cpu_percent(interval=0.1),
+            "mem": round(psutil.virtual_memory().percent, 1),
+        }
+    except Exception:
+        return None
 
 # ────────────────────────────────────────────────
 # MAIN WORKER LOOP
 # ────────────────────────────────────────────────
 def main():
     print(f"🚀 Starting {WORKER_NAME} [{INSTANCE_ID}] | interval={INTERVAL_SEC}s idle={IDLE_INTERVAL_SEC}s jitter={JITTER_SEC}s")
+
+    # Warmup (only if enabled)
+    if (WARMUP_MAX_SEC > 0) and not RUN_ONCE:
+        warm = random.randint(max(0, WARMUP_MIN_SEC), max(WARMUP_MIN_SEC, WARMUP_MAX_SEC))
+        print(f"⏳ Warming up worker for {warm}s ...")
+        time.sleep(warm)
+
     cycles = 0
+    fail_streak = 0  # consecutive cycle-level failures
 
-    while True:
-        if _shutdown:
-            break
-        if MAX_CYCLES and cycles >= MAX_CYCLES:
-            break
+    try:
+        while True:
+            if _shutdown:
+                break
+            if MAX_CYCLES and cycles >= MAX_CYCLES:
+                break
 
-        cycles += 1
-        DIST.hb(f"{KEY_PREFIX}:hb:{WORKER_NAME}:{INSTANCE_ID}", ttl=max(60, INTERVAL_SEC * 3))
-        did_work = False
-        results: Dict[str, Any] = {}
+            cycles += 1
+            DIST.hb(f"{KEY_PREFIX}:hb:{WORKER_NAME}:{INSTANCE_ID}", ttl=max(60, INTERVAL_SEC * 3))
+            did_work = False
+            cycle_ok = True
+            results: Dict[str, Any] = {}
 
-        # --- Campaign Scheduler ---
-        if ENABLE_CAMPAIGNS:
-            with DIST.lock("campaigns", ttl=max(30, INTERVAL_SEC * 2)) as ok:
-                if ok:
-                    res = _run_campaigns(CAMPAIGN_LIMIT, CAMPAIGN_SEND_AFTER)
-                    results["campaigns"] = res
-                    did_work |= bool(res and (res.get("processed") or res.get("queued")))
-                else:
-                    _log("skip_lock", step="campaigns")
+            lock_ttl_short = max(30, INTERVAL_SEC * 2)
+            lock_ttl_long = max(60, INTERVAL_SEC * 2)
 
-        # --- Outbound Sending ---
-        if ENABLE_SEND:
-            with DIST.lock("send_batch", ttl=max(60, INTERVAL_SEC * 2)) as ok:
-                if ok:
-                    res = _send_batch(SEND_BATCH_LIMIT)
-                    results["send_batch"] = res
-                    did_work |= bool(res and res.get("total_sent"))
-                else:
-                    _log("skip_lock", step="send_batch")
+            # --- Campaign Scheduler ---
+            if ENABLE_CAMPAIGNS:
+                with DIST.lock("campaigns", ttl=lock_ttl_short) as ok:
+                    if ok:
+                        res = _run_safely(lambda: _run_campaigns(CAMPAIGN_LIMIT, CAMPAIGN_SEND_AFTER))
+                        results["campaigns"] = res
+                        did_work |= bool(res and (res.get("processed") or res.get("queued")))
+                        cycle_ok &= bool(res.get("ok", True))
+                    else:
+                        _log("skip_lock", step="campaigns")
 
-        # --- Retry Failed Sends ---
-        if ENABLE_RETRY:
-            with DIST.lock("retry", ttl=max(30, INTERVAL_SEC * 2)) as ok:
-                if ok:
-                    res = _run_retry(RETRY_LIMIT)
-                    results["retry"] = res
-                    did_work |= bool(res and res.get("retried"))
-                else:
-                    _log("skip_lock", step="retry")
+            # --- Outbound Sending ---
+            if ENABLE_SEND:
+                with DIST.lock("send_batch", ttl=lock_ttl_long) as ok:
+                    if ok:
+                        res = _run_safely(lambda: _send_batch(SEND_BATCH_LIMIT))
+                        results["send_batch"] = res
+                        did_work |= bool(res and res.get("total_sent"))
+                        cycle_ok &= bool(res.get("ok", True))
+                    else:
+                        _log("skip_lock", step="send_batch")
 
-        # --- Autoresponder (Inbound) ---
-        if ENABLE_AUTORESPONDER:
-            with DIST.lock("autoresponder", ttl=max(30, INTERVAL_SEC * 2)) as ok:
-                if ok:
-                    res = _run_autoresponder(AUTORESPONDER_LIMIT, AUTORESPONDER_VIEW)
-                    results["autoresponder"] = res
-                    did_work |= bool(res and res.get("processed"))
-                else:
-                    _log("skip_lock", step="autoresponder")
+            # --- Retry Failed Sends ---
+            if ENABLE_RETRY:
+                with DIST.lock("retry", ttl=lock_ttl_short) as ok:
+                    if ok:
+                        res = _run_safely(lambda: _run_retry(RETRY_LIMIT))
+                        results["retry"] = res
+                        did_work |= bool(res and res.get("retried"))
+                        cycle_ok &= bool(res.get("ok", True))
+                    else:
+                        _log("skip_lock", step="retry")
 
-        # --- Metrics Rollup ---
+            # --- Autoresponder (Inbound) ---
+            if ENABLE_AUTORESPONDER:
+                with DIST.lock("autoresponder", ttl=lock_ttl_short) as ok:
+                    if ok:
+                        res = _run_safely(lambda: _run_autoresponder(AUTORESPONDER_LIMIT, AUTORESPONDER_VIEW))
+                        results["autoresponder"] = res
+                        did_work |= bool(res and res.get("processed"))
+                        cycle_ok &= bool(res.get("ok", True))
+                    else:
+                        _log("skip_lock", step="autoresponder")
+
+            # --- Metrics Rollup ---
+            if ENABLE_METRICS:
+                with DIST.lock("metrics", ttl=lock_ttl_short) as ok:
+                    if ok:
+                        res = _run_safely(_update_metrics)
+                        results["metrics"] = res
+                        cycle_ok &= bool(res.get("ok", True))
+                    else:
+                        _log("skip_lock", step="metrics")
+
+            # --- Summary & Telemetry ---
+            _log("cycle",
+                 cycle=cycles,
+                 sys=_sys_metrics(),
+                 summary={k: _compact(v) for k, v in results.items()})
+            _ping_health()
+
+            # Update failure streak & choose sleep
+            fail_streak = 0 if cycle_ok else min(fail_streak + 1, BACKOFF_MAX_EXP)
+            if RUN_ONCE:
+                break
+
+            if did_work:
+                _sleep_with_jitter(INTERVAL_SEC)
+            else:
+                # Adaptive backoff when cycles keep failing (protects Airtable)
+                backoff_mult = BACKOFF_BASE * (2 ** fail_streak)
+                sleep_sec = max(1.0, IDLE_INTERVAL_SEC * backoff_mult)
+                _sleep_with_jitter(sleep_sec)
+
+    finally:
+        # Final metrics flush on shutdown (best-effort)
         if ENABLE_METRICS:
-            with DIST.lock("metrics", ttl=max(30, INTERVAL_SEC * 2)) as ok:
-                if ok:
-                    results["metrics"] = _update_metrics()
-                else:
-                    _log("skip_lock", step="metrics")
-
-        # --- Summary & Telemetry ---
-        _log("cycle", cycle=cycles, summary={k: _compact(v) for k, v in results.items()})
-        _ping_health()
-
-        if RUN_ONCE:
-            break
-
-        _sleep_with_jitter(IDLE_INTERVAL_SEC if not did_work else INTERVAL_SEC)
+            try:
+                res = _run_safely(_update_metrics, timeout_sec=max(30, RUNNER_TIMEOUT_SEC // 2))
+                _log("metrics_flush", result=_compact(res))
+            except Exception:
+                traceback.print_exc()
 
     _log("shutdown", cycles=cycles)
     print(f"🏁 {WORKER_NAME}[{INSTANCE_ID}] stopped cleanly after {cycles} cycles.")
-    
 
 if __name__ == "__main__":
     main()

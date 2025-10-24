@@ -1,4 +1,14 @@
-# engine_runner.py
+"""
+⚙️  Engine Runner — Hardened Edition
+-----------------------------------
+Adds:
+  • Per-step timeout (prevents stuck Airtable/API calls)
+  • Signal-safe retry/backoff loop
+  • Compact structured logs
+  • Health pings at start and finish
+  • Graceful shutdown + Redis-safe cleanup
+"""
+
 from __future__ import annotations
 
 import os
@@ -9,9 +19,10 @@ import uuid
 import signal
 import random
 import traceback
+import argparse
+import concurrent.futures
 from typing import Any, Dict, Optional, Tuple
 from datetime import datetime, timezone
-import argparse
 
 # ---------- Optional Redis (for distributed lock; safe fallback) ----------
 try:
@@ -37,15 +48,17 @@ ENV = {
     "LEADS_RETRY_LIMIT": int(os.getenv("LEADS_RETRY_LIMIT", "100")),
     "INBOUNDS_LIMIT": int(os.getenv("INBOUNDS_LIMIT", "25")),
     # Retries/backoff for each step
-    "RETRIES": int(os.getenv("ENGINE_RETRIES", "2")),  # per step
-    "BASE_BACKOFF_SEC": int(os.getenv("ENGINE_BASE_BACKOFF", "2")),  # exponential: 2,4,8...
-    # Distributed lock (optional)
+    "RETRIES": int(os.getenv("ENGINE_RETRIES", "2")),
+    "BASE_BACKOFF_SEC": int(os.getenv("ENGINE_BASE_BACKOFF", "2")),
+    # Timeout per step
+    "STEP_TIMEOUT_SEC": int(os.getenv("ENGINE_STEP_TIMEOUT_SEC", "180")),
+    # Distributed lock
     "REDIS_URL": os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL"),
     "REDIS_TLS": os.getenv("REDIS_TLS", "true").lower() in ("1", "true", "yes"),
     "LOCK_TTL_SEC": int(os.getenv("ENGINE_LOCK_TTL_SEC", "300")),
     "LOCK_KEY": os.getenv("ENGINE_LOCK_KEY", "sms:engine_runner:lock"),
     # Observability
-    "HEALTHCHECK_URL": os.getenv("HEALTHCHECK_URL"),  # optional POST ping
+    "HEALTHCHECK_URL": os.getenv("HEALTHCHECK_URL"),
     "SERVICE_NAME": os.getenv("ENGINE_SERVICE_NAME", "engine_runner"),
     "INSTANCE_ID": os.getenv("ENGINE_INSTANCE_ID", str(uuid.uuid4())[:8]),
 }
@@ -53,9 +66,11 @@ ENV = {
 _SHUTDOWN = False
 
 
+# ---------- Signal Handling ----------
 def _sig_handler(signum, frame):
     global _SHUTDOWN
     _SHUTDOWN = True
+    jlog("signal", sig=signum, note="shutdown_requested")
 
 
 signal.signal(signal.SIGINT, _sig_handler)
@@ -69,7 +84,8 @@ def _now_iso() -> str:
 def jlog(event: str, **kw):
     print(
         json.dumps(
-            {"ts": _now_iso(), "event": event, "service": ENV["SERVICE_NAME"], "instance": ENV["INSTANCE_ID"], **kw}, ensure_ascii=False
+            {"ts": _now_iso(), "event": event, "service": ENV["SERVICE_NAME"], "instance": ENV["INSTANCE_ID"], **kw},
+            ensure_ascii=False,
         )
     )
 
@@ -81,12 +97,18 @@ def _health_ping(stage: str, ok: bool, extra: Optional[Dict[str, Any]] = None):
     try:
         import requests
 
-        payload = {"ts": _now_iso(), "service": ENV["SERVICE_NAME"], "instance": ENV["INSTANCE_ID"], "stage": stage, "ok": bool(ok)}
+        payload = {
+            "ts": _now_iso(),
+            "service": ENV["SERVICE_NAME"],
+            "instance": ENV["INSTANCE_ID"],
+            "stage": stage,
+            "ok": bool(ok),
+        }
         if extra:
             payload.update(extra)
         requests.post(url, json=payload, timeout=3)
     except Exception:
-        pass  # best effort
+        pass
 
 
 # ---------- Redis lock helper ----------
@@ -94,8 +116,8 @@ class DistLock:
     def __init__(self, url: Optional[str], tls: bool, key: str, ttl: int):
         self.key = key
         self.ttl = ttl
-        self.r = None
         self.token = str(uuid.uuid4())
+        self.r = None
         if url and _redis:
             try:
                 self.r = _redis.from_url(url, ssl=tls, decode_responses=True, socket_timeout=3)
@@ -105,12 +127,12 @@ class DistLock:
 
     def acquire(self) -> bool:
         if not self.r:
-            return True  # no redis -> single-run best effort
+            return True
         try:
             return bool(self.r.set(self.key, self.token, nx=True, ex=self.ttl))
         except Exception:
             traceback.print_exc()
-            return True  # fail-open
+            return True
 
     def release(self):
         if not self.r:
@@ -128,14 +150,25 @@ class DistLock:
             traceback.print_exc()
 
 
-# ---------- Safe runner with retries ----------
+# ---------- Timeout-safe wrapper ----------
+def _run_with_timeout(fn, timeout_sec: int, *args, **kwargs):
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(fn, *args, **kwargs)
+            return fut.result(timeout=timeout_sec)
+    except concurrent.futures.TimeoutError:
+        raise RuntimeError(f"timeout_after_{timeout_sec}s")
+
+
+# ---------- Step Runner with retries ----------
 def _run_step(name: str, fn, *args, retries: int, base_backoff: int, **kwargs) -> Tuple[bool, Dict[str, Any]]:
-    attempts = 0
-    last_err = None
+    attempts, last_err = 0, None
+    timeout_sec = ENV["STEP_TIMEOUT_SEC"]
+
     while attempts <= retries and not _SHUTDOWN:
         try:
-            jlog("step_start", step=name, attempt=attempts + 1)
-            rv = fn(*args, **kwargs)
+            jlog("step_start", step=name, attempt=attempts + 1, timeout_sec=timeout_sec)
+            rv = _run_with_timeout(fn, timeout_sec, *args, **kwargs)
             jlog("step_ok", step=name, attempt=attempts + 1, result_summary=_compact_result(rv))
             return True, rv if isinstance(rv, dict) else {"result": rv}
         except Exception as e:
@@ -143,21 +176,20 @@ def _run_step(name: str, fn, *args, retries: int, base_backoff: int, **kwargs) -
             traceback.print_exc()
             if attempts == retries:
                 break
-            delay = base_backoff * (2**attempts)
-            # add a little jitter
-            delay += random.randint(0, 2)
+            delay = base_backoff * (2**attempts) + random.randint(0, 2)
             jlog("step_retry", step=name, attempt=attempts + 1, delay_sec=delay, error=last_err)
-            time.sleep(delay)
+            end = time.time() + delay
+            while time.time() < end and not _SHUTDOWN:
+                time.sleep(0.25)
             attempts += 1
     jlog("step_fail", step=name, error=last_err or "unknown")
     return False, {"ok": False, "error": last_err or "unknown"}
 
 
 def _compact_result(result: Any) -> Dict[str, Any]:
-    """Trim big dicts to the fields you care about in logs."""
     if not isinstance(result, dict):
         return {"ok": bool(result)}
-    keys = ("ok", "processed", "results", "total_sent", "retried", "processed", "errors", "quiet_hours")
+    keys = ("ok", "processed", "results", "total_sent", "retried", "errors", "quiet_hours", "queued")
     return {k: result.get(k) for k in keys if k in result}
 
 
@@ -168,17 +200,16 @@ def _parse_args():
     p.add_argument("--leads", action="store_true", help="Run leads step (retries/followups).")
     p.add_argument("--inbounds", action="store_true", help="Run inbounds step (autoresponder).")
     p.add_argument("--all", action="store_true", help="Run all steps (default).")
-
     p.add_argument("--prospects-limit", type=str, default=ENV["PROSPECTS_LIMIT"])
     p.add_argument("--leads-retry-limit", type=int, default=ENV["LEADS_RETRY_LIMIT"])
     p.add_argument("--inbounds-limit", type=int, default=ENV["INBOUNDS_LIMIT"])
-
     p.add_argument("--retries", type=int, default=ENV["RETRIES"])
     p.add_argument("--backoff", type=int, default=ENV["BASE_BACKOFF_SEC"])
     p.add_argument("--no-lock", action="store_true", help="Skip distributed lock.")
     return p.parse_args()
 
 
+# ---------- MAIN ----------
 def main():
     if run_engine is None:
         jlog("fatal_import", error=_IMP_ERR_TXT)
@@ -187,13 +218,11 @@ def main():
 
     args = _parse_args()
 
-    # Determine which steps to run (CLI overrides env toggles)
     run_all = args.all or (not args.prospects and not args.leads and not args.inbounds)
     do_prospects = (args.prospects or run_all) and ENV["ENABLE_PROSPECTS"]
     do_leads = (args.leads or run_all) and ENV["ENABLE_LEADS"]
     do_inbounds = (args.inbounds or run_all) and ENV["ENABLE_INBOUNDS"]
 
-    # Distributed lock (so only one cron instance executes at a time)
     lock = DistLock(
         url=None if args.no_lock else ENV["REDIS_URL"],
         tls=ENV["REDIS_TLS"],
@@ -208,9 +237,10 @@ def main():
 
     exit_code = 0
     jlog("runner_start", steps={"prospects": do_prospects, "leads": do_leads, "inbounds": do_inbounds})
+    _health_ping("runner_start", ok=True)
 
     try:
-        # --- Prospects (outbound campaign queueing) ---
+        # --- Prospects ---
         if do_prospects and not _SHUTDOWN:
             limit = args.prospects_limit.strip() if isinstance(args.prospects_limit, str) else str(args.prospects_limit)
             ok, res = _run_step(
@@ -225,7 +255,7 @@ def main():
             if not ok:
                 exit_code = 1
 
-        # --- Leads (retry worker / followups) ---
+        # --- Leads ---
         if do_leads and not _SHUTDOWN:
             ok, res = _run_step(
                 "leads",
@@ -239,7 +269,7 @@ def main():
             if not ok:
                 exit_code = 1
 
-        # --- Inbounds (autoresponder) ---
+        # --- Inbounds ---
         if do_inbounds and not _SHUTDOWN:
             ok, res = _run_step(
                 "inbounds",
@@ -254,6 +284,7 @@ def main():
                 exit_code = 1
 
         jlog("runner_finish", code=exit_code)
+        _health_ping("runner_finish", ok=(exit_code == 0))
 
     finally:
         try:
