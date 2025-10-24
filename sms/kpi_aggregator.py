@@ -93,7 +93,8 @@ def aggregate_kpis() -> Dict:
         logger.info("TEST_MODE active – skipping writes.")
         return {"ok": True, "note": "test mode", "written": 0}
 
-    tbl = CONNECTOR.performance()
+    tbl_handle = CONNECTOR.performance()
+    tbl = getattr(tbl_handle, "table", tbl_handle)
     if not tbl:
         return {"ok": False, "error": "No performance table configured"}
 

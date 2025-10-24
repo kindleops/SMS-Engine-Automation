@@ -87,7 +87,8 @@ def log_kpi(
     - value: numeric (int or float)
     - overwrite=True → update today's row for metric+campaign
     """
-    tbl = CONNECTOR.performance()
+    tbl_handle = CONNECTOR.performance()
+    tbl = getattr(tbl_handle, "table", tbl_handle)
     if not tbl:
         msg = "⚠️ KPI Logger: PERFORMANCE table not configured"
         logger.warning(msg)

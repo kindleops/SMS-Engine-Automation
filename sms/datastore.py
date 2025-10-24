@@ -61,6 +61,41 @@ _FIELD_NORMALISER = re.compile(r"[^a-z0-9]+")
 _field_map_cache: Dict[str, Dict[str, str]] = {}
 
 
+TABLES = {
+    "campaigns": "Campaigns",
+    "prospects": "Prospects",
+    "templates": "Templates",
+    "drip_queue": "Drip Queue",
+    "performance": "Performance",
+}
+
+_TABLE_BASE_PRIORITY: Dict[str, Tuple[str, ...]] = {
+    "Campaigns": (
+        "CAMPAIGNS_BASE_ID",
+        "LEADS_CONVOS_BASE",
+        "AIRTABLE_LEADS_CONVOS_BASE_ID",
+        "CAMPAIGN_CONTROL_BASE",
+        "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID",
+    ),
+    "Prospects": (
+        "LEADS_CONVOS_BASE",
+        "AIRTABLE_LEADS_CONVOS_BASE_ID",
+    ),
+    "Templates": (
+        "LEADS_CONVOS_BASE",
+        "AIRTABLE_LEADS_CONVOS_BASE_ID",
+    ),
+    "Drip Queue": (
+        "LEADS_CONVOS_BASE",
+        "AIRTABLE_LEADS_CONVOS_BASE_ID",
+    ),
+    "Performance": (
+        "PERFORMANCE_BASE",
+        "AIRTABLE_PERFORMANCE_BASE_ID",
+    ),
+}
+
+
 def _normalise(name: str | None) -> str:
     return _FIELD_NORMALISER.sub("", (name or "").lower())
 
@@ -170,6 +205,11 @@ class DataConnector:
         self._tables[key] = handle
         return handle
 
+    def table_handle(self, table_name: str) -> TableHandle:
+        env_keys = _TABLE_BASE_PRIORITY.get(table_name, ("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"))
+        base = _first_non_empty(*env_keys) if env_keys else None
+        return self._table(base, table_name)
+
     def conversations(self):
         return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), CONVERSATIONS_TABLE.name())
 
@@ -177,25 +217,19 @@ class DataConnector:
         return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), LEADS_TABLE.name())
 
     def prospects(self):
-        return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), PROSPECTS_TABLE.name())
+        return self.table_handle(TABLES["prospects"])
 
     def templates(self):
-        return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), TEMPLATES_TABLE.name())
+        return self.table_handle(TABLES["templates"])
 
     def drip_queue(self):
-        return self._table(_first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"), DRIP_QUEUE_TABLE.name())
+        return self.table_handle(TABLES["drip_queue"])
 
     def campaigns(self):
-        return self._table(
-            _first_non_empty(
-                "CAMPAIGNS_BASE_ID",
-                "LEADS_CONVOS_BASE",
-                "AIRTABLE_LEADS_CONVOS_BASE_ID",
-                "CAMPAIGN_CONTROL_BASE",
-                "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID",
-            ),
-            CAMPAIGNS_TABLE.name(),
-        )
+        return self.table_handle(TABLES["campaigns"])
+
+    def performance(self):
+        return self.table_handle(TABLES["performance"])
 
     def numbers(self):
         return self._table(_first_non_empty("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"), NUMBERS_TABLE_DEF.name())
