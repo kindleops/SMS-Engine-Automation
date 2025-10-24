@@ -881,11 +881,6 @@ DRIP_QUEUE_TABLE = TableDefinition(
             env_vars=("DRIP_SELLER_PHONE_FIELD",),
             fallbacks=("phone", "Phone"),
         ),
-        "TextGrid Phone Number": FieldDefinition(
-            default="TextGrid Phone Number",
-            env_vars=("DRIP_TEXTGRID_PHONE_FIELD",),
-            fallbacks=("TextGrid Phone Number",),
-        ),
         "PROPERTY_ID": FieldDefinition(
             default="Property ID",
             env_vars=("DRIP_PROPERTY_ID_FIELD",),

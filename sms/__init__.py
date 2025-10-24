@@ -1,62 +1,69 @@
-# sms/__init__.py
 """
-Package init + pyairtable v1 -> v2 compatibility shim.
+🚀 SMS Engine Package Init
+--------------------------
+Provides backward compatibility for pyairtable v1 → v2.
 
-Many modules still do:
-    from pyairtable import Table
+Legacy usage:
     Table(API_KEY, BASE_ID, "TableName")
 
-In pyairtable v2, that signature no longer works. We monkey-patch
-pyairtable.Table so the old 3-arg form is translated to v2's:
+v2 usage:
     Api(API_KEY).table(BASE_ID, "TableName")
 
-This runs before importing other sms.* modules (since FastAPI loads
-`sms.main:app`, which imports this __init__ first).
+This shim preserves compatibility for all legacy imports.
 """
 
-# Re-export anything you want from config (optional)
+import sys
+
+# ---- Optional: lightweight settings re-export ----
 try:
-    from .config import settings  # lightweight
+    from .config import settings  # type: ignore
 except Exception:
     settings = None  # type: ignore
 
 # ---- pyairtable v1 compatibility shim ----
 try:
-    import pyairtable as _pyat  # the package
+    import pyairtable as _pyat
     from pyairtable import Api as _Api
 
     try:
-        # Real v2 Table class (for advanced fallback if needed)
         from pyairtable.api.table import Table as _RealTable  # type: ignore
     except Exception:
         _RealTable = None  # type: ignore
 
+    # Simple cache to avoid re-instantiating Api for same key
+    _api_cache = {}
+
+    def _get_api(key: str):
+        if key not in _api_cache:
+            _api_cache[key] = _Api(key)
+        return _api_cache[key]
+
     class _CompatTable:
-        """
-        Drop-in replacement so existing code can continue to call:
-            Table(api_key, base_id, table_name)
-        Returns a v2 Table object from Api(api_key).table(base_id, table_name).
-        """
+        """Drop-in replacement for pyairtable.Table (v1-style constructor)."""
 
         def __new__(cls, api_key, base_or_id, table_name, *args, **kwargs):
-            # If the caller accidentally passes a Base object, try to use the real ctor.
             try:
-                # Most legacy calls: (api_key:str, base_id:str, name:str)
-                return _Api(api_key).table(base_or_id, table_name)
-            except Exception:
-                # Ultimate fallback: if v2 Table is available and base_or_id looks like a Base
+                # Normal v1 pattern: (api_key, base_id, table_name)
+                return _get_api(api_key).table(base_or_id, table_name)
+            except Exception as e:
+                # If base_or_id is already a Base object, fallback to direct Table init
                 if _RealTable is not None and getattr(base_or_id, "__class__", None).__name__ == "Base":
                     try:
                         return _RealTable(None, base_or_id, table_name)  # type: ignore
                     except Exception:
                         pass
-                raise  # surface the original error for visibility
 
-    # Monkey-patch the package attribute
+                sys.stderr.write(
+                    f"[sms.init] ⚠️ pyairtable shim failed: {e.__class__.__name__}: {e}\n"
+                )
+                raise
+
+    # Monkey-patch pyairtable.Table globally
     _pyat.Table = _CompatTable  # type: ignore[attr-defined]
+    sys.stderr.write("[sms.init] ✅ pyairtable Table shim applied successfully.\n")
 
-except Exception:
-    # If pyairtable isn't installed yet, do nothing; imports will fail normally.
+except Exception as e:
+    sys.stderr.write(f"[sms.init] ⚠️ pyairtable not available or shim skipped: {e}\n")
     pass
 
 __all__ = ["settings"]
