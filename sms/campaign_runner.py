@@ -326,7 +326,6 @@ def _build_campaign_queue(campaign: Dict[str, Any], limit: int) -> int:
                 "Campaign": [campaign_id] if campaign_id else None,
                 # Try both singular/plural; Airtable will accept whichever exists and ignore the other on retry
                 "Prospect": [pid],
-                "Prospects": [pid],
                 "Seller Phone Number": phone_norm,
                 "TextGrid Phone Number": tg_number,  # may be None; that's OK—outbound can backfill if needed
                 "Message": message,
