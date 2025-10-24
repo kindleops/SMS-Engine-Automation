@@ -77,6 +77,8 @@ services:
         value: "2"
       - key: ENABLE_METRICS
         value: "true"
+      - key: ENABLE_CAMPAIGNS
+        value: "true"
 
       # === Debugging / Mode Flags ===
       - key: LOG_LEVEL
