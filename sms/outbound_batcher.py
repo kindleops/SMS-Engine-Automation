@@ -408,3 +408,19 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
     log.info(f"✅ Batch complete — sent={total_sent}, failed={total_failed}, rate={delivery_rate:.1f}%")
 
     return {"ok": True, "total_sent": total_sent, "total_failed": total_failed, "errors": errors}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Campaign-level queuing interface
+# ──────────────────────────────────────────────────────────────────────────────
+def queue_campaign(campaign_id: str, limit: int = 500) -> int:
+    """
+    Backward-compatible stub used by campaign_runner.
+    Simply runs send_batch() filtered by the given campaign_id,
+    and returns how many messages were processed.
+    """
+    try:
+        result = send_batch(campaign_id=campaign_id, limit=limit)
+        return int(result.get("total_sent", 0))
+    except Exception as e:
+        log.error(f"queue_campaign() failed for {campaign_id}: {e}", exc_info=True)
+        return 0
