@@ -285,8 +285,19 @@ class CampaignRunner:
 # Entry Points
 # ---------------------------------------------------------------
 def run_campaigns(limit: int = 50, send_after_queue: bool = False, concurrency: int = 10) -> Dict[str, Any]:
+    if isinstance(limit, str):
+        if limit.upper() == "ALL":
+            limit = 999999
+        else:
+            try:
+                limit = int(limit)
+            except ValueError:
+                limit = 500
+    print(f"🚀 run_campaigns starting — limit={limit}, send_after_queue={send_after_queue}")
+
     runner = CampaignRunner(send_after_queue=bool(send_after_queue), concurrency=concurrency)
-    return runner.run(limit)
+    result = runner.run(limit)
+    return dict(result)
 
 
 def run_campaigns_sync(limit: int = 50, send_after_queue: bool = False, concurrency: int = 10) -> Dict[str, Any]:
