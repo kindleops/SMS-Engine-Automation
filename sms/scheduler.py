@@ -76,7 +76,7 @@ DRIP_CAMPAIGN_LINK_FIELD = DRIP_FIELDS.get("Campaign", "Campaign")
 DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS.get("Next Send Date", "Next Send Date")
 DRIP_UI_FIELD = DRIP_FIELDS.get("UI", "UI")
 DRIP_PROCESSOR_FIELD = DRIP_FIELDS.get("Processor", "Processor")
-DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS.get("Message Preview", "Message Preview")
+DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS.get("Message Preview", "Message")
 
 
 # -------------------------------------------------------------

@@ -270,7 +270,7 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
     seller_phone_key    = F.get("SELLER_PHONE", "Seller Phone Number")
     from_number_key     = F.get("FROM_NUMBER", "TextGrid Phone Number")
     market_key          = F.get("MARKET", "Market")
-    message_preview_key = F.get("MESSAGE_PREVIEW", "Message Preview")
+    message_preview_key = F.get("MESSAGE_PREVIEW", "Message")
     property_id_key     = F.get("PROPERTY_ID", "Property ID")
     campaign_link_key   = F.get("CAMPAIGN_LINK", "Campaign")
 
