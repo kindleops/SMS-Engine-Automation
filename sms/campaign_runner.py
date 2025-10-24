@@ -1,165 +1,107 @@
 """
-⚡ Campaign Runner — Final 2025 Build
-────────────────────────────────────────────
-• Reads campaigns from Campaign Control Base
-• Queues messages into Drip Queue in Leads/Convos Base
-• Logs metrics in Performance Base
-• Auto-activates scheduled campaigns
-• Handles quiet hours + time window + error isolation
+🚀 Campaign Runner — Datastore-Integrated Final Version
+────────────────────────────────────────────────────────
+Activates scheduled campaigns, queues eligible leads,
+and triggers outbound sending automatically.
 """
 
 from __future__ import annotations
 import traceback
 from datetime import datetime, timezone
+from typing import Any, Dict
 
 from sms.runtime import get_logger
-from sms.airtable_client import get_table
+from sms.datastore import CONNECTOR, list_records, update_record
+from sms.queue_builder import build_campaign_queue
 from sms.outbound_batcher import send_batch
-from sms.metrics_tracker import record_campaign_metric
 
 log = get_logger("campaign_runner")
 
 
 # ============================================================
-# Helpers for multi-base access
+# Helpers
 # ============================================================
-def get_campaigns():
-    """Return Campaigns table from Campaign Control base."""
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _within_window(f: Dict[str, Any]) -> bool:
+    """Check if campaign is within start/end date window."""
     try:
-        tbl = get_table("CAMPAIGN_CONTROL_BASE", "Campaigns")
-        log.info("✅ Connected to Campaign Control base → Campaigns")
-        return tbl
-    except Exception as e:
-        log.error(f"❌ Failed to connect to Campaign Control base: {e}")
-        return None
+        start_str = f.get("Start Date")
+        end_str = f.get("End Date")
+        now = _utcnow()
 
-
-def get_drip_queue():
-    """Return Drip Queue table from Leads/Convos base."""
-    try:
-        tbl = get_table("LEADS_CONVOS_BASE", "Drip Queue")
-        log.info("✅ Connected to Leads/Convos base → Drip Queue")
-        return tbl
-    except Exception as e:
-        log.error(f"❌ Failed to connect to Leads/Convos base: {e}")
-        return None
-
-
-def get_performance():
-    """Return KPI/Performance table."""
-    try:
-        tbl = get_table("PERFORMANCE_BASE", "KPIs")
-        log.info("✅ Connected to Performance base → KPIs")
-        return tbl
-    except Exception as e:
-        log.error(f"⚠️ Performance logging unavailable: {e}")
-        return None
-
-
-# ============================================================
-# Time & window helpers
-# ============================================================
-def _within_window(fields: dict) -> bool:
-    """Check if current UTC time is inside Start/End window."""
-    now = datetime.now(timezone.utc)
-    start = fields.get("Start Date")
-    end = fields.get("End Date")
-
-    try:
-        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00")) if start else None
-        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00")) if end else None
+        start_ok = not start_str or datetime.fromisoformat(start_str) <= now
+        end_ok = not end_str or datetime.fromisoformat(end_str) >= now
+        return start_ok and end_ok
     except Exception:
-        start_dt = end_dt = None
-
-    if start_dt and now < start_dt:
-        return False
-    if end_dt and now > end_dt:
-        return False
-    return True
+        return True
 
 
 # ============================================================
-# Campaign processing
+# Core
 # ============================================================
-def _queue_for_campaign(camp: dict, limit: int = 500) -> int:
-    """Push messages for this campaign into the drip queue."""
+
+def run_campaigns(limit: int = 500, send_after_queue: bool = True) -> Dict[str, Any]:
+    """Activate scheduled campaigns, queue leads, and send messages."""
     try:
-        name = camp["fields"].get("Campaign Name", "Unknown")
-        cid = camp["id"]
-        status = str(camp["fields"].get("Status", "")).lower()
+        camp_handle = CONNECTOR.campaigns()
+        campaigns = list_records(camp_handle)
+        if not campaigns:
+            log.warning("⚠️ No campaigns found.")
+            return {"ok": False, "error": "No campaigns found"}
 
-        drip_tbl = get_drip_queue()
-        if not drip_tbl:
-            log.warning("⚠️ No drip queue table available.")
-            return 0
+        total_processed = 0
 
-        # --- queue logic ---
-        from sms.queue_builder import build_campaign_queue  # local helper module
-        queued = build_campaign_queue(campaign_id=cid, limit=limit)
-        log.info(f"📤 Queued {queued} messages for campaign → {name}")
-        record_campaign_metric(name, "Queued", queued)
-        return queued
-
-    except Exception as e:
-        log.warning(f"⚠️ Failed to queue campaign: {e}")
-        traceback.print_exc()
-        return 0
-
-
-# ============================================================
-# Main runner
-# ============================================================
-def run_campaigns(limit: int = 500, send_after_queue: bool = True) -> dict:
-    """Activate scheduled campaigns, queue actives, optionally send."""
-    try:
-        log.info("🚀 Starting Campaign Runner (Render/Manual mode)")
-        camp_tbl = get_campaigns()
-        if not camp_tbl:
-            return {"ok": False, "error": "campaigns_table_unavailable"}
-
-        records = camp_tbl.all()
-        if not records:
-            return {"ok": True, "queued": 0, "note": "no_campaigns"}
-
-        total = 0
-        for camp in records:
-            f = camp.get("fields", {})
+        for camp in campaigns:
+            f = camp.get("fields", {}) or {}
             cid = camp.get("id")
-            name = f.get("Campaign Name", "Unknown")
-            status = str(f.get("Status", "")).lower()
+            name = f.get("Campaign Name", "Unnamed Campaign")
+            status = str(f.get("Status", "")).strip().lower()
 
-            # Auto-activate scheduled ones
+            # ── Activate scheduled ──
             if status == "scheduled" and _within_window(f):
                 try:
-                    camp_tbl.update(cid, {"Status": "Active"})
+                    update_record(camp_handle, cid, {"Status": "Active"})
                     log.info(f"⏰ Activated scheduled campaign → {name}")
                     status = "active"
                 except Exception as e:
-                    log.warning(f"⚠️ Could not activate campaign {name}: {e}")
+                    log.warning(f"⚠️ Failed to activate campaign {cid}: {e}")
 
-            # Process actives
+            # ── Process active campaigns ──
             if status in ("active", "running") and _within_window(f):
-                total += _queue_for_campaign(camp, limit)
+                try:
+                    queued = build_campaign_queue(camp, limit)
+                    total_processed += queued
+                    log.info(f"📤 Queued {queued} messages for campaign → {name}")
+                except Exception as e:
+                    log.warning(f"⚠️ Failed to queue campaign {name}: {e}")
+                    traceback.print_exc()
 
-        # Trigger outbound send
+        # ── Trigger outbound send batch ──
         if send_after_queue:
             try:
-                result = send_batch(limit=limit)
-                log.info(f"📦 send_batch complete: {result}")
+                res = send_batch(limit=limit)
+                log.info(f"📦 Outbound batch triggered → {res}")
             except Exception as e:
                 log.warning(f"⚠️ send_batch failed: {e}")
                 traceback.print_exc()
 
-        log.info(f"✅ Campaign cycle complete — total queued: {total}")
-        return {"ok": True, "queued": total}
+        log.info(f"✅ Campaign runner complete — total processed={total_processed}")
+        return {"ok": True, "processed": total_processed, "queued": total_processed}
 
     except Exception as e:
         traceback.print_exc()
+        log.error(f"❌ run_campaigns failed: {e}")
         return {"ok": False, "error": str(e)}
 
 
 # ============================================================
-# Entry
+# CLI Entrypoint
 # ============================================================
+
 if __name__ == "__main__":
-    print(run_campaigns(limit=5))
+    log.info("🚀 Starting Campaign Runner (manual execution mode)")
+    print(run_campaigns(limit=500))

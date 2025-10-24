@@ -1,82 +1,94 @@
-# sms/queue_builder.py
 """
-📦 Drip Queue Builder — Datastore Integration Build
-────────────────────────────────────────────
-Pulls leads for active campaigns and creates Drip Queue
-records in Airtable via CONNECTOR abstraction layer.
+📦 Queue Builder — Prospect-Based Final Version
+──────────────────────────────────────────────────────
+Builds SMS queue from active campaigns and linked prospects.
 """
 
 from __future__ import annotations
 import traceback
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Any, Dict
+
 from sms.runtime import get_logger
-from sms.datastore import CONNECTOR
+from sms.datastore import CONNECTOR, list_records, update_record, _compact
 from sms.airtable_schema import DripStatus
 
 log = get_logger("queue_builder")
 
 
-def build_campaign_queue(campaign_record: Dict[str, Any], limit: int = 500) -> int:
-    """
-    For the given campaign Airtable record, find matching leads and push them to Drip Queue.
-    """
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def build_campaign_queue(campaign: Dict[str, Any], limit: int = 500) -> int:
+    """Queue messages for an active campaign into Drip Queue (Prospect-based)."""
     try:
-        leads_tbl = CONNECTOR.leads()
+        # ── Get Airtable table handles
+        prospects_tbl = CONNECTOR.prospects()
         drip_tbl = CONNECTOR.drip_queue()
 
-        if not leads_tbl or not drip_tbl:
-            log.error("❌ Missing leads or drip queue table connection.")
+        # ── Fetch prospects (safe)
+        prospects = list_records(prospects_tbl, max_records=limit)
+        if not prospects:
+            log.info("⚠️ No prospects found for campaign.")
             return 0
 
-        campaign_id = campaign_record.get("id")
-        campaign_fields = campaign_record.get("fields", {})
-        campaign_name = campaign_fields.get("Campaign Name", "Unknown")
+        # ── Campaign fields
+        f = campaign.get("fields", {}) or {}
+        campaign_id = campaign.get("id")
+        campaign_name = f.get("Campaign Name", "Unnamed Campaign")
+        textgrid_num = f.get("TextGrid Phone Number") or f.get("From Number")
+        message_body = f.get("Message") or f.get("Body")
 
-        # ✅ Pull all leads linked to this campaign
-        all_leads = leads_tbl.all()
-        leads = [
-            l for l in all_leads
-            if campaign_id in {str(x) for x in (l["fields"].get("Campaign") or [])}
-        ]
-
-        if not leads:
-            log.info(f"ℹ️ No leads found for campaign {campaign_name}")
+        if not message_body or not textgrid_num:
+            log.warning(f"⚠️ Campaign {campaign_name} missing message or TextGrid number.")
             return 0
 
         queued = 0
-        now = datetime.now(timezone.utc).isoformat()
+        now = _utcnow()
 
-        for lead in leads[:limit]:
-            f = lead.get("fields", {})
-            phone = f.get("Seller Phone Number")
-            msg = f.get("Message") or f.get("Template Message") or ""
-            market = f.get("Market", "")
-            prop = f.get("Property Address", "")
+        for prospect in prospects:
+            pf = prospect.get("fields", {}) or {}
 
-            if not phone or not msg:
+            # ── Match only prospects linked to this campaign (if applicable)
+            linked_campaigns = pf.get("Campaign") or pf.get("Campaigns") or []
+            if linked_campaigns and campaign_id not in linked_campaigns:
                 continue
 
-            payload = {
-                "Seller Phone Number": phone,
-                "Message": msg,
-                "Market": market,
-                "Property Address": prop,
-                "Status": DripStatus.READY.value,
-                "Campaign": [campaign_id],
-                "Queued At": now,
-            }
+            # ── Get seller phone
+            seller_num = (
+                pf.get("Seller Phone Number")
+                or pf.get("Phone")
+                or pf.get("Primary Phone")
+                or pf.get("Mobile")
+                or pf.get("Owner Phone")
+            )
+            if not seller_num:
+                continue
 
+            # ── Prepare payload
+            drip_payload = _compact({
+                "Campaign": [campaign_id],
+                "Campaign Name": campaign_name,
+                "Prospect": [prospect.get("id")],
+                "Seller Phone Number": seller_num,
+                "TextGrid Phone Number": textgrid_num,
+                "Message": message_body,
+                "Status": DripStatus.QUEUED.value,
+                "Next Send At": now.isoformat(),
+            })
+
+            # ── Create or update queue entry
             try:
-                drip_tbl.create(payload)
+                update_record(drip_tbl, None, drip_payload)
                 queued += 1
             except Exception as e:
-                log.warning(f"⚠️ Failed to create drip record for {phone}: {e}")
+                log.warning(f"⚠️ Failed to queue {seller_num}: {e}")
 
-        log.info(f"✅ Queued {queued} messages → campaign {campaign_name}")
+        log.info(f"✅ Queued {queued} messages for campaign → {campaign_name}")
         return queued
 
     except Exception as e:
-        log.error(f"❌ build_campaign_queue failed: {e}")
         traceback.print_exc()
+        log.error(f"❌ build_campaign_queue failed: {e}")
         return 0
