@@ -3448,3 +3448,32 @@ def devops_redis_metrics_field_candidates(keys: Iterable[str]) -> Dict[str, Tupl
         definition = DEVOPS_REDIS_METRICS_TABLE.fields[key]
         results[key] = definition.candidates()
     return results
+
+# ---------------------------------------------------------------------------
+# Default Conversation Payload Helper
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone
+
+def default_conversation_payload(
+    from_number: str,
+    to_number: str,
+    body: str,
+    processor: ConversationProcessor = ConversationProcessor.CAMPAIGN_RUNNER,
+) -> dict:
+    """
+    Canonical payload for new outbound conversation records.
+    Maps to live Airtable schema:
+      • TextGrid Phone Number → sending DID
+      • Seller Phone Number   → recipient (lead)
+      • Message               → SMS body
+    """
+    return {
+        "TextGrid Phone Number": from_number,      # our sending number (FROM)
+        "Seller Phone Number": to_number,          # seller's phone (TO)
+        "Message": body,                           # SMS content
+        "Direction": ConversationDirection.OUTBOUND.value,
+        "Delivery Status": ConversationDeliveryStatus.QUEUED.value,
+        "Processed By": processor.value,
+        "Sent At": datetime.now(timezone.utc).isoformat(),
+    }
