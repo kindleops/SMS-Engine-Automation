@@ -267,3 +267,8 @@ cronJobs:
     schedule: "*/5 * * * *"
     command: >
       curl -sf "https://rei-sms-engine.onrender.com/health"
+
+  - type: worker
+    name: rei-sms-campaign-runner
+    env: python
+    startCommand: python -m sms.campaign_runner
