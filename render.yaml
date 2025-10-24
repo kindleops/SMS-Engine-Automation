@@ -186,6 +186,41 @@ services:
       - key: TEST_MODE
         value: "false"
 
+  # ⚙️ Campaign Runner Worker
+  - type: worker
+    name: rei-sms-campaign-runner
+    env: python
+    plan: free
+    runtime: python3.11
+    buildCommand: |
+      pip install --upgrade pip setuptools wheel
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: python -u -m sms.campaign_runner
+    autoDeploy: true
+    previews:
+      enabled: false
+    envVars:
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: LEADS_CONVOS_BASE
+        sync: false
+      - key: PERFORMANCE_BASE
+        sync: false
+      - key: TEXTGRID_ACCOUNT_SID
+        sync: false
+      - key: TEXTGRID_AUTH_TOKEN
+        sync: false
+      - key: CRON_TOKEN
+        sync: false
+      - key: QUIET_HOURS_ENFORCED
+        value: "true"
+      - key: QUIET_START_HOUR_LOCAL
+        value: "21"
+      - key: QUIET_END_HOUR_LOCAL
+        value: "9"
+      - key: TEST_MODE
+        value: "false"
+
 # =====================================================
 #  Cron Jobs — Automated Engine Orchestration
 # =====================================================
