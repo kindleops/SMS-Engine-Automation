@@ -396,6 +396,10 @@ def _base_intent(body: str) -> str:
     text = (body or "").lower().strip()
     if not text:
         return "neutral"
+    
+    # detect neutral inquiry like "who is this" or "how did you get my number"
+    if any(p in text for p in ["who is this", "how did you get", "why are you", "what is this about"]):
+        return "inquiry"
 
     if any(w in text for w in STOP_WORDS):
         return "optout"
@@ -428,6 +432,8 @@ def _event_for_stage(stage_label: str, base_intent: str) -> str:
 
     if stage_label == STAGE1:
         if base_intent == "affirm":
+            return "ownership_yes"
+        if base_intent == "inquiry":  # handle "who is this" / "how did you get my number"
             return "ownership_yes"
         if base_intent in {"deny"}:
             return "ownership_no"
