@@ -13,7 +13,7 @@ import traceback
 from datetime import datetime, timezone
 
 from sms.runtime import get_logger
-from sms.airtable import get_table
+from sms.airtable_client import get_table
 from sms.outbound_batcher import send_batch
 from sms.metrics_tracker import record_campaign_metric
 
