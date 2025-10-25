@@ -21,6 +21,7 @@ from sms.datastore import (
     update_conversation,        # update by record id with fields
     update_record,              # generic table update
     touch_lead,                 # update last-activity trails
+    log_message,
 )
 from sms.airtable_schema import (
     ConversationDirection,
@@ -211,6 +212,20 @@ def _handle_inbound(data: Dict[str, Any]) -> Dict[str, Any]:
         status="DELIVERED",
         processed_by=None,  # leave blank so the Autoresponder can pick it up
     )
+    try:
+        log_message(
+            CONNECTOR,
+            conversation_id=(record or {}).get("id"),
+            direction="INBOUND",
+            to_phone=to_e164,
+            from_phone=from_e164,
+            body=body,
+            status="RECEIVED",
+            provider_sid=sid,
+            provider_error=None,
+        )
+    except Exception:
+        logger.warning("Inbound message logging failed", exc_info=True)
     _touch_lead_safe(lead_id, body)
 
     if to_e164 and increment_delivered:
