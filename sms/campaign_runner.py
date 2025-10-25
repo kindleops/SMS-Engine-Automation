@@ -11,7 +11,6 @@ from sms.airtable_schema import DripStatus
 
 log = get_logger("campaign_runner")
 
-# UI icons (unchanged)
 STATUS_ICON = {
     "QUEUED": "⏳",
     "Sending…": "🔄",
@@ -44,72 +43,73 @@ def _norm_market(s: str | None) -> str | None:
         return None
     s = " ".join(str(s).strip().split())
     s = s.replace(" ,", ",").replace(",,", ",")
-    # normalize comma spacing to “City, ST”
     s = re.sub(r"\s*,\s*", ", ", s)
     return s
 
-# ============== name parsing + placeholders ==============
+# ============== name parsing ==============
 HONORIFICS = {"mr", "mrs", "ms", "dr", "miss", "sir", "madam", "mister"}
 
 def _extract_first_name(full_name: Optional[str]) -> str:
-    """
-    Robust first-name only:
-      - Handles 'LAST, FIRST M.' -> FIRST
-      - Handles 'First Middle Last' -> First
-      - Strips honorifics and punctuation
-      - Handles delimiters: '&', '/', '+'
-    """
     if not full_name:
         return ""
-
     s = str(full_name).strip()
-    # Split on household delimiters – take first person
     s = re.split(r"[&/,+]", s, maxsplit=1)[0].strip()
-
-    # If "LAST, FIRST ..." format, take the part after comma
     if "," in s:
         parts = [p.strip() for p in s.split(",", 1)]
         if len(parts) == 2:
             s = parts[1]
-
-    # Remove periods in initials (J., M.)
     s = s.replace(".", " ").strip()
-    # Collapse whitespace
     s = " ".join(s.split())
-
     tokens = s.split(" ")
-    # Drop honorifics
     tokens = [t for t in tokens if t and t.lower() not in HONORIFICS]
     if not tokens:
         return ""
+    return tokens[0].strip(" '\"-")
 
-    first = tokens[0]
-    # Strip leftover punctuation/quotes
-    first = first.strip(" '\"-")
-    return first
-
+# ============== placeholder replacement ==============
 def _apply_placeholders(template_body: str, pf: dict, first_name: str) -> str:
     """
-    Replace common placeholders without breaking other fields that already work.
-    We only force-fill first name tokens; others pass through if not found.
+    Smart field-aware placeholder replacement.
+    - Replaces {First} variants with extracted first name.
+    - Replaces any {FieldName} with value from prospect fields (fuzzy match).
+    - Removes unresolved placeholders cleanly.
     """
-    # Canonical map for fields you already use elsewhere
-    mapping = {
-        "{First}": first_name,
-        "{first}": first_name,
-        "{FIRST}": first_name.upper(),
-        "{First Name}": first_name,
-        "{First_Name}": first_name,
-    }
+    msg = template_body or ""
 
-    # Do *only* first-name replacements explicitly
-    msg = template_body
-    for k, v in mapping.items():
-        msg = msg.replace(k, v)
+    # First name variants
+    first_variants = [
+        "{First}", "{first}", "{FIRST}", "{First Name}", "{First_Name}",
+    ]
+    for key in first_variants:
+        msg = msg.replace(key, first_name or "")
 
-    return msg
+    # Match {FieldName} placeholders
+    all_placeholders = set(re.findall(r"\{([^{}]+)\}", msg))
+    for ph in all_placeholders:
+        normalized = ph.lower().replace("_", " ").strip()
+        replacement = None
+        # exact match
+        for k, v in pf.items():
+            if not v:
+                continue
+            if normalized == k.lower().strip():
+                replacement = str(v)
+                break
+        # fuzzy partials (Address → Property Address)
+        if not replacement:
+            for k, v in pf.items():
+                if not v:
+                    continue
+                if normalized in k.lower():
+                    replacement = str(v)
+                    break
+        msg = msg.replace(f"{{{ph}}}", replacement or "")
 
-# ============== template body ==============
+    # clean leftovers
+    msg = re.sub(r"\{[^{}]+\}", "", msg)
+    return " ".join(msg.split())
+
+# ============== template handling ==============
 def _get_template_body(templates_table, template_id: str) -> Optional[str]:
     try:
         rec = templates_table.get(template_id)
@@ -162,7 +162,6 @@ def _load_numbers_for_market(market_value: Optional[str]) -> List[str]:
         num = _number_from_fields(f)
         if num:
             pool.append(str(num).strip())
-    # dedupe preserve order
     return list(dict.fromkeys(pool))
 
 def _stable_rr_index(prospect_id: str, pool_len: int) -> int:
@@ -178,14 +177,13 @@ def _pick_textgrid_number_for_campaign(campaign_fields: dict, prospect_id: str) 
         return None
     return pool[_stable_rr_index(prospect_id, len(pool))]
 
-# ============== create drip with graceful fallbacks ==============
+# ============== Airtable create with retry ==============
 def _robust_create_drip(drip_tbl, payload: Dict[str, Any]) -> bool:
     try:
         drip_tbl.create(payload)
         return True
     except Exception as e:
         msg = str(e)
-        # If Market single-select value missing in Drip Queue config, retry without Market
         if "INVALID_MULTIPLE_CHOICE_OPTIONS" in msg or "Insufficient permissions" in msg:
             bad_market = payload.pop("Market", None)
             log.warning(f"[campaign_runner] ⚠️ Market select rejected ({bad_market}); retrying without Market.")
@@ -201,7 +199,6 @@ def _robust_create_drip(drip_tbl, payload: Dict[str, Any]) -> bool:
 # ============== campaign filters ==============
 def _eligible_campaigns(camp_tbl) -> List[Dict]:
     now_iso = _now().isoformat()
-    # Active OR (Scheduled and Start Time <= now), AND not Paused/Completed
     formula = (
         f"AND("
         f"OR({{Status}}='Active',AND({{Status}}='Scheduled',{{Start Time}}<='{now_iso}')),"
@@ -215,7 +212,7 @@ def _eligible_campaigns(camp_tbl) -> List[Dict]:
         log.error(f"❌ Failed to fetch campaigns: {e}")
         return []
 
-# ============== core queueing ==============
+# ============== queue campaigns ==============
 def _queue_one_campaign(camp: Dict, limit: int) -> int:
     camp_id = camp.get("id")
     cf = camp.get("fields", {}) or {}
@@ -223,14 +220,11 @@ def _queue_one_campaign(camp: Dict, limit: int) -> int:
     log.info(f"➡️ Queuing campaign: {cname}")
 
     drip_tbl = CONNECTOR.drip_queue().table
-
-    # Linked prospects (REQUIRED)
     pros_link = cf.get("Prospects") or []
     if not pros_link:
         log.warning(f"[campaign_runner] ⚠️ No linked prospects for campaign {cname}")
         return 0
 
-    # Fetch those prospects
     pros_tbl = CONNECTOR.prospects().table
     linked_ids = ",".join([f"RECORD_ID()='{pid}'" for pid in pros_link])
     formula = f"OR({linked_ids})"
@@ -243,19 +237,15 @@ def _queue_one_campaign(camp: Dict, limit: int) -> int:
         log.warning(f"[campaign_runner] ⚠️ No prospects returned for {cname}")
         return 0
 
-    # Templates (round-robin)
     tmpl_links = cf.get("Templates") or []
-    tmpl_pool = tmpl_links.copy()
-    tmpl_total = len(tmpl_pool)
-    tmpl_idx = 0
+    tmpl_total = len(tmpl_links)
     templates_tbl = CONNECTOR.templates().table if tmpl_total else None
+    tmpl_idx = 0
 
     queued = 0
     for p in prospects:
         pf = (p or {}).get("fields", {}) or {}
         pid = p.get("id") or ""
-
-        # Phones / Market / Names
         phone = _field_get(
             pf,
             "Seller Phone Number",
@@ -272,30 +262,26 @@ def _queue_one_campaign(camp: Dict, limit: int) -> int:
             _field_get(pf, "First Name", "Owner First Name", "Seller Name", "Owner Name", "Name")
         )
 
-        # Template round robin -> body + placeholders
         message = None
         tmpl_id = None
         if tmpl_total and templates_tbl:
-            tmpl_id = tmpl_pool[tmpl_idx % tmpl_total]
+            tmpl_id = tmpl_links[tmpl_idx % tmpl_total]
             tmpl_idx += 1
             body = _get_template_body(templates_tbl, tmpl_id)
             if body:
                 message = _apply_placeholders(body, pf, first_name)
 
-        # Fallback message if no body
         if not message:
             message = f"Hi {first_name}, this is Ryan, a local investor. Are you still the owner? Reply STOP to opt out."
 
-        # TextGrid number chosen per campaign market, evenly distributed by prospect id
         tg_number = _pick_textgrid_number_for_campaign(cf, pid)
-
-        payload: Dict[str, Any] = {
+        payload = {
             "Campaign": [camp_id] if camp_id else None,
             "Prospect": [pid] if pid else None,
             "Seller Phone Number": str(phone).strip(),
             "TextGrid Phone Number": tg_number,
             "Message": message,
-            "Market": prospect_market,  # will be removed on retry if select mismatch
+            "Market": prospect_market,
             "Property ID": _field_get(pf, "Property ID", "Property", "PropertyId"),
             "Status": DripStatus.QUEUED.value,
             "UI": STATUS_ICON["QUEUED"],
@@ -305,8 +291,6 @@ def _queue_one_campaign(camp: Dict, limit: int) -> int:
 
         if _robust_create_drip(drip_tbl, payload):
             queued += 1
-
-        # natural spacing inside queue build to reduce stampede
         time.sleep(random.uniform(0.05, 0.15))
 
     log.info(f"✅ Queued {queued} messages for campaign → {cname}")
@@ -315,7 +299,6 @@ def _queue_one_campaign(camp: Dict, limit: int) -> int:
 # ============== public API ==============
 def run_campaigns(limit="ALL", send_after_queue=True) -> Dict[str, Any]:
     log.info(f"🚀 Campaign Runner — limit={limit}, send_after_queue={send_after_queue}")
-
     camp_tbl = CONNECTOR.campaigns().table
     campaigns = _eligible_campaigns(camp_tbl)
     if not campaigns:
@@ -344,4 +327,4 @@ def run_campaigns(limit="ALL", send_after_queue=True) -> Dict[str, Any]:
     return {"ok": True, "queued": total_queued, "processed": len(campaigns)}
 
 if __name__ == "__main__":
-    print(run_campaigns("ALL", True))
+    print(run_campaigns(limit=5, send_after_queue=False))
