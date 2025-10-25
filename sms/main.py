@@ -1,13 +1,14 @@
-# sms/main.py
 from __future__ import annotations
 
 """
-REI SMS Engine — Enterprise Async Main (v3.0)
+REI SMS Engine — Enterprise Async Main (v3.0, no-scheduler)
 - Runs on Render & Docker
 - Full async endpoints with immediate Airtable Runs/KPIs logging
 - Strict quiet-hours, CRON token auth, TEST_MODE gating
 - Defensive imports & graceful fallbacks
 - Fine-grained telemetry + per-step error isolation
+- No 'Go Live' field usage
+- Scheduler removed
 """
 
 import asyncio
@@ -15,7 +16,7 @@ import os
 import json
 import traceback
 from datetime import datetime, timezone, date
-from typing import Optional, Dict, Any, Callable, Awaitable, Tuple
+from typing import Optional, Dict, Any, Callable, Tuple
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -65,7 +66,6 @@ except Exception:
 # Outbound batcher
 _send_batch = _guarded_import("sms.outbound_batcher", "send_batch", fallback=None)
 
-
 # Autoresponder (two possible names in tree)
 def _build_autoresponder():
     run = _guarded_import("sms.autoresponder", "run", fallback=None)
@@ -76,7 +76,6 @@ def _build_autoresponder():
         return lambda limit=50, view=None: run2(limit=limit, view=view)
     return None
 
-
 _run_autoresponder = _build_autoresponder()
 
 # Quotas, metrics, followups, retry, dispatcher, health
@@ -84,7 +83,7 @@ _reset_daily_quotas = _guarded_import("sms.quota_reset", "reset_daily_quotas", f
 _update_metrics = _guarded_import("sms.metrics_tracker", "update_metrics", fallback=None)
 _notify = _guarded_import("sms.metrics_tracker", "_notify", fallback=lambda m: print(f"[notify] {m}"))
 _run_campaigns = _guarded_import("sms.campaign_runner", "run_campaigns", fallback=None)
-_get_campaigns_tbl = _guarded_import("sms.campaign_runner", "get_campaigns_table", fallback=lambda: None)
+_get_campaigns_tbl = _guarded_import("sms.campaign_runner", "get_campaigns_table", fallback=None)
 _aggregate_kpis = _guarded_import("sms.kpi_aggregator", "aggregate_kpis", fallback=None)
 _run_retry = _guarded_import("sms.retry_runner", "run_retry", fallback=None)
 _run_followups = _guarded_import("sms.followup_flow", "run_followups", fallback=lambda: {"ok": True, "skipped": "followups unavailable"})
@@ -92,6 +91,16 @@ _run_engine = _guarded_import("sms.dispatcher", "run_engine", fallback=lambda *a
 _strict_health = _guarded_import(
     "sms.health_strict", "strict_health", fallback=lambda mode: {"ok": True, "mode": mode, "note": "strict health shim"}
 )
+
+# Reliable fallback for Campaigns table if helper not present
+if _get_campaigns_tbl is None:
+    def _get_campaigns_tbl():
+        try:
+            from sms.datastore import CONNECTOR
+            h = CONNECTOR.campaigns()
+            return getattr(h, "table", h)
+        except Exception:
+            return None
 
 # Optional inbound router (mounted if available)
 _inbound_router = _guarded_import("sms.inbound_webhook", "router", fallback=None)
@@ -107,8 +116,8 @@ _backfill_numbers_for_existing_queue = _guarded_import("sms.admin_numbers", "bac
 
 def _backfill_drip_from_numbers(dry_run: bool = True) -> Dict[str, Any]:
     if _backfill_numbers_for_existing_queue:
-        res = _backfill_numbers_for_existing_queue()
-        res["dry_run_ignored"] = dry_run
+        res = _backfill_numbers_for_existing_queue(dry_run=dry_run)  # pass through
+        res["dry_run"] = dry_run
         return res
     return {"ok": False, "error": "admin_numbers missing"}
 
@@ -216,7 +225,6 @@ async def _log_run_async(runs_tbl, step: str, result: Dict[str, Any]):
             "Breakdown": json.dumps(result, ensure_ascii=False),
             "Timestamp": _iso_ts(),
         }
-        # safe_create may be sync or async depending on adapter; wrap in to_thread
         await asyncio.to_thread(safe_create, runs_tbl, payload)
     except Exception as e:
         _log_error(f"Log Run {step}", e)
@@ -270,16 +278,21 @@ async def startup_checks():
         print(f"   PERFORMANCE_BASE:  {PERF_BASE}")
         print(f"   STRICT_MODE={STRICT_MODE} TEST_MODE={TEST_MODE}")
         print(f"   QUIET_HOURS_ENFORCED={QUIET_HOURS_ENFORCED} ({QUIET_START:02d}:00–{QUIET_END:02d}:00 CT)")
-        missing = [
-            k
-            for k in ["AIRTABLE_API_KEY", "LEADS_CONVOS_BASE", "PERFORMANCE_BASE"]
-            if not os.getenv(k) and not os.getenv(k.replace("BASE", "_BASE_ID"))
-        ]
+
+        missing: list[str] = []
+        if not os.getenv("AIRTABLE_API_KEY"):
+            missing.append("AIRTABLE_API_KEY")
+        if not (os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")):
+            missing.append("LEADS_CONVOS_BASE|AIRTABLE_LEADS_CONVOS_BASE_ID")
+        if not (os.getenv("PERFORMANCE_BASE") or os.getenv("AIRTABLE_PERFORMANCE_BASE_ID")):
+            missing.append("PERFORMANCE_BASE|AIRTABLE_PERFORMANCE_BASE_ID")
+
         if missing:
             msg = f"🚨 Missing env vars → {', '.join(missing)}"
             _log_error("Startup checks", msg)
             if STRICT_MODE:
                 raise RuntimeError(msg)
+
         # Smoke checks (non-fatal)
         _ = get_templates()
         _ = get_leads()
@@ -415,30 +428,7 @@ async def run_campaigns_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/schedule-campaigns")
-async def schedule_campaigns_endpoint(
-    request: Request,
-    x_cron_token: Optional[str] = Header(None),
-    x_webhook_token: Optional[str] = Header(None),
-    token: Optional[str] = Query(None),
-    limit: Optional[int] = Query(None, description="Optional cap on scheduled campaigns to process."),
-):
-    """
-    Hydrate Drip Queue entries for campaigns marked as Scheduled and activate them.
-    """
-    _require_token(request, token, x_webhook_token, x_cron_token)
-    if TEST_MODE:
-        return {"ok": True, "status": "mock_scheduler", "limit": limit}
-    try:
-        from sms.scheduler import run_scheduler  # local import to keep import-time light
-
-        return await asyncio.to_thread(run_scheduler, limit)
-    except Exception as e:
-        _log_error("schedule_campaigns", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ─────────────── Manual Campaign Controls ───────────────
+# ─────────────── Manual Campaign Controls (no 'Go Live') ────────────
 def _safe_update(tbl, rid: str, patch: Dict[str, Any]):
     if not (tbl and rid and patch):
         return None
@@ -462,7 +452,7 @@ async def campaign_start(
     if not tbl:
         raise HTTPException(500, "Campaigns table unavailable")
     await asyncio.to_thread(
-        _safe_update, tbl, campaign_id, {"status": "Scheduled", "Active": True, "Go Live": True, "last_run_at": _iso_ts()}
+        _safe_update, tbl, campaign_id, {"Status": "Scheduled", "Active": True, "Last Run At": _iso_ts()}
     )
     return {"ok": True, "campaign": campaign_id, "status": "Scheduled"}
 
@@ -480,7 +470,7 @@ async def campaign_stop(
     if not tbl:
         raise HTTPException(500, "Campaigns table unavailable")
     await asyncio.to_thread(
-        _safe_update, tbl, campaign_id, {"status": "Paused", "Active": False, "Go Live": False, "last_run_at": _iso_ts()}
+        _safe_update, tbl, campaign_id, {"Status": "Paused", "Active": False, "Last Run At": _iso_ts()}
     )
     return {"ok": True, "campaign": campaign_id, "status": "Paused"}
 
@@ -495,14 +485,14 @@ async def campaign_kick(
     token: Optional[str] = Query(None),
 ):
     """
-    One-click: mark campaign active and immediately run the campaign runner.
+    One-click: mark campaign scheduled and immediately run the campaign runner.
     Honors quiet hours (will queue-only or block accordingly).
     """
     _require_token(request, token, x_webhook_token, x_cron_token)
     tbl = _get_campaigns_tbl()
     if not tbl:
         raise HTTPException(500, "Campaigns table unavailable")
-    await asyncio.to_thread(_safe_update, tbl, campaign_id, {"status": "Scheduled", "Active": True, "Go Live": True})
+    await asyncio.to_thread(_safe_update, tbl, campaign_id, {"Status": "Scheduled", "Active": True})
     safe_limit = _parse_limit_param(limit)
     runner_limit = _runner_limit_arg(safe_limit)
     if not _run_campaigns:
@@ -706,7 +696,6 @@ async def cron_all_endpoint(
             res = {"ok": False, "error": str(e)}
         step_results[name.lower()] = res
         await _log_run_async(runs_tbl, name, res)
-        # accumulate processed metric if present
         p = res.get("processed", 0) or res.get("total_sent", 0) or res.get("sent", 0)
         if isinstance(p, (int, float)):
             totals["processed"] += int(p)
@@ -726,7 +715,6 @@ async def cron_all_endpoint(
         step_results["autoresponder"] = {"ok": False, "error": "autoresponder unavailable"}
         await _log_run_async(runs_tbl, "AUTORESPONDER", step_results["autoresponder"])
 
-    # FOLLOWUPS (non-critical)
     tasks.append(_run_step("FOLLOWUPS", lambda: _run_followups()))
 
     if _update_metrics:
@@ -756,10 +744,8 @@ async def cron_all_endpoint(
     if tasks:
         await asyncio.gather(*tasks)
 
-    # Compile results map
     results.update(step_results)
 
-    # Final KPIs
     await _log_kpi_async(kpis_tbl, "TOTAL_PROCESSED", totals["processed"])
     await _log_kpi_async(kpis_tbl, "TOTAL_ERRORS", totals["errors"])
     return {"ok": True, "results": results, "totals": totals, "timestamp": _iso_ts()}
@@ -859,6 +845,5 @@ async def trigger_engine(
     health = _strict_health(mode)
     if not health.get("ok"):
         raise HTTPException(status_code=500, detail=f"Health check failed for {mode}")
-    # run_engine may be sync; wrap
     res = await asyncio.to_thread(_run_engine, mode, limit=limit, retry_limit=retry_limit)
     return {"ok": True, "mode": mode, "result": res}
