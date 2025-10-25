@@ -18,6 +18,7 @@ from sms.airtable_schema import (
     PROSPECTS_TABLE,
     DEALS_TABLE,
     CAMPAIGN_MANAGER_TABLE,
+    MESSAGES_TABLE_DEF,
     NUMBERS_TABLE_DEF,
     OPTOUTS_TABLE,
     MARKETS_TABLE,
@@ -36,6 +37,7 @@ from sms.airtable_schema import (
     prospects_field_map,
     deals_field_map,
     campaign_manager_field_map,
+    messages_field_map,
     numbers_field_map,
     optouts_field_map,
     markets_field_map,
@@ -144,6 +146,9 @@ DEALS_FIELD_MAP = deals_field_map()
 CAMPAIGN_MANAGER_FIELDS = CAMPAIGN_MANAGER_TABLE.field_names()
 CAMPAIGN_MANAGER_FIELD_MAP = campaign_manager_field_map()
 
+MESSAGES_FIELDS = MESSAGES_TABLE_DEF.field_names()
+MESSAGES_FIELD_MAP = messages_field_map()
+
 NUMBERS_FIELDS = NUMBERS_TABLE_DEF.field_names()
 NUMBERS_FIELD_MAP = numbers_field_map()
 
@@ -236,6 +241,7 @@ class Settings:
     PROSPECTS_TABLE: str
     LEADS_TABLE: str
     CONVERSATIONS_TABLE: str
+    MESSAGES_TABLE: str
     TEMPLATES_TABLE: str
     DRIP_QUEUE_TABLE: str
     CAMPAIGNS_TABLE: str
@@ -282,6 +288,7 @@ def settings() -> Settings:
         PROSPECTS_TABLE="Prospects",
         LEADS_TABLE="Leads",
         CONVERSATIONS_TABLE="Conversations",
+        MESSAGES_TABLE="Messages",
         TEMPLATES_TABLE="Templates",
         DRIP_QUEUE_TABLE="Drip Queue",
         CAMPAIGNS_TABLE="Campaigns",
