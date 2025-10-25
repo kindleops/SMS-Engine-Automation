@@ -134,6 +134,24 @@ class InMemoryTable:
         return records
 
 
+class _NullPerformanceTable:
+    """No-op table used when Airtable permissions are missing."""
+
+    name = "Performance"
+
+    def first(self, *args, **kwargs):  # pragma: no cover - trivial
+        return None
+
+    def all(self, *args, **kwargs):  # pragma: no cover - trivial
+        return []
+
+    def create(self, *args, **kwargs):  # pragma: no cover - trivial
+        return None
+
+    def update(self, *args, **kwargs):  # pragma: no cover - trivial
+        return None
+
+
 def _formula_match(record: Dict[str, Any], formula: str) -> bool:
     pattern = re.compile(r"\{([^}]+)\}\s*=\s*'([^']*)'")
     matches = pattern.findall(formula)
@@ -229,7 +247,34 @@ class DataConnector:
         return self.table_handle(TABLES["campaigns"])
 
     def performance(self):
-        return self.table_handle(TABLES["performance"])
+        handle = self.table_handle(TABLES["performance"])
+        if getattr(handle, "_performance_verified", False):
+            return handle
+
+        if handle.in_memory:
+            setattr(handle, "_performance_verified", True)
+            return handle
+
+        table = getattr(handle, "table", None)
+        probe = getattr(table, "first", None)
+        if callable(probe):
+            try:
+                probe()
+                setattr(handle, "_performance_verified", True)
+            except Exception as exc:
+                if "INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND" in str(exc):
+                    logger.warning(
+                        "Performance table not accessible: %s", exc
+                    )
+                    null_handle = TableHandle(
+                        _NullPerformanceTable(), True, handle.base_id, handle.table_name
+                    )
+                    key = (handle.base_id or "memory", handle.table_name)
+                    self._tables[key] = null_handle
+                    return null_handle
+        else:
+            setattr(handle, "_performance_verified", True)
+        return handle
 
     def numbers(self):
         return self._table(_first_non_empty("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"), NUMBERS_TABLE_DEF.name())

@@ -227,8 +227,9 @@ class MessageProcessor:
         meta = dict(metadata or {})
 
         # --- 1) Transport
+        to_phone = phone
         try:
-            send_result = send_message(from_number=from_number, to=phone, message=body)
+            send_result = send_message(from_number=from_number, to=to_phone, message=body)
         except Exception as e:
             err = str(e)
             logger.error(f"Transport error sending to {phone}: {err}", exc_info=True)
