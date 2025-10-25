@@ -1,377 +1,392 @@
+# sms/scheduler.py
 """
-🧠 Bulletproof Campaign Scheduler (v3.1 – Telemetry Edition)
-────────────────────────────────────────────────────────────
-Hydrates the Drip Queue from active/scheduled campaigns with:
- • Market-aware number rotation
- • Template randomization & personalization
- • Robust error handling and telemetry
- • Smart deduplication and concurrency-safe writes
- • Environment-safe fallbacks (TEST_MODE, API failures)
+Bulletproof Campaign Scheduler — unified (vFINAL)
+
+✓ Only Active/Scheduled campaigns with Start Time <= now (CT)
+✓ Uses Campaigns.[Prospects] linked records (no market filtering)
+✓ Random template per message + link Template
+✓ Placeholders: {First}, {Address}, {Property City}
+✓ First name = first token (handles commas/initials/suffixes)
+✓ DripQ.Market = Prospect.Market (retry without if select mismatch)
+✓ TextGrid round-robin by market; prefer Campaign.Market else Prospect.Market; persisted to .tg_state.json
+✓ Next Send Date staggered +5–20s cumulatively
+✓ Quiet hours (21:00–09:00 CT) skip queueing
+✓ Dry-run: TEST_MODE=true or --dryrun
 """
 
 from __future__ import annotations
-import os, time, random, requests, traceback
-from collections import defaultdict, deque
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-from dotenv import load_dotenv
+import os, re, json, random, time, logging
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
 
-from sms.airtable_schema import (
-    campaign_field_map,
-    drip_field_map,
-    prospects_field_map,
-    template_field_map,
-)
-from sms.datastore import CONNECTOR, create_record, list_records, update_record
-from sms.runtime import get_logger, iso_now, last_10_digits, normalize_phone, PerfTimer
-from sms.logger import log_run
-from sms.kpi_logger import log_kpi
+from pyairtable import Table
+from pyairtable.formulas import match
 
-# -------------------------------------------------------------
-# ENV / SETUP
-# -------------------------------------------------------------
-ROOT_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT_DIR / ".env")
+# Pull helpers from your project if available; otherwise do light shims
+try:
+    from sms.runtime import normalize_phone
+except Exception:
+    def normalize_phone(s: str) -> Optional[str]:
+        if not s: return None
+        digits = "".join(ch for ch in str(s) if ch.isdigit())
+        if len(digits) == 11 and digits.startswith("1"): digits = digits[1:]
+        return digits if len(digits) == 10 else None
 
-logger = get_logger("scheduler")
+# ─────────────────────────── ENV / CONSTANTS ───────────────────────────
+AIRTABLE_KEY = os.getenv("AIRTABLE_API_KEY")
+BASE_ID      = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
+TEST_MODE    = os.getenv("TEST_MODE", "false").lower() in ("1","true","yes")
 
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY", "")
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE", "")
-CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE", "")
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() in {"1", "true", "yes"}
+# tz
+try:
+    import pytz
+    CT_TZ = pytz.timezone("America/Chicago")
+except Exception:
+    CT_TZ = timezone(timedelta(hours=-5))  # crude fallback; prefer pytz
 
-NUMBERS_TABLE_ID = os.getenv("NUMBERS_TABLE_ID", "tblWG3Z2bkZF6k16n")
-NUMBERS_MARKET_FIELD = os.getenv("NUMBERS_MARKET_FIELD", "Market")
-NUMBERS_PHONE_FIELD = os.getenv("NUMBERS_PHONE_FIELD", "Number")
-NUMBERS_STATUS_FIELD = os.getenv("NUMBERS_STATUS_FIELD", "Status")
-NUMBERS_ACTIVE_FIELD = os.getenv("NUMBERS_ACTIVE_FIELD", "Active")
+QUIET_START = 21
+QUIET_END   = 9
+STATE_FILE  = ".tg_state.json"  # TextGrid rotation position
 
-PREQUEUE_JITTER_MAX_SEC = int(os.getenv("PREQUEUE_JITTER_MAX_SEC", "90"))
-CHUNK_SLEEP_SEC = float(os.getenv("CHUNK_SLEEP_SEC", "0.12"))
-MAX_QUEUE_PER_CAMPAIGN = int(os.getenv("MAX_QUEUE_PER_CAMPAIGN", "0")) or None
-SCHEDULER_PROCESSOR_LABEL = "Campaign Scheduler"
+# table names
+TBL_CAMPAIGNS = "Campaigns"
+TBL_PROSPECTS = "Prospects"
+TBL_TEMPLATES = "Templates"
+TBL_NUMBERS   = "Numbers"
+TBL_DRIPQ     = "Drip Queue"
 
-# -------------------------------------------------------------
-# FIELD MAPS
-# -------------------------------------------------------------
-CAMPAIGN_FIELDS = campaign_field_map()
-DRIP_FIELDS = drip_field_map()
-PROSPECT_FIELDS = prospects_field_map()
-TEMPLATE_FIELDS = template_field_map()
+# fields (exact as you described)
+F_CAMPAIGN_NAME    = "Campaign Name"
+F_CAMPAIGN_STATUS  = "Status"            # Active | Scheduled | Paused | Completed
+F_CAMPAIGN_START   = "Start Time"
+F_CAMPAIGN_MARKET  = "Market"            # used for number pool pref
+F_CAMPAIGN_PROS    = "Prospects"         # linked → Prospects
+F_CAMPAIGN_TMPLS   = "Templates"         # linked → Templates
 
-CAMPAIGN_STATUS_FIELD = CAMPAIGN_FIELDS.get("Status", "Status")
-CAMPAIGN_MARKET_FIELD = CAMPAIGN_FIELDS.get("Market", "Market")
-CAMPAIGN_START_FIELD = CAMPAIGN_FIELDS.get("Start Time", "Start Time")
-CAMPAIGN_LAST_RUN_FIELD = CAMPAIGN_FIELDS.get("Last Run At", "Last Run At")
-CAMPAIGN_PROSPECTS_LINK = CAMPAIGN_FIELDS.get("Prospects", "Prospects")
-CAMPAIGN_TEMPLATES_LINK = CAMPAIGN_FIELDS.get("Templates", "Templates")
+F_PROS_NAME        = "Owner Name"
+F_PROS_PHONE       = "Phone"
+F_PROS_ADDR        = "Property Address"
+F_PROS_CITY        = "Property City"
+F_PROS_MARKET      = "Market"
 
-DRIP_STATUS_FIELD = DRIP_FIELDS.get("Status", "Status")
-DRIP_MARKET_FIELD = DRIP_FIELDS.get("Market", "Market")
-DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS.get("Seller Phone Number", "Seller Phone Number")
-DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS.get("TextGrid Phone Number", "TextGrid Phone Number")
-DRIP_PROSPECT_LINK_FIELD = DRIP_FIELDS.get("Prospect", "Prospect")
-DRIP_CAMPAIGN_LINK_FIELD = DRIP_FIELDS.get("Campaign", "Campaign")
-DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS.get("Next Send Date", "Next Send Date")
-DRIP_UI_FIELD = DRIP_FIELDS.get("UI", "UI")
-DRIP_PROCESSOR_FIELD = DRIP_FIELDS.get("Processor", "Processor")
-DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS.get("Message Preview", "Message")
+F_TMPL_MESSAGE     = "Message"
 
+F_DQ_CAMPAIGN      = "Campaign"
+F_DQ_PROSPECT      = "Prospect"
+F_DQ_TEMPLATE      = "Template"
+F_DQ_MESSAGE       = "Message"
+F_DQ_TO            = "Seller Phone Number"
+F_DQ_FROM          = "TextGrid Phone Number"
+F_DQ_MARKET        = "Market"
+F_DQ_STATUS        = "Status"            # "Queued"
+F_DQ_NEXT          = "Next Send Date"
+F_DQ_UI            = "UI"
 
-# -------------------------------------------------------------
-# HELPERS
-# -------------------------------------------------------------
-def _parse_iso(v: Any) -> Optional[datetime]:
-    if not v:
-        return None
+F_NUM_MARKET       = "Market"
+F_NUM_PHONE        = "TextGrid Phone Number"
+F_NUM_STATUS       = "Status"            # e.g. Active
+F_NUM_ACTIVE       = "Active"            # checkbox/bool
+
+STATUS_QUEUED      = "Queued"
+
+# ───────────────────────────── LOGGING ────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("scheduler")
+
+def _req_env():
+    missing = [k for k in ("AIRTABLE_API_KEY","LEADS_CONVOS_BASE") if not os.getenv(k) and not os.getenv(k.replace("BASE","_BASE_ID"))]
+    if missing:
+        raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+_req_env()
+
+camp_tbl = Table(AIRTABLE_KEY, BASE_ID, TBL_CAMPAIGNS)
+pros_tbl = Table(AIRTABLE_KEY, BASE_ID, TBL_PROSPECTS)
+tmpl_tbl = Table(AIRTABLE_KEY, BASE_ID, TBL_TEMPLATES)
+num_tbl  = Table(AIRTABLE_KEY, BASE_ID, TBL_NUMBERS)
+drip_tbl = Table(AIRTABLE_KEY, BASE_ID, TBL_DRIPQ)
+
+# ───────────────────────────── TIME HELPERS ───────────────────────────
+def ct_now() -> datetime:
     try:
-        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).astimezone(timezone.utc)
+        import pytz
+        return datetime.now(pytz.timezone("America/Chicago"))
+    except Exception:
+        return datetime.now()
+
+def in_quiet_hours() -> bool:
+    h = ct_now().hour
+    return (h >= QUIET_START) or (h < QUIET_END)
+
+def ct_naive(dt: datetime) -> str:
+    """Return CT naive ISO 'YYYY-MM-DDTHH:MM:SS' for Airtable date fields."""
+    try:
+        import pytz
+        local = dt.astimezone(pytz.timezone("America/Chicago"))
+    except Exception:
+        local = dt
+    return local.replace(tzinfo=None).isoformat(timespec="seconds")
+
+# ───────────────────────── FIRST NAME / TEMPLATE ──────────────────────
+_SUFFIXES = {"jr","jr.","sr","sr.","iii","ii","iv"}
+def first_only(name: Optional[str]) -> str:
+    if not name: return ""
+    s = str(name).strip()
+    if "," in s:
+        parts = [p.strip() for p in s.split(",")]
+        s = parts[1] if len(parts) > 1 else parts[0]
+    toks = re.split(r"[^\w']+", s)
+    toks = [t for t in toks if t]
+    if not toks: return ""
+    first = toks[0]
+    if len(first) == 1 or first.lower().strip(".") in _SUFFIXES:
+        if len(toks) > 1:
+            first = toks[1]
+    return first.capitalize()
+
+def fill_placeholders(template_msg: str, pf: Dict[str, any]) -> str:
+    addr = pf.get(F_PROS_ADDR)
+    city = pf.get(F_PROS_CITY)
+    msg = (template_msg or "")
+    msg = msg.replace("{First}", first_only(pf.get(F_PROS_NAME)))
+    msg = msg.replace("{Address}", str(addr or ""))
+    msg = msg.replace("{Property City}", str(city or ""))
+    return msg
+
+# ───────────────────── TEXTGRID ROUND-ROBIN STATE ─────────────────────
+def _load_state() -> Dict[str, int]:
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def _save_state(state: Dict[str, int]):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        log.warning(f"State save failed: {e}")
+
+def _get_numbers_by_market() -> Dict[str, List[str]]:
+    by_mkt: Dict[str, List[str]] = {}
+    for rec in num_tbl.all():
+        f = rec.get("fields", {}) or {}
+        if not f.get(F_NUM_ACTIVE):  # must be truthy
+            continue
+        if str(f.get(F_NUM_STATUS, "")).strip().lower() not in ("active",""):
+            # if you mark active via checkbox only, allow blank Status too
+            continue
+        mkt = f.get(F_NUM_MARKET)
+        num = f.get(F_NUM_PHONE)
+        if not (mkt and num):
+            continue
+        by_mkt.setdefault(mkt, []).append(str(num))
+    return by_mkt
+
+def pick_tg_number(camp_market: Optional[str], prospect_market: Optional[str], pool: Dict[str, List[str]], state: Dict[str, int]) -> Optional[str]:
+    market = camp_market or prospect_market
+    if not market: return None
+    nums = pool.get(market) or []
+    if not nums: return None
+    last = state.get(market, -1)
+    idx = (last + 1) % len(nums)
+    state[market] = idx
+    return nums[idx]
+
+# ─────────────────────────── DATA FETCH HELPERS ───────────────────────
+def _parse_start(raw: Optional[str]) -> Optional[datetime]:
+    if not raw: return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z","+00:00"))
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
+def fetch_due_campaigns(specific_name: Optional[str] = None) -> List[Dict]:
+    if specific_name:
+        recs = camp_tbl.all(formula=match({F_CAMPAIGN_NAME: specific_name}))
+    else:
+        recs = camp_tbl.all(formula="OR({Status}='Active', {Status}='Scheduled')")
+    now_ct = ct_now()
+    due = []
+    for r in recs:
+        f = r.get("fields", {}) or {}
+        status = str(f.get(F_CAMPAIGN_STATUS,"")).strip().lower()
+        if status in ("paused","completed"):
+            continue
+        st = _parse_start(f.get(F_CAMPAIGN_START))
+        if st:
+            # compare in CT
+            st_ct = ct_now().tzinfo.localize(st.replace(tzinfo=None)) if hasattr(now_ct, "tzinfo") else st
+            if st_ct > now_ct:
+                continue
+        due.append(r)
+    return due
 
-def _campaign_start(fields: Dict[str, Any]) -> datetime:
-    return _parse_iso(fields.get(CAMPAIGN_START_FIELD)) or datetime.now(timezone.utc)
+def _chunk(ids: List[str], n: int) -> List[List[str]]:
+    return [ids[i:i+n] for i in range(0, len(ids), n)]
 
+def fetch_prospects_by_ids(ids: List[str]) -> Dict[str, Dict]:
+    out: Dict[str, Dict] = {}
+    for chunk in _chunk(ids, 50):
+        formula = "OR(" + ",".join([f"RECORD_ID()='{rid}'" for rid in chunk]) + ")"
+        for rec in pros_tbl.all(formula=formula):
+            out[rec["id"]] = rec
+    return out
 
-def _market_key(raw: Optional[str]) -> str:
-    return (raw or "").strip().lower().replace(",", "").replace(".", "")
+def fetch_templates_by_ids(ids: List[str]) -> List[Dict]:
+    res: List[Dict] = []
+    for chunk in _chunk(ids, 50):
+        formula = "OR(" + ",".join([f"RECORD_ID()='{rid}'" for rid in chunk]) + ")"
+        for rec in tmpl_tbl.all(formula=formula):
+            f = rec.get("fields", {}) or {}
+            body = (f.get(F_TMPL_MESSAGE) or "").strip()
+            if body:
+                res.append(rec)
+    return res
 
-
-# -------------------------------------------------------------
-# MARKET → NUMBER ROTATION
-# -------------------------------------------------------------
-_numbers_cache: Dict[str, List[str]] = {}
-_rotation_index: Dict[str, int] = {}
-
-
-def _fetch_number_pool(market: str) -> List[str]:
-    mk = _market_key(market)
-    if mk in _numbers_cache:
-        return _numbers_cache[mk]
-    if not AIRTABLE_API_KEY:
-        logger.error("❌ Missing AIRTABLE_API_KEY; cannot fetch number pool.")
-        return []
-    url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{NUMBERS_TABLE_ID}"
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    formula = f"AND({{{NUMBERS_MARKET_FIELD}}}='{market}',OR({{{NUMBERS_ACTIVE_FIELD}}}=1,{{{NUMBERS_ACTIVE_FIELD}}}='true'),LOWER({{{NUMBERS_STATUS_FIELD}}})='active')"
+# ───────────────────────────── CREATE HELPERS ─────────────────────────
+def create_drip(payload: Dict[str, any]) -> bool:
     try:
-        resp = requests.get(url, headers=headers, params={"filterByFormula": formula, "pageSize": 100}, timeout=12)
-        resp.raise_for_status()
-        records = (resp.json() or {}).get("records", [])
+        drip_tbl.create(payload)
+        return True
     except Exception as e:
-        logger.error("❌ Number pool fetch failed for %s: %s", market, e)
-        _numbers_cache[mk] = []
-        return []
-    pool = [r.get("fields", {}).get(NUMBERS_PHONE_FIELD) for r in records if isinstance(r.get("fields", {}).get(NUMBERS_PHONE_FIELD), str)]
-    _numbers_cache[mk] = pool
-    return pool
+        msg = str(e)
+        if "INVALID_MULTIPLE_CHOICE_OPTIONS" in msg and "Market" in payload:
+            log.warning("⚠️ Market select rejected; retrying without Market.")
+            safe = dict(payload); safe.pop(F_DQ_MARKET, None)
+            try:
+                drip_tbl.create(safe)
+                return True
+            except Exception as e2:
+                log.error(f"Create failed after Market retry: {e2}")
+                return False
+        log.error(f"Create failed: {e}")
+        return False
 
+# ───────────────────────────── RUNNER CORE ────────────────────────────
+def _queue_one_campaign(camp: Dict, per_limit: Optional[int], numbers_pool: Dict[str, List[str]], tg_state: Dict[str, int], dryrun: bool) -> int:
+    cf = camp.get("fields", {}) or {}
+    cname = cf.get(F_CAMPAIGN_NAME) or cf.get("Name") or "Unnamed Campaign"
+    prospect_ids: List[str] = cf.get(F_CAMPAIGN_PROS) or []
+    if not prospect_ids:
+        log.warning(f"⚠️ Campaign '{cname}' has no linked prospects.")
+        return 0
 
-def _fetch_global_pool() -> List[str]:
-    if "_global" in _numbers_cache:
-        return _numbers_cache["_global"]
-    url = f"https://api.airtable.com/v0/{CAMPAIGN_CONTROL_BASE}/{NUMBERS_TABLE_ID}"
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
-    fb = f"AND(OR({{{NUMBERS_ACTIVE_FIELD}}}=1,{{{NUMBERS_ACTIVE_FIELD}}}='true'),LOWER({{{NUMBERS_STATUS_FIELD}}})='active')"
+    pmap = fetch_prospects_by_ids(prospect_ids)
+
+    tmpl_ids: List[str] = cf.get(F_CAMPAIGN_TMPLS) or []
+    templates = fetch_templates_by_ids(tmpl_ids) if tmpl_ids else []
+    if not templates:
+        log.error(f"❌ Campaign '{cname}' has no valid templates.")
+        return 0
+
+    # base time: now or Start Time (whichever later), then stagger 5–20s each row
+    start = ct_now()
+    t = start + timedelta(seconds=random.randint(5, 20))
+
+    total = 0
+    ids_iter = prospect_ids[: per_limit] if per_limit else prospect_ids
+
+    for pid in ids_iter:
+        prec = pmap.get(pid)
+        if not prec:
+            continue
+        pf = prec.get("fields", {}) or {}
+
+        # message
+        tmpl = random.choice(templates)
+        tmpl_id = tmpl["id"]
+        body = (tmpl.get("fields", {}).get(F_TMPL_MESSAGE) or "").strip()
+        msg  = fill_placeholders(body, pf)
+
+        # phones
+        to_phone = normalize_phone(pf.get(F_PROS_PHONE))
+        if not to_phone:
+            continue
+
+        # markets
+        prospect_market = pf.get(F_PROS_MARKET)
+        campaign_market  = cf.get(F_CAMPAIGN_MARKET)
+        from_phone = pick_tg_number(campaign_market, prospect_market, numbers_pool, tg_state)
+        next_send  = ct_naive(t)
+
+        payload = {
+            F_DQ_CAMPAIGN: [camp["id"]],
+            F_DQ_PROSPECT: [pid],
+            F_DQ_TEMPLATE: [tmpl_id],
+            F_DQ_MESSAGE:  msg,
+            F_DQ_TO:       to_phone,
+            F_DQ_FROM:     from_phone,       # can be None -> outbound backfill
+            F_DQ_MARKET:   prospect_market,  # retry-less if mismatch
+            F_DQ_STATUS:   STATUS_QUEUED,
+            F_DQ_NEXT:     next_send,
+            F_DQ_UI:       "⏳",
+        }
+
+        if dryrun or TEST_MODE:
+            log.info(f"[dryrun] {cname} :: {pf.get(F_PROS_NAME)} → {msg} :: TG={from_phone} :: {next_send}")
+        else:
+            if not create_drip(payload):
+                t += timedelta(seconds=random.randint(5, 20))
+                continue
+
+        total += 1
+        t += timedelta(seconds=random.randint(5, 20))
+        time.sleep(0.02)
+
+    return total
+
+def run_scheduler(limit: Optional[int] = None, campaign_name: Optional[str] = None, dryrun: bool = False) -> Dict[str, any]:
+    if in_quiet_hours():
+        log.warning("⏸️ Quiet hours (21:00–09:00 CT). Skipping queueing.")
+        return {"ok": True, "queued": 0, "quiet_hours": True}
+
+    log.info(f"🚀 Scheduler start — limit={limit if limit else 'ALL'} dryrun={dryrun or TEST_MODE}")
+
     try:
-        resp = requests.get(url, headers=headers, params={"filterByFormula": fb, "pageSize": 100}, timeout=12)
-        resp.raise_for_status()
-        records = (resp.json() or {}).get("records", [])
+        camps = fetch_due_campaigns(campaign_name)
     except Exception as e:
-        logger.error("❌ Global number pool fetch failed: %s", e)
-        _numbers_cache["_global"] = []
-        return []
-    pool = [r.get("fields", {}).get(NUMBERS_PHONE_FIELD) for r in records if isinstance(r.get("fields", {}).get(NUMBERS_PHONE_FIELD), str)]
-    _numbers_cache["_global"] = pool
-    return pool
+        log.error(f"❌ Failed to fetch campaigns: {e}")
+        return {"ok": False, "error": str(e)}
 
+    if not camps:
+        log.info("⚠️ No due/active campaigns found.")
+        return {"ok": True, "queued": 0, "note": "No due/active campaigns"}
 
-def _choose_number(market: str) -> Optional[str]:
-    mk = _market_key(market)
-    pool = _fetch_number_pool(market) or _fetch_global_pool()
-    if not pool:
-        return None
-    idx = _rotation_index.get(mk, 0)
-    choice = pool[idx % len(pool)]
-    _rotation_index[mk] = idx + 1
-    return choice
+    numbers_pool = _get_numbers_by_market()
+    tg_state = _load_state()
 
+    total = 0
+    processed = 0
+    for c in camps:
+        cf = c.get("fields", {}) or {}
+        status = str(cf.get(F_CAMPAIGN_STATUS,"")).lower()
+        if status in ("paused","completed"):
+            log.info(f"⏭️  Skipping {cf.get(F_CAMPAIGN_NAME) or 'Unnamed'} (status={status})")
+            continue
 
-# -------------------------------------------------------------
-# MESSAGE RENDERING
-# -------------------------------------------------------------
-def _render_message(template: str, pf: Dict[str, Any]) -> str:
-    name_raw = pf.get("Phone 1 Name (Primary) (from Linked Owner)") or ""
-    first_name = name_raw.split()[0].replace(".", "") if isinstance(name_raw, str) and name_raw.strip() else ""
-    addr = pf.get("Property Address")
-    city = pf.get("Property City")
-    if isinstance(addr, list) and addr:
-        addr = addr[0]
-    if isinstance(city, list) and city:
-        city = city[0]
-    msg = (template or "").replace("{First}", first_name).replace("{Address}", str(addr or "")).replace("{Property City}", str(city or ""))
-    return msg.strip()
+        cname = cf.get(F_CAMPAIGN_NAME) or "Unnamed Campaign"
+        log.info(f"➡️ Queuing campaign: {cname}")
+        q = _queue_one_campaign(c, limit, numbers_pool, tg_state, dryrun)
+        _save_state(tg_state)
+        log.info(f"✅ Queued {q} for {cname}")
+        processed += 1
+        total += q
 
+    log.info(f"🏁 Scheduler done — campaigns={processed}, queued={total}, dryrun={dryrun or TEST_MODE}")
+    return {"ok": True, "campaigns": processed, "queued": total, "dryrun": (dryrun or TEST_MODE)}
 
-def _best_phone(fields: Dict[str, Any]) -> Optional[str]:
-    for key in [
-        "Phone",
-        "Primary Phone",
-        "Owner Phone",
-        "Owner Phones",
-        "Phone 1",
-        "Phone 2",
-        "Phones",
-        "Phone 1 (from Linked Owner)",
-        "Phone 2 (from Linked Owner)",
-    ]:
-        val = fields.get(key)
-        if isinstance(val, list):
-            for v in val:
-                p = normalize_phone(v)
-                if p:
-                    return p
-        elif isinstance(val, str):
-            p = normalize_phone(val)
-            if p:
-                return p
-    return None
+# ─────────────────────────────── CLI ──────────────────────────────────
+if __name__ == "__main__":
+    import argparse, json as _json
+    ap = argparse.ArgumentParser(description="Bulletproof Campaign Scheduler vFINAL")
+    ap.add_argument("--limit", type=int, help="Cap prospects per campaign (default ALL)")
+    ap.add_argument("--campaign", help="Run a single campaign by 'Campaign Name'")
+    ap.add_argument("--dryrun", action="store_true", help="Log only (no writes)")
+    args = ap.parse_args()
 
-
-# -------------------------------------------------------------
-# MAIN SCHEDULER
-# -------------------------------------------------------------
-def run_scheduler(limit: Optional[int] = None) -> Dict[str, Any]:
-    with PerfTimer("scheduler_run"):
-        logger.info("🚀 Scheduler start")
-        summary = {"queued": 0, "campaigns": {}, "errors": [], "ok": True}
-
-        if TEST_MODE:
-            summary["note"] = "TEST_MODE active; no writes performed."
-            logger.info("⚠️ Running in TEST_MODE (no Airtable writes).")
-            log_run("SCHEDULER", processed=0, status="TEST_MODE", extra=summary)
-            return summary
-
-        try:
-            campaigns_h = CONNECTOR.campaigns()
-            prospects_h = CONNECTOR.prospects()
-            drip_h = CONNECTOR.drip_queue()
-            templates_h = CONNECTOR.templates()
-
-            campaigns = list_records(campaigns_h, page_size=100)
-            now_utc = datetime.now(timezone.utc)
-            existing = list_records(drip_h, page_size=100)
-            existing_pairs = {
-                (
-                    (f.get("fields") or {}).get(DRIP_CAMPAIGN_LINK_FIELD, [None])[0],
-                    last_10_digits((f.get("fields") or {}).get(DRIP_SELLER_PHONE_FIELD)),
-                )
-                for f in existing
-                if f.get("fields")
-            }
-
-            for camp in sorted(campaigns, key=lambda c: _campaign_start(c.get("fields", {}))):
-                fields = camp.get("fields", {}) or {}
-                status = str(fields.get(CAMPAIGN_STATUS_FIELD, "")).lower()
-                if status != "scheduled":
-                    continue
-
-                campaign_id = camp.get("id")
-                start_time = _campaign_start(fields)
-                market = fields.get(CAMPAIGN_MARKET_FIELD)
-                if not market:
-                    logger.warning("⚠️ Campaign %s missing market; skipped.", campaign_id)
-                    continue
-
-                # Fetch template messages
-                template_ids = fields.get(CAMPAIGN_TEMPLATES_LINK) or []
-                messages = []
-                for tid in template_ids:
-                    try:
-                        resp = templates_h.table.api.request(
-                            "get", templates_h.table.url, params={"filterByFormula": f"RECORD_ID()='{tid}'"}
-                        )
-                        for rec in (resp or {}).get("records", []):
-                            msg = (rec.get("fields", {}) or {}).get("Message")
-                            if msg and isinstance(msg, str):
-                                messages.append(msg.strip())
-                    except Exception as e:
-                        logger.warning("⚠️ Template fetch failed for %s: %s", tid, e)
-                if not messages:
-                    logger.warning("⚠️ Campaign %s has no valid templates.", campaign_id)
-                    continue
-
-                # Fetch linked prospects
-                linked = fields.get(CAMPAIGN_PROSPECTS_LINK) or []
-                if not linked:
-                    logger.info("⏭️ Campaign %s has no linked prospects.", campaign_id)
-                    continue
-
-                prospects = []
-                for i in range(0, len(linked), 90):
-                    chunk = linked[i : i + 90]
-                    formula = "OR(" + ",".join([f"RECORD_ID()='{rid}'" for rid in chunk]) + ")"
-                    try:
-                        resp = prospects_h.table.api.request("get", prospects_h.table.url, params={"filterByFormula": formula})
-                        prospects.extend((resp or {}).get("records", []))
-                    except Exception as e:
-                        logger.warning("⚠️ Prospect fetch failed chunk: %s", e)
-                    time.sleep(CHUNK_SLEEP_SEC)
-
-                queued, skipped, processed = 0, 0, 0
-                skip_reasons = defaultdict(int)
-                samples = defaultdict(lambda: deque(maxlen=5))
-
-                for idx, pr in enumerate(prospects):
-                    if MAX_QUEUE_PER_CAMPAIGN and queued >= MAX_QUEUE_PER_CAMPAIGN:
-                        break
-                    processed += 1
-                    pf = pr.get("fields", {}) or {}
-                    phone = _best_phone(pf)
-                    if not phone:
-                        skipped += 1
-                        skip_reasons["missing_phone"] += 1
-                        continue
-                    digits = last_10_digits(phone)
-                    if (campaign_id, digits) in existing_pairs:
-                        skipped += 1
-                        skip_reasons["duplicate_phone"] += 1
-                        continue
-                    from_number = _choose_number(market)
-                    if not from_number:
-                        skipped += 1
-                        skip_reasons["no_textgrid_number"] += 1
-                        continue
-                    msg = random.choice(messages)
-                    rendered = _render_message(msg, pf)
-                    send_time = start_time.timestamp() + random.randint(0, PREQUEUE_JITTER_MAX_SEC)
-                    next_send = datetime.fromtimestamp(send_time, tz=timezone.utc).isoformat()
-                    payload = {
-                        DRIP_STATUS_FIELD: "QUEUED",
-                        DRIP_MARKET_FIELD: market,
-                        DRIP_SELLER_PHONE_FIELD: phone,
-                        DRIP_FROM_NUMBER_FIELD: from_number,
-                        DRIP_PROCESSOR_FIELD: SCHEDULER_PROCESSOR_LABEL,
-                        DRIP_NEXT_SEND_DATE_FIELD: next_send,
-                        DRIP_CAMPAIGN_LINK_FIELD: [campaign_id],
-                        DRIP_PROSPECT_LINK_FIELD: [pr["id"]],
-                        DRIP_UI_FIELD: "⏳",
-                        DRIP_MESSAGE_PREVIEW_FIELD: rendered,
-                    }
-                    try:
-                        created = create_record(drip_h, payload)
-                        if created:
-                            existing_pairs.add((campaign_id, digits))
-                            queued += 1
-                        else:
-                            skipped += 1
-                            skip_reasons["create_failed"] += 1
-                    except Exception as e:
-                        skipped += 1
-                        skip_reasons["create_failed"] += 1
-                        logger.warning("❌ Create failed for %s: %s", digits, e)
-
-                try:
-                    update_record(
-                        campaigns_h,
-                        campaign_id,
-                        {
-                            CAMPAIGN_STATUS_FIELD: "Active" if queued and now_utc >= start_time else "Scheduled",
-                            CAMPAIGN_LAST_RUN_FIELD: iso_now(),
-                        },
-                    )
-                except Exception:
-                    pass
-
-                logger.info("✅ Campaign %s queued=%d skipped=%d processed=%d", campaign_id, queued, skipped, processed)
-                if skip_reasons:
-                    logger.info("   Skip breakdown: %s", dict(skip_reasons))
-
-                # KPI telemetry
-                log_kpi("SCHEDULER_QUEUED", queued, campaign=campaign_id)
-                log_kpi("SCHEDULER_SKIPPED", skipped, campaign=campaign_id)
-
-                summary["queued"] += queued
-                summary["campaigns"][campaign_id] = {
-                    "queued": queued,
-                    "skipped": skipped,
-                    "processed": processed,
-                    "skip_reasons": dict(skip_reasons),
-                    "market": market,
-                    "start_time": start_time.isoformat(),
-                }
-
-            summary["ok"] = not summary["errors"]
-            logger.info("🏁 Scheduler done — total queued: %s", summary["queued"])
-            log_run("SCHEDULER", processed=summary["queued"], status="OK", extra=summary)
-            return summary
-
-        except Exception as e:
-            tb = traceback.format_exc()
-            logger.error("💥 Scheduler fatal: %s\n%s", e, tb)
-            summary["ok"] = False
-            summary["errors"].append(str(e))
-            log_run("SCHEDULER", processed=0, status="ERROR", breakdown=tb)
-            return summary
+    res = run_scheduler(limit=args.limit, campaign_name=args.campaign, dryrun=args.dryrun)
+    print(_json.dumps(res, indent=2))
