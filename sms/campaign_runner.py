@@ -405,16 +405,16 @@ def _fetch_due_campaigns(camp_tbl, campaign_name: Optional[str]) -> List[Dict[st
     """
     Returns campaigns that are either:
       - Scheduled and start time <= now, or
-      - Active (we allow continuing to add if needed)
-    If campaign_name is provided, fetch exactly that record (by Campaign Name or Name).
+      - Active
+    If campaign_name is provided, fetch exactly that record by Campaign Name only.
     """
-    due: List[Dict[str, Any]] = []
-    now_iso = datetime.now(timezone.utc).isoformat()
+    if not camp_tbl:
+        return []
 
+    # Exact-name lookup (no {Name} fallback — it caused the 422)
     if campaign_name:
-        # Exact match by Campaign Name or Name
         name_val = _escape_quotes(campaign_name)
-        formula = f"OR({{{CAMPAIGN_NAME_F}}}='{name_val}',{{Name}}='{name_val}')"
+        formula = f"{{{CAMPAIGN_NAME_F}}}='{name_val}'"
         try:
             recs = camp_tbl.all(formula=formula, page_size=100)
             return recs or []
@@ -422,18 +422,16 @@ def _fetch_due_campaigns(camp_tbl, campaign_name: Optional[str]) -> List[Dict[st
             log.error(f"❌ Campaign lookup failed for '{campaign_name}': {e}")
             return []
 
-    # Otherwise: status in (Scheduled, Active) and Start Time <= now
-    # Airtable formula: AND( OR({Status}='Scheduled',{Status}='Active'), {Start Time} <= NOW() )
+    # Otherwise: Status in (Scheduled, Active) and Start Time <= NOW()
     formula = (
         f"AND(OR({{{CAMPAIGN_STATUS_F}}}='Scheduled',{{{CAMPAIGN_STATUS_F}}}='Active'),"
         f"DATETIME_DIFF(NOW(),{{{CAMPAIGN_START_F}}},'seconds')>=0)"
     )
     try:
-        due = camp_tbl.all(formula=formula, page_size=100)
+        return camp_tbl.all(formula=formula, page_size=100) or []
     except Exception as e:
         log.error(f"❌ Failed to fetch campaigns: {e}")
         return []
-    return due or []
 
 # ─────────────────────────────── Public entry ─────────────────────────
 def run_campaigns(limit: str | int = "ALL", send_after_queue: bool = False, campaign_name: Optional[str] = None) -> Dict[str, Any]:
