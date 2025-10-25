@@ -1,7 +1,7 @@
 # =====================================================
 #  REI SMS Engine — Full Render Deployment (FINAL AUTOPILOT)
-#  Single source of truth: Scheduler queues; Worker sends.
-#  /schedule-campaigns cron replaces /run-campaigns.
+#  Single source of truth: Runner queues; Worker sends.
+#  /run-campaigns cron replaces old /schedule-campaigns.
 # =====================================================
 
 services:
@@ -27,10 +27,6 @@ services:
         sync: false
       - key: AIRTABLE_LEADS_CONVOS_BASE_ID
         sync: false
-      - key: CAMPAIGN_CONTROL_BASE
-        sync: false
-      - key: AIRTABLE_CAMPAIGN_CONTROL_BASE_ID
-        sync: false
       - key: PERFORMANCE_BASE
         sync: false
       - key: AIRTABLE_PERFORMANCE_BASE_ID
@@ -50,7 +46,7 @@ services:
       - key: CRON_TOKEN
         sync: false
 
-      # === Redis / Upstash (optional for locks/counters) ===
+      # === Optional Redis (locks/counters) ===
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
@@ -59,12 +55,14 @@ services:
         value: "true"
 
       # === Operational Toggles ===
-      - key: ENABLE_CAMPAIGNS
-        value: "true"          # exposes /schedule-campaigns
-      - key: RUNNER_SEND_AFTER_QUEUE
-        value: "true"          # worker will pick up queued items
       - key: ENABLE_METRICS
         value: "true"
+      - key: SUPPRESS_DUPLICATE_PHONES
+        value: "true"      # matches outbound_batcher dedupe
+      - key: ALLOW_QUEUE_OUTSIDE_HOURS
+        value: "true"      # queue during quiet hours; sending still blocked by worker policy
+      - key: RUNNER_SEND_AFTER_QUEUE
+        value: "false"     # runner queues only; worker does the sends
 
       # === Quiet Hours (America/Chicago) ===
       - key: QUIET_HOURS_ENFORCED
@@ -74,17 +72,13 @@ services:
       - key: QUIET_END_HOUR_LOCAL
         value: "9"
 
-      # === Global Rate/limits (worker respects these) ===
+      # === Global Rate/Limits (worker respects these) ===
       - key: GLOBAL_RATE_PER_MIN
         value: "5000"
       - key: RATE_PER_NUMBER_PER_MIN
         value: "20"
       - key: DAILY_LIMIT
         value: "750"
-      - key: DEDUPE_HOURS
-        value: "72"
-      - key: MESSAGES_PER_MIN
-        value: "20"
       - key: JITTER_SECONDS
         value: "2"
 
@@ -118,14 +112,18 @@ services:
         sync: false
       - key: LEADS_CONVOS_BASE
         sync: false
-      - key: CAMPAIGN_CONTROL_BASE
+      - key: AIRTABLE_LEADS_CONVOS_BASE_ID
         sync: false
       - key: PERFORMANCE_BASE
+        sync: false
+      - key: AIRTABLE_PERFORMANCE_BASE_ID
         sync: false
       - key: TEXTGRID_ACCOUNT_SID
         sync: false
       - key: TEXTGRID_AUTH_TOKEN
         sync: false
+
+      # Optional Redis
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
@@ -145,12 +143,10 @@ services:
       - key: AUTORESPONDER_VIEW
         value: "Unprocessed Inbounds"
 
-      # Feature flags
-      - key: ENABLE_CAMPAIGNS
-        value: "true"
-      - key: RUNNER_SEND_AFTER_QUEUE
-        value: "true"
+      # Feature flags / behavior
       - key: ENABLE_METRICS
+        value: "true"
+      - key: SUPPRESS_DUPLICATE_PHONES
         value: "true"
 
       # Quiet hours
@@ -175,47 +171,15 @@ services:
 #  Cron Jobs — Automated Engine Orchestration
 # =====================================================
 cronJobs:
-  # ✅ NEW: Scheduler queues campaigns (replaces old /run-campaigns)
-  - name: schedule-campaigns
+  # Queue due campaigns regularly (runner queues only; worker sends)
+  - name: run-campaigns
     schedule: "*/5 * * * *"
     command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/schedule-campaigns"
+      curl -sf -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL&send_after_queue=false"
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
-  # Autoresponder pass
-  - name: run-autoresponder
-    schedule: "*/10 * * * *"
-    command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/autoresponder/autoresponder"
-      -H "Authorization: Bearer ${CRON_TOKEN}"
-      -H "x-cron-token: ${CRON_TOKEN}"
-
-  # Retry/backoff pass
-  - name: sms-retry-runner
-    schedule: "*/30 * * * *"
-    command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/retry"
-      -H "Authorization: Bearer ${CRON_TOKEN}"
-      -H "x-cron-token: ${CRON_TOKEN}"
-
-  # Reset daily quotas
-  - name: reset-daily-quotas
-    schedule: "0 0 * * *"
-    command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/reset-quotas"
-      -H "Authorization: Bearer ${CRON_TOKEN}"
-      -H "x-cron-token: ${CRON_TOKEN}"
-
-  # KPI aggregation
-  - name: aggregate-kpis-daily
-    schedule: "0 1 * * *"
-    command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/aggregate-kpis"
-      -H "Authorization: Bearer ${CRON_TOKEN}"
-      -H "x-cron-token: ${CRON_TOKEN}"
-
-  # Health ping
+  # Health ping (keeps free web dyno warm)
   - name: health-ping
     schedule: "*/5 * * * *"
     command: >
