@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
-
 from sms.runtime import get_logger
 from sms.datastore import CONNECTOR
 from sms.airtable_schema import DripStatus
@@ -22,9 +21,7 @@ STATUS_ICON = {
     "DNC": "⛔",
 }
 
-# ───────────────────────────── utilities
-def _now(): return datetime.now()
-def _ct_future_iso_naive(min_s=3, max_s=30):
+def _ct_future_iso_naive(min_s=3, max_s=25):
     dt = datetime.now(QUIET_TZ) + timedelta(seconds=random.randint(min_s, max_s))
     return dt.replace(tzinfo=None).isoformat(timespec="seconds")
 
@@ -53,16 +50,11 @@ def _extract_first_name(full_name: Optional[str]) -> str:
     tokens = [t for t in s.split() if t and t.lower() not in HONORIFICS]
     return tokens[0] if tokens else ""
 
-# ───────────────────────────── placeholders
 def _apply_placeholders(template_body: str, pf: dict, first_name: str) -> str:
-    """Robust placeholder fill for {First}, {Property Address}, {Property City} etc."""
     msg = template_body or ""
-
-    # Replace first name tokens
     for key in ["{First}", "{first}", "{FIRST}", "{First Name}", "{First_Name}"]:
         msg = msg.replace(key, first_name or "")
 
-    # Fuzzy lookup helper (handles linked-field variants)
     def find_field(targets: list[str]) -> str:
         for k in pf.keys():
             norm = k.lower().strip()
@@ -76,20 +68,9 @@ def _apply_placeholders(template_body: str, pf: dict, first_name: str) -> str:
     city = find_field(["property city", "city"])
     msg = msg.replace("{Property Address}", addr)
     msg = msg.replace("{Property City}", city)
-
-    # Catch all remaining placeholders
-    for ph in set(re.findall(r"\{([^{}]+)\}", msg)):
-        normalized = ph.lower().replace("_", " ").strip()
-        replacement = ""
-        for k, v in pf.items():
-            if normalized in k.lower() and v:
-                replacement = str(v)
-                break
-        msg = msg.replace(f"{{{ph}}}", replacement or "")
     msg = re.sub(r"\{[^{}]+\}", "", msg)
     return " ".join(msg.split())
 
-# ───────────────────────────── templates
 def _get_template_body(tbl, tid: str) -> Optional[str]:
     try: rec = tbl.get(tid)
     except Exception as e:
@@ -102,11 +83,8 @@ def _get_template_body(tbl, tid: str) -> Optional[str]:
             return v.strip()
     return None
 
-# ───────────────────────────── numbers
 def _number_from_fields(f: dict) -> Optional[str]:
     return _field_get(f, "TextGrid Phone Number", "Phone Number", "Number", "From Number")
-def _is_active_number(f: dict) -> bool:
-    active = f.get("Active"); return True if active is None else bool(active)
 
 @lru_cache(maxsize=256)
 def _load_numbers_for_market(mv: Optional[str]) -> List[str]:
@@ -121,28 +99,28 @@ def _load_numbers_for_market(mv: Optional[str]) -> List[str]:
     pool = []
     for r in recs or []:
         f = (r or {}).get("fields", {}) or {}
-        if _is_active_number(f):
-            num = _number_from_fields(f)
-            if num: pool.append(str(num).strip())
+        num = _number_from_fields(f)
+        if num: pool.append(str(num).strip())
     return list(dict.fromkeys(pool))
 
 def _stable_rr_index(pid: str, n: int) -> int:
     if n <= 0: return 0
     h = hashlib.sha1(pid.encode()).hexdigest()
     return int(h[:8], 16) % n
+
 def _pick_textgrid_number_for_campaign(cf: dict, pid: str) -> Optional[str]:
     market = _field_get(cf, "Market", "Market Name", "market")
     pool = _load_numbers_for_market(market)
     if not pool: return None
     return pool[_stable_rr_index(pid, len(pool))]
 
-# ───────────────────────────── Airtable safe create
 def _robust_create_drip(tbl, payload: Dict[str, Any], dryrun=False) -> bool:
     if dryrun or os.getenv("TEST_MODE", "false").lower() == "true":
-        log.info(f"[dryrun] Would queue → {payload.get('Message')[:100]}")
+        log.info(f"[dryrun] Would queue → {payload.get('Message')[:90]}")
         return True
     try:
-        tbl.create(payload); return True
+        tbl.create(payload)
+        return True
     except Exception as e:
         msg = str(e)
         if "INVALID_MULTIPLE_CHOICE_OPTIONS" in msg or "Insufficient permissions" in msg:
@@ -154,24 +132,10 @@ def _robust_create_drip(tbl, payload: Dict[str, Any], dryrun=False) -> bool:
         log.error(f"Airtable create failed [Drip Queue]: {e}")
         return False
 
-# ───────────────────────────── campaign filter
-def _eligible_campaigns(tbl) -> List[Dict]:
-    now_iso = _now().isoformat()
-    formula = (
-        f"AND("
-        f"OR({{Status}}='Active',AND({{Status}}='Scheduled',{{Start Time}}<='{now_iso}')),"
-        f"NOT({{Status}}='Paused'),NOT({{Status}}='Completed')"
-        f")"
-    )
-    try: return tbl.all(formula=formula, page_size=100)
-    except Exception as e:
-        log.error(f"❌ Failed to fetch campaigns: {e}")
-        return []
-
-# ───────────────────────────── queueing
 def _queue_one_campaign(camp: Dict, limit: int, dryrun=False) -> int:
     cf = camp.get("fields", {}) or {}
-    cid = camp.get("id"); cname = cf.get("Name") or "Unnamed Campaign"
+    cid = camp.get("id")
+    cname = cf.get("Name") or "Unnamed Campaign"
     log.info(f"➡️ Queuing campaign: {cname}")
 
     drip_tbl = CONNECTOR.drip_queue().table
@@ -181,11 +145,8 @@ def _queue_one_campaign(camp: Dict, limit: int, dryrun=False) -> int:
         return 0
 
     pros_tbl = CONNECTOR.prospects().table
-    formula = "OR(" + ",".join([f"RECORD_ID()='{pid}'" for pid in pros_ids]) + ")"
-    try: prospects = pros_tbl.all(formula=formula, page_size=min(limit, 100))
-    except Exception as e:
-        log.error(f"Failed to fetch prospects for {cname}: {e}")
-        return 0
+    formula = "OR(" + ",".join([f"RECORD_ID()='{pid}'" for pid in pros_ids[:limit]]) + ")"
+    prospects = pros_tbl.all(formula=formula, page_size=min(limit, 50))
     if not prospects: return 0
 
     tmpl_links = cf.get("Templates") or []
@@ -195,67 +156,62 @@ def _queue_one_campaign(camp: Dict, limit: int, dryrun=False) -> int:
     for p in prospects:
         pf = (p or {}).get("fields", {}) or {}
         pid = p.get("id") or ""
-        phone = _field_get(pf, "Seller Phone Number", "Phone 1 (from Linked Owner)", "Phone", "Primary Phone", "Mobile")
+        phone = _field_get(pf, "Seller Phone Number", "Phone", "Mobile")
         if not phone: continue
         market = _norm_market(_field_get(pf, "Market", "market", "Market Name"))
-        first = _extract_first_name(_field_get(pf, "First Name", "Owner First Name", "Seller Name", "Owner Name", "Name"))
+        first = _extract_first_name(_field_get(pf, "First Name", "Owner Name", "Name", "Seller Name"))
         tg = _pick_textgrid_number_for_campaign(cf, pid)
 
-        tmpl_id = None; message = None
+        tmpl_id = None
+        message = None
         if tmpl_tbl and tmpl_total:
-            tmpl_id = tmpl_links[tmpl_idx % tmpl_total]; tmpl_idx += 1
+            tmpl_id = tmpl_links[tmpl_idx % tmpl_total]
+            tmpl_idx += 1
             body = _get_template_body(tmpl_tbl, tmpl_id)
             if body: message = _apply_placeholders(body, pf, first)
         if not message:
             message = f"Hi {first}, this is Ryan, a local investor. Are you still the owner? Reply STOP to opt out."
 
         payload = {
-            "Campaign": [cid], "Prospect": [pid],
+            "Campaign": [cid],
+            "Prospect": [pid],
             "Seller Phone Number": str(phone).strip(),
             "TextGrid Phone Number": tg,
-            "Message": message, "Market": market,
+            "Message": message,
+            "Market": market,
             "Status": DripStatus.QUEUED.value,
             "UI": STATUS_ICON["QUEUED"],
-            "Next Send Date": _ct_future_iso_naive(3, 30),
+            "Next Send Date": _ct_future_iso_naive(3, 20),
             "Template": [tmpl_id] if tmpl_id else None,
         }
         if _robust_create_drip(drip_tbl, payload, dryrun=dryrun):
             queued += 1
-        time.sleep(random.uniform(0.05, 0.2))
+        time.sleep(random.uniform(0.05, 0.15))
+
     log.info(f"✅ Queued {queued} for {cname}")
     return queued
 
-# ───────────────────────────── main
-def run_campaigns(limit="ALL", send_after_queue=True, dryrun=False) -> Dict[str, Any]:
-    log.info(f"🚀 Campaign Runner — limit={limit}, dryrun={dryrun}")
+def run_campaign_by_name(campaign_name: str, limit=10, dryrun=False):
     camp_tbl = CONNECTOR.campaigns().table
-    camps = _eligible_campaigns(camp_tbl)
-    if not camps:
-        log.info("⚠️ No due/active campaigns found.")
-        return {"ok": True, "queued": 0}
-    per_limit = 1_000_000 if str(limit).upper()=="ALL" else max(int(limit),1)
-    total = 0
-    for c in camps:
-        try: total += _queue_one_campaign(c, per_limit, dryrun=dryrun)
-        except Exception as e:
-            log.error(f"Queue fail: {e}")
-            log.debug(traceback.format_exc())
-    if not dryrun and send_after_queue and total>0:
-        try:
-            from sms.outbound_batcher import send_batch
-            send_batch(limit=500)
-        except Exception as e:
-            log.error(f"⚠️ Outbound batch send failed: {e}")
-    log.info(f"🏁 Done — {total} queued across {len(camps)} campaigns.")
-    return {"ok": True, "queued": total, "processed": len(camps)}
+    try:
+        formula = f"LOWER({{Campaign Name}})='{campaign_name.lower()}'"
+        recs = camp_tbl.all(formula=formula, page_size=1)
+        if not recs:
+            log.warning(f"⚠️ No campaign found for '{campaign_name}'.")
+            return
+        camp = recs[0]
+        _queue_one_campaign(camp, limit, dryrun)
+        log.info(f"🏁 Finished {campaign_name}")
+    except Exception as e:
+        log.error(f"Campaign run failed: {e}")
+        log.debug(traceback.format_exc())
 
 if __name__ == "__main__":
     import argparse
-    p=argparse.ArgumentParser()
-    p.add_argument("--limit",default="ALL")
-    p.add_argument("--dryrun",action="store_true")
-    a=p.parse_args()
-    log.info(f"Running Campaign Runner with limit={a.limit}, dryrun={a.dryrun}")
-    res=run_campaigns(limit=a.limit,send_after_queue=not a.dryrun,dryrun=a.dryrun)
-    if a.dryrun: log.info("🧪 Dry-run: no Airtable records created or sent.")
-    print(res)
+    p = argparse.ArgumentParser()
+    p.add_argument("--campaign", type=str, required=True, help="Campaign name to run")
+    p.add_argument("--limit", default=5, type=int)
+    p.add_argument("--dryrun", action="store_true")
+    args = p.parse_args()
+
+    run_campaign_by_name(args.campaign, args.limit, dryrun=args.dryrun)
