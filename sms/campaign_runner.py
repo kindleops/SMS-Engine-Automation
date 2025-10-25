@@ -163,6 +163,32 @@ def _ct_future_iso_naive(min_s: int = JITTER_MIN_S, max_s: int = JITTER_MAX_S) -
     dt = now_ct() + timedelta(seconds=random.randint(min_s, max_s))
     return dt.replace(tzinfo=None).isoformat(timespec="seconds")
 
+def _prospect_property_id(pf: Dict[str, Any]) -> Optional[str]:
+    """
+    Resolve a Property ID from a Prospect record.
+    Supports common variants and linked-record IDs.
+    """
+    candidates = [
+        "Property ID",
+        "PropertyId",
+        "PropertyID",
+        "Property Record ID",
+        "Property (Record ID)",
+        "Property_ID",
+        "Property (from Linked Owner)",
+        "Property",
+    ]
+    for key in candidates:
+        v = pf.get(key)
+        if isinstance(v, list) and v:
+            # linked field or multi-value → take first
+            s = str(v[0]).strip()
+            if s:
+                return s
+        elif isinstance(v, (str, int)) and str(v).strip():
+            return str(v).strip()
+    return None
+
 # ---------- Data fetch ----------
 def _fetch_campaign_by_name(tbl, name: str) -> List[Dict[str, Any]]:
     formula = f"{{{CAMPAIGN_NAME_F}}}='{_escape_quotes(name)}'"
