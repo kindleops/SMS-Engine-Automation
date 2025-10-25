@@ -28,7 +28,12 @@ from sms.dispatcher import get_policy  # provides quiet hours + rate caps
 # Schema + config
 # ──────────────────────────────────────────────────────────────────────────────
 from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
-from sms.airtable_schema import DripStatus
+from sms.status_utils import _sanitize_status
+
+DRIP_STATUS_F = DRIP_FIELDS.get("STATUS", "Status")
+DRIP_UI_F = DRIP_FIELDS.get("UI", "UI")
+DRIP_FROM_NUMBER_F = DRIP_FIELDS.get("FROM_NUMBER", "TextGrid Phone Number")
+DRIP_SELLER_PHONE_F = DRIP_FIELDS.get("SELLER_PHONE", "Seller Phone Number")
 
 # Optional integrations (all safe fallbacks)
 try:
@@ -63,7 +68,7 @@ except Exception:
             def send(*, phone: str, body: str, from_number: str, property_id: Optional[str] = None, direction: str = "OUT") -> Dict[str, Any]:
                 # Legacy API often returns a SID or a dict. Normalize to {status: "sent"|...}
                 try:
-                    res = _legacy_send(to=phone, body=body, from_number=from_number)  # type: ignore
+                    res = _legacy_send(from_number=from_number, to=phone, message=body)  # type: ignore
                     ok = bool(res)
                     return {"status": "sent" if ok else "failed", "raw": res}
                 except Exception as e:
@@ -144,13 +149,33 @@ def _safe_update(tbl, rid: str, payload: Dict[str, Any]) -> None:
     Only allow updates to known DRIP fields. Avoids 422 from unknown fields.
     """
     try:
-        allow_keys = {k for k in [
-            "STATUS", "NEXT_SEND_DATE", "SENT_AT", "LAST_ERROR", "FROM_NUMBER"
-        ] if k in DRIP_FIELDS}
+        allow_keys = {
+            k
+            for k in ["STATUS", "NEXT_SEND_DATE", "SENT_AT", "LAST_ERROR", "FROM_NUMBER", "UI"]
+            if k in DRIP_FIELDS
+        }
 
-        clean = {DRIP_FIELDS[k]: v for k, v in payload.items() if k in allow_keys}
+        status_field = DRIP_STATUS_F
+        ui_field = DRIP_UI_F
+        clean: Dict[str, Any] = {}
+        for key, value in payload.items():
+            mapped = DRIP_FIELDS.get(key, key)
+            if key in allow_keys or mapped in {status_field, ui_field}:
+                if mapped == status_field and isinstance(value, (str, type(None))):
+                    value = _sanitize_status(value)
+                clean[mapped] = value
+
         if clean:
-            tbl.update(rid, clean)
+            try:
+                tbl.update(rid, clean)
+            except Exception as exc:
+                if "INVALID_MULTIPLE_CHOICE_OPTIONS" in str(exc):
+                    retry = dict(clean)
+                    retry.pop(status_field, None)
+                    if retry:
+                        tbl.update(rid, retry)
+                else:
+                    raise
     except Exception as e:
         log.warning(f"⚠️ Update failed: {e}", exc_info=True)
 
@@ -265,21 +290,21 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
     # Determine canonical field names safely
     F = DRIP_FIELDS  # shorthand
 
-    status_key          = F.get("STATUS", "Status")
-    next_send_date_key  = F.get("NEXT_SEND_DATE", "Next Send Date")
-    seller_phone_key    = F.get("SELLER_PHONE", "Seller Phone Number")
-    from_number_key     = F.get("FROM_NUMBER", "TextGrid Phone Number")
-    market_key          = F.get("MARKET", "Market")
+    status_key = DRIP_STATUS_F
+    next_send_date_key = F.get("NEXT_SEND_DATE", "Next Send Date")
+    seller_phone_key = DRIP_SELLER_PHONE_F
+    from_number_key = DRIP_FROM_NUMBER_F
+    market_key = F.get("MARKET", "Market")
     message_preview_key = F.get("MESSAGE_PREVIEW", "Message")
-    property_id_key     = F.get("PROPERTY_ID", "Property ID")
-    campaign_link_key   = F.get("CAMPAIGN_LINK", "Campaign")
+    property_id_key = F.get("PROPERTY_ID", "Property ID")
+    campaign_link_key = F.get("CAMPAIGN_LINK", "Campaign")
 
     # Filter for due rows
     due: List[Dict[str, Any]] = []
     for r in rows:
         f = r.get("fields", {})
-        status = str(f.get(status_key, "")).strip()
-        if status not in (DripStatus.QUEUED.value, DripStatus.READY.value, DripStatus.SENDING.value):
+        status = _sanitize_status(str(f.get(status_key, "")).strip())
+        if status not in {"Queued", "Sending"}:
             continue
         due_at = _parse_dt(f.get(next_send_date_key), now)
         if due_at <= now:
@@ -313,21 +338,31 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
 
         # Validate phone
         if not _valid_us_e164(phone):
-            _safe_update(drip_tbl, rid, {
-                "STATUS": DripStatus.READY.value,
-                "LAST_ERROR": "invalid_phone",
-                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    "STATUS": "Queued",
+                    "UI": "⏳",
+                    "LAST_ERROR": "invalid_phone",
+                    "NEXT_SEND_DATE": _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
+                },
+            )
             total_failed += 1
             continue
 
         # Validate body
         if not body:
-            _safe_update(drip_tbl, rid, {
-                "STATUS": DripStatus.READY.value,
-                "LAST_ERROR": "empty_message",
-                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    "STATUS": "Queued",
+                    "UI": "⏳",
+                    "LAST_ERROR": "empty_message",
+                    "NEXT_SEND_DATE": _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
+                },
+            )
             total_failed += 1
             continue
 
@@ -338,25 +373,35 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
                 _safe_update(drip_tbl, rid, {"FROM_NUMBER": did})
 
         if not did:
-            _safe_update(drip_tbl, rid, {
-                "STATUS": DripStatus.READY.value,
-                "LAST_ERROR": "no_did",
-                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=NO_NUMBER_REQUEUE_SECONDS)),
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    "STATUS": "Queued",
+                    "UI": "⏳",
+                    "LAST_ERROR": "no_did",
+                    "NEXT_SEND_DATE": _iso(now + timedelta(seconds=NO_NUMBER_REQUEUE_SECONDS)),
+                },
+            )
             total_failed += 1
             continue
 
         # Rate limit
         if not limiter.try_consume(did):
-            _safe_update(drip_tbl, rid, {
-                "STATUS": DripStatus.READY.value,
-                "LAST_ERROR": "rate_limited",
-                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=RATE_LIMIT_REQUEUE_SECONDS)),
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    "STATUS": "Queued",
+                    "UI": "⏳",
+                    "LAST_ERROR": "rate_limited",
+                    "NEXT_SEND_DATE": _iso(now + timedelta(seconds=RATE_LIMIT_REQUEUE_SECONDS)),
+                },
+            )
             continue
 
         # Transition to SENDING
-        _safe_update(drip_tbl, rid, {"STATUS": DripStatus.SENDING.value})
+        _safe_update(drip_tbl, rid, {"STATUS": "Sending", "UI": "⏳"})
 
         delivered = False
         try:
@@ -376,24 +421,40 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
 
         if delivered:
             total_sent += 1
-            _safe_update(drip_tbl, rid, {
-                "STATUS": DripStatus.SENT.value,
-                "SENT_AT": _iso(utcnow()),
-                "LAST_ERROR": "",
-            })
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    "STATUS": "Sent",
+                    "UI": "✅",
+                    "SENT_AT": _iso(utcnow()),
+                    "LAST_ERROR": "",
+                },
+            )
             try:
                 increment_sent(did)
             except Exception:
                 pass
-            log_kpi("OUTBOUND_SENT", 1, campaign=campaign_id or "ALL")
+            try:
+                log_kpi("OUTBOUND_SENT", 1, campaign=campaign_id or "ALL")
+            except Exception as kpi_exc:
+                log.warning(f"KPI logging skipped: {kpi_exc}")
         else:
             total_failed += 1
-            _safe_update(drip_tbl, rid, {
-                "STATUS": DripStatus.READY.value,
-                "LAST_ERROR": "send_failed",
-                "NEXT_SEND_DATE": _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
-            })
-            log_kpi("OUTBOUND_FAILED_SOFT", 1)
+            _safe_update(
+                drip_tbl,
+                rid,
+                {
+                    "STATUS": "Queued",
+                    "UI": "⏳",
+                    "LAST_ERROR": "send_failed",
+                    "NEXT_SEND_DATE": _iso(now + timedelta(seconds=REQUEUE_SOFT_ERROR_SECONDS)),
+                },
+            )
+            try:
+                log_kpi("OUTBOUND_FAILED_SOFT", 1)
+            except Exception as kpi_exc:
+                log.warning(f"KPI logging skipped: {kpi_exc}")
 
         if SLEEP_BETWEEN_SENDS_SEC > 0:
             time.sleep(SLEEP_BETWEEN_SENDS_SEC)
@@ -401,7 +462,10 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
     # Telemetry
     attempts = total_sent + total_failed
     delivery_rate = (total_sent / attempts * 100.0) if attempts else 0.0
-    log_kpi("OUTBOUND_DELIVERY_RATE", delivery_rate)
+    try:
+        log_kpi("OUTBOUND_DELIVERY_RATE", delivery_rate)
+    except Exception as kpi_exc:
+        log.warning(f"KPI logging skipped: {kpi_exc}")
     log_run("OUTBOUND_BATCH", processed=total_sent, breakdown={
         "sent": total_sent, "failed": total_failed, "errors": len(errors)
     })
