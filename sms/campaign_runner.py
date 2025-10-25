@@ -16,525 +16,421 @@ Campaign Runner vFINAL
 ✓ Resilience: retries without Market on INVALID_MULTIPLE_CHOICE_OPTIONS, page size <= 100
 """
 from __future__ import annotations
-
-import os
-import re
-import json
-import time
-import random
-import traceback
-from typing import Any, Dict, List, Optional, Tuple
+import argparse, os, random, re, traceback
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
-
-try:
-    from zoneinfo import ZoneInfo
-except Exception:
-    ZoneInfo = None  # py<3.9 fallback
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from sms.runtime import get_logger, normalize_phone
 from sms.datastore import CONNECTOR
+from sms.airtable_schema import DripStatus
 
 log = get_logger("campaign_runner")
 
-# ─────────────────────────────── Config ───────────────────────────────
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() in {"1", "true", "yes"}
-QUIET_HOURS_ENFORCED = os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in {"1", "true", "yes"}
-QUIET_START_HOUR_LOCAL = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))
-QUIET_END_HOUR_LOCAL = int(os.getenv("QUIET_END_HOUR_LOCAL", "9"))
-RUNNER_SEND_AFTER_QUEUE = os.getenv("RUNNER_SEND_AFTER_QUEUE", "true").lower() in {"1", "true", "yes"}
-JITTER_MIN_SEC = int(os.getenv("JITTER_MIN_SEC", "5"))
-JITTER_MAX_SEC = int(os.getenv("JITTER_MAX_SEC", "20"))
-
-CT = ZoneInfo("America/Chicago") if ZoneInfo else timezone.utc
-HOURGLASS = "⏳"
-
-# Field names (aligned to your schema)
+# ---------- Configurable column names (match your Airtable exactly) ----------
 CAMPAIGN_NAME_F = "Campaign Name"
-CAMPAIGN_STATUS_F = "Status"            # single select: Active, Scheduled, Paused, Completed
-CAMPAIGN_START_F = "Start Time"         # datetime
-CAMPAIGN_PROSPECTS_F = "Prospects"      # linked → Prospects
-CAMPAIGN_TEMPLATES_F = "Templates"      # linked → Templates
-CAMPAIGN_MARKET_F = "Market"            # single select (used for number pool)
-CAMPAIGN_LAST_RUN_F = "Last Run At"     # optional; if present we write back
+CAMPAIGN_STATUS_F = "Status"                 # single select: Active, Scheduled, Paused, Completed
+CAMPAIGN_START_F = "Start Time"              # datetime
+CAMPAIGN_MARKET_F = "Market"                 # single select (drives TextGrid number selection)
+CAMPAIGN_PROSPECTS_LINK_F = "Prospects"      # link → Prospects
+CAMPAIGN_TEMPLATES_LINK_F = "Templates"      # link → Templates (optional but recommended)
 
-PROSPECT_OWNER_NAME_F = "Owner Name"
-PROSPECT_PHONE_F = "Phone"
-PROSPECT_ADDR_F = "Property Address"
-PROSPECT_CITY_F = "Property City"
-PROSPECT_MARKET_F = "Market"
+PROSPECT_NAME_KEYS = [
+    "Owner Name",
+    "Phone 1 Name (Primary) (from Linked Owner)",
+]
+PROSPECT_MARKET_F = "Market"                 # single select
+PROSPECT_PHONE_KEYS = [
+    "Phone 1 (from Linked Owner)",
+    "Phone",
+    "Primary Phone",
+    "Mobile",
+]
+PROSPECT_ADDR_F = "Property Address"         # single select or text
+PROSPECT_CITY_F = "Property City"            # single select or text
 
-DRIP_TBL_STATUS_F = "Status"
-DRIP_TBL_MARKET_F = "Market"
-DRIP_TBL_MSG_F = "Message"
-DRIP_TBL_TO_PHONE_F = "Seller Phone Number"
-DRIP_TBL_FROM_PHONE_F = "TextGrid Phone Number"
-DRIP_TBL_CAMPAIGN_LINK_F = "Campaign"
-DRIP_TBL_PROSPECT_LINK_F = "Prospect"
-DRIP_TBL_TEMPLATE_LINK_F = "Template"
-DRIP_TBL_NEXT_SEND_F = "Next Send Date"
-DRIP_TBL_UI_F = "UI"
+DRIP_TABLE_NAME = "Drip Queue"
+DRIP_CAMPAIGN_LINK_F = "Campaign"
+DRIP_PROSPECT_LINK_F = "Prospect"
+DRIP_TEMPLATE_LINK_F = "Template"
+DRIP_MESSAGE_F = "Message"
+DRIP_SELLER_PHONE_F = "Seller Phone Number"
+DRIP_FROM_NUMBER_F = "TextGrid Phone Number"
+DRIP_MARKET_F = "Market"                     # single select
+DRIP_STATUS_F = "Status"
+DRIP_NEXT_SEND_F = "Next Send Date"
+DRIP_UI_F = "UI"
 
-TEMPLATE_MSG_F = "Message"              # Templates.Message
-NUMBERS_MARKET_F = "Market"             # Numbers.Market (single select)
-NUMBERS_PHONE_F = "TextGrid Phone Number"
+TEMPLATE_MESSAGE_F = "Message"               # Templates.Message
 
-# ─────────────────────────────── Time helpers ─────────────────────────
-def _central_now() -> datetime:
-    return datetime.now(CT)
+NUMBERS_MARKET_F = "Market"                  # single select
+NUMBERS_FROM_F = "TextGrid Phone Number"     # the actual send-from phone number
+NUMBERS_STATUS_F = "Status"                  # expect 'Active'
+NUMBERS_TABLE_NAME = "Numbers"
 
-def _is_quiet_hours() -> bool:
-    if not QUIET_HOURS_ENFORCED:
+# ---------- Behavior toggles ----------
+QUIET_TZ = ZoneInfo("America/Chicago")
+QUIET_START = int(os.getenv("QUIET_START_HOUR_LOCAL", "21"))
+QUIET_END = int(os.getenv("QUIET_END_HOUR_LOCAL", "9"))
+QUIET_ENFORCED = os.getenv("QUIET_HOURS_ENFORCED", "true").lower() in ("1","true","yes")
+
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() in ("1","true","yes")
+SEND_AFTER_QUEUE_DEFAULT = os.getenv("RUNNER_SEND_AFTER_QUEUE", "true").lower() in ("1","true","yes")
+
+JITTER_MIN_S = 5
+JITTER_MAX_S = 20
+
+STATUS_ICON = {
+    "QUEUED": "⏳",
+    "Sending…": "🔄",
+    "Sent": "✅",
+    "Retry": "🔁",
+    "Throttled": "🕒",
+    "Failed": "❌",
+    "DNC": "⛔",
+}
+
+# ---------- Helpers ----------
+def now_ct() -> datetime:
+    return datetime.now(QUIET_TZ)
+
+def is_quiet_hours() -> bool:
+    if not QUIET_ENFORCED:
         return False
-    h = _central_now().hour
-    return (h >= QUIET_START_HOUR_LOCAL) or (h < QUIET_END_HOUR_LOCAL)
+    h = now_ct().hour
+    return (h >= QUIET_START) or (h < QUIET_END)
 
-def _ct_naive_iso(dt: datetime) -> str:
-    """Return naive (no tz) ISO for CT – matches your Airtable UI."""
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(CT).replace(tzinfo=None)
-    else:
-        # assume local already; still strip tz to be safe
-        dt = dt.replace(tzinfo=None)
-    return dt.isoformat(timespec="seconds")
+def _escape_quotes(s: str) -> str:
+    return str(s).replace("'", "\\'")
 
-def _now_jittered() -> str:
-    dt = _central_now() + timedelta(seconds=random.randint(JITTER_MIN_SEC, JITTER_MAX_SEC))
-    return _ct_naive_iso(dt)
-
-# ─────────────────────────────── Safe helpers ─────────────────────────
-def get_campaigns_table():
-    """FastAPI main uses this to /campaign/{id}/start|stop."""
-    try:
-        return CONNECTOR.campaigns().table
-    except Exception as e:
-        log.error(f"❌ Campaigns table fetch failed: {e}")
-        return None
-
-def _escape_quotes(val: str) -> str:
-    return str(val).replace("'", "\\'")
-
-def _first_name_from_owner(name: Optional[str]) -> str:
-    """
-    Extract first token; drop initials/punctuation.
-    'John W. Johnson' --> 'John'
-    '  MARY  ANN  '   --> 'MARY'
-    """
-    if not name or not isinstance(name, str):
-        return ""
-    # Normalize whitespace, strip punctuation from first token
-    tok = name.strip().split()[0] if name.strip() else ""
-    tok = re.sub(r"[^\w\-']", "", tok)  # keep word-ish chars
-    # Avoid single-letter initials
-    if len(tok) == 1:
-        return ""
-    return tok
-
-def _best_str_field(fields: Dict[str, Any], key: str) -> Optional[str]:
-    v = fields.get(key)
-    if isinstance(v, list):
-        return v[0] if v else None
-    if isinstance(v, str):
-        return v
+def _first_link(v: Any) -> Optional[str]:
+    if isinstance(v, list) and v:
+        return v[0]
     return None
 
-def _best_phone(fields: Dict[str, Any]) -> Optional[str]:
-    candidates = [
-        PROSPECT_PHONE_F,
-        "Primary Phone",
-        "Owner Phone",
-        "Phone 1",
-        "Phone 2",
-        "Phone 1 (from Linked Owner)",
-        "Phone 2 (from Linked Owner)",
-    ]
-    for k in candidates:
-        v = fields.get(k)
-        if isinstance(v, list):
-            for vv in v:
-                p = normalize_phone(vv)
+def _first_text(v: Any) -> str:
+    if isinstance(v, list):
+        return str(v[0]) if v else ""
+    return str(v or "")
+
+def _best_phone(pf: Dict[str, Any]) -> Optional[str]:
+    for key in PROSPECT_PHONE_KEYS:
+        val = pf.get(key)
+        if not val:
+            continue
+        if isinstance(val, list):
+            for it in val:
+                p = normalize_phone(str(it))
                 if p:
                     return p
-        elif isinstance(v, str):
-            p = normalize_phone(v)
+        else:
+            p = normalize_phone(str(val))
             if p:
                 return p
     return None
 
-def _render_message(tmpl: str, pf: Dict[str, Any]) -> str:
-    first = _first_name_from_owner(_best_str_field(pf, PROSPECT_OWNER_NAME_F))
-    addr = _best_str_field(pf, PROSPECT_ADDR_F) or ""
-    city = _best_str_field(pf, PROSPECT_CITY_F) or ""
-    msg = (tmpl or "")
-    msg = msg.replace("{First}", first)
+_first_name_regex = re.compile(r"^[A-Za-z]+(?:'[A-Za-z]+)?$")
+def _first_name_from(raw: str) -> str:
+    if not raw:
+        return ""
+    # split on whitespace; pick first token with letters only (allow O'Neil)
+    for tok in str(raw).strip().split():
+        tok = tok.replace(".", "")
+        if _first_name_regex.match(tok):
+            return tok
+    # fallback: leading letters
+    m = re.match(r"[A-Za-z]+", str(raw))
+    return m.group(0) if m else ""
+
+def _render_message(tpl: str, pf: Dict[str, Any]) -> str:
+    name = ""
+    for k in PROSPECT_NAME_KEYS:
+        raw = pf.get(k)
+        if raw:
+            name = _first_name_from(str(raw))
+            if name:
+                break
+    addr = _first_text(pf.get(PROSPECT_ADDR_F))
+    city = _first_text(pf.get(PROSPECT_CITY_F))
+    msg = (tpl or "")
+    msg = msg.replace("{First}", name)
     msg = msg.replace("{Address}", addr)
     msg = msg.replace("{Property City}", city)
     return msg.strip()
 
-# ─────────────────────────────── Numbers pool ─────────────────────────
-_rotation_index: Dict[str, int] = {}
-_numbers_cache: Dict[str, List[str]] = {}  # market_key -> list of from-numbers
+def _ct_future_iso_naive(min_s: int = JITTER_MIN_S, max_s: int = JITTER_MAX_S) -> str:
+    dt = now_ct() + timedelta(seconds=random.randint(min_s, max_s))
+    return dt.replace(tzinfo=None).isoformat(timespec="seconds")
 
-def _market_key(val: Optional[str]) -> str:
-    return (val or "").strip().lower()
+# ---------- Data fetch ----------
+def _fetch_campaign_by_name(tbl, name: str) -> List[Dict[str, Any]]:
+    formula = f"{{{CAMPAIGN_NAME_F}}}='{_escape_quotes(name)}'"
+    return tbl.all(formula=formula, page_size=100) or []
 
-def _load_numbers_for_market(market: str) -> List[str]:
+def _fetch_due_campaigns(tbl) -> List[Dict[str, Any]]:
+    # Scheduled & Start <= NOW or Active (exclude Paused/Completed)
+    formula = (
+        f"AND("
+        f"OR({{{CAMPAIGN_STATUS_F}}}='Scheduled',{{{CAMPAIGN_STATUS_F}}}='Active'),"
+        f"OR({{{CAMPAIGN_STATUS_F}}}='Active',DATETIME_DIFF(NOW(),{{{CAMPAIGN_START_F}}},'seconds')>=0)"
+        f")"
+    )
+    return tbl.all(formula=formula, page_size=100) or []
+
+def _fetch_records_by_ids(tbl, ids: List[str]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for i in range(0, len(ids), 90):
+        chunk = ids[i:i+90]
+        formula = "OR(" + ",".join([f"RECORD_ID()='{_escape_quotes(rid)}'" for rid in chunk]) + ")"
+        recs = tbl.all(formula=formula, page_size=100) or []
+        out.extend(recs)
+    return out
+
+def _fetch_template_messages(templates_tbl, ids: List[str]) -> List[Tuple[str, str]]:
+    pairs: List[Tuple[str, str]] = []
+    if not ids:
+        return pairs
+    recs = _fetch_records_by_ids(templates_tbl, ids)
+    for r in recs:
+        tid = r.get("id")
+        f = r.get("fields", {}) or {}
+        msg = f.get(TEMPLATE_MESSAGE_F)
+        if tid and isinstance(msg, str) and msg.strip():
+            pairs.append((tid, msg.strip()))
+    return pairs
+
+# ---------- Numbers rotation (by Campaign.Market) ----------
+_numbers_cache: Dict[str, List[str]] = {}
+_numbers_idx: Dict[str, int] = {}
+
+def _market_key(s: Optional[str]) -> str:
+    return (s or "").strip().lower()
+
+def _get_numbers_for_market(numbers_tbl, market: str) -> List[str]:
     mk = _market_key(market)
     if mk in _numbers_cache:
         return _numbers_cache[mk]
-
-    try:
-        numbers_handle = CONNECTOR.numbers()
-        tbl = numbers_handle.table
-    except Exception:
-        tbl = None
-
-    pool: List[str] = []
-    if tbl:
-        try:
-            # filter exact market (single select); Airtable formula needs exact match
-            formula = f"{{{NUMBERS_MARKET_F}}}='{_escape_quotes(market)}'"
-            recs = tbl.all(formula=formula, page_size=100)
-            for r in recs:
-                f = r.get("fields", {}) or {}
-                number = f.get(NUMBERS_PHONE_F)
-                if isinstance(number, str) and number.strip():
-                    pool.append(number.strip())
-        except Exception as e:
-            log.warning(f"⚠️ Numbers fetch failed for market '{market}': {e}")
-
-    # Fallback: if nothing found, try *all* numbers and take the first 10
-    if not pool and tbl:
-        try:
-            recs = tbl.all(page_size=100)
-            for r in recs:
-                f = r.get("fields", {}) or {}
-                number = f.get(NUMBERS_PHONE_F)
-                if isinstance(number, str) and number.strip():
-                    pool.append(number.strip())
-            pool = pool[:10]
-        except Exception:
-            pass
-
+    formula = (
+        f"AND(LOWER({{{NUMBERS_STATUS_F}}})='active',"
+        f"LOWER({{{NUMBERS_MARKET_F}}})=LOWER('{_escape_quotes(market)}'))"
+    )
+    recs = numbers_tbl.all(formula=formula, page_size=100) or []
+    pool = []
+    for r in recs:
+        f = r.get("fields", {}) or {}
+        num = f.get(NUMBERS_FROM_F)
+        if isinstance(num, str) and num.strip():
+            pool.append(num.strip())
     _numbers_cache[mk] = pool
     return pool
 
-def _choose_from_number(market: str) -> Optional[str]:
-    pool = _load_numbers_for_market(market)
+def _choose_from_number(numbers_tbl, campaign_market: Optional[str]) -> Optional[str]:
+    if not campaign_market:
+        return None
+    mk = _market_key(campaign_market)
+    pool = _get_numbers_for_market(numbers_tbl, campaign_market)
     if not pool:
         return None
-    mk = _market_key(market)
-    idx = _rotation_index.get(mk, 0)
-    val = pool[idx % len(pool)]
-    _rotation_index[mk] = idx + 1
-    return val
+    idx = _numbers_idx.get(mk, 0)
+    choice = pool[idx % len(pool)]
+    _numbers_idx[mk] = idx + 1
+    return choice
 
-# ─────────────────────────────── Template helpers ─────────────────────
-def _fetch_template_messages_by_ids(tpl_table, template_ids: List[str]) -> Dict[str, str]:
-    """
-    Fetch Message body for each template id. Returns {template_id: message}.
-    """
-    results: Dict[str, str] = {}
-    if not template_ids:
-        return results
-    # Batch in chunks of ~90 with OR(RECORD_ID()='id',...)
-    for i in range(0, len(template_ids), 90):
-        chunk = template_ids[i : i + 90]
-        formula = "OR(" + ",".join([f"RECORD_ID()='{_escape_quotes(tid)}'" for tid in chunk]) + ")"
-        try:
-            recs = tpl_table.all(formula=formula, page_size=100)
-            for r in recs:
-                rid = r.get("id")
-                f = r.get("fields", {}) or {}
-                msg = f.get(TEMPLATE_MSG_F)
-                if rid and isinstance(msg, str) and msg.strip():
-                    results[rid] = msg.strip()
-        except Exception as e:
-            log.warning(f"⚠️ Template fetch chunk failed: {e}")
-        time.sleep(0.1)
-    return results
+# ---------- Core queueing ----------
+def _queue_one_campaign(
+    campaign: Dict[str, Any],
+    limit: Optional[int],
+    dryrun: bool,
+    preview_limit: int = 5,
+) -> Dict[str, Any]:
+    cf = (campaign or {}).get("fields", {}) or {}
+    cid = campaign.get("id")
+    cname = cf.get(CAMPAIGN_NAME_F) or "Unnamed Campaign"
+    cstatus = str(cf.get(CAMPAIGN_STATUS_F) or "").strip().lower()
+    cstart = cf.get(CAMPAIGN_START_F)
+    cmarket = cf.get(CAMPAIGN_MARKET_F)
 
-# ─────────────────────────────── Dedupe helper ───────────────────────
-def _exists_dupe(drip_tbl, campaign_id: str, last10: str) -> bool:
-    """
-    Check if a (campaign, phone-last10) already queued. Uses RIGHT() to match last 10.
-    """
-    try:
-        formula = (
-            f"AND("
-            f"ARRAYJOIN({{{DRIP_TBL_CAMPAIGN_LINK_F}}})='{_escape_quotes(campaign_id)}',"
-            f"RIGHT({{{DRIP_TBL_TO_PHONE_F}}},10)='{_escape_quotes(last10)}'"
-            f")"
-        )
-        recs = drip_tbl.all(formula=formula, page_size=1)
-        return bool(recs)
-    except Exception:
-        return False
+    if cstatus in ("paused", "completed"):
+        log.info(f"⏭️ Campaign {cname} is {cstatus}; skipped.")
+        return {"campaign": cname, "queued": 0, "skipped": "status"}
 
-def _last10(phone: str) -> str:
-    digits = re.sub(r"\D", "", phone or "")
-    return digits[-10:] if len(digits) >= 10 else digits
+    # Linked prospects
+    pids = cf.get(CAMPAIGN_PROSPECTS_LINK_F) or []
+    if not pids:
+        log.info(f"⏭️ Campaign {cname} has no linked Prospects; skipped.")
+        return {"campaign": cname, "queued": 0, "skipped": "no_prospects"}
 
-# ─────────────────────────────── Core Queueing ────────────────────────
-def _queue_one_campaign(campaign: Dict[str, Any], per_camp_limit: Optional[int]) -> Tuple[int, int, int]:
-    """
-    Returns (queued, skipped, total_processed)
-    """
-    camp_fields = (campaign or {}).get("fields", {}) or {}
-    campaign_id = campaign.get("id")
-    camp_name = camp_fields.get(CAMPAIGN_NAME_F) or camp_fields.get("Name") or "Unnamed Campaign"
-
-    # Guard: Status and Start Time handled by fetch, but re-check here
-    status = str(camp_fields.get(CAMPAIGN_STATUS_F, "")).strip().lower()
-    if status in {"paused", "completed"}:
-        log.info(f"⏭️ Campaign skipped (status {status}): {camp_name}")
-        return (0, 0, 0)
-
-    template_ids = camp_fields.get(CAMPAIGN_TEMPLATES_F) or []
-    prospects_linked = camp_fields.get(CAMPAIGN_PROSPECTS_F) or []
-    if not prospects_linked:
-        log.info(f"⏭️ Campaign has 0 linked Prospects: {camp_name}")
-        return (0, 0, 0)
-
-    # Tables
+    prospects_tbl = CONNECTOR.prospects().table
+    templates_tbl = CONNECTOR.templates().table
     drip_tbl = CONNECTOR.drip_queue().table
-    pros_tbl = CONNECTOR.prospects().table
-    tpl_tbl = CONNECTOR.templates().table
+    numbers_tbl = CONNECTOR.numbers().table
 
-    # Load template messages
-    tpl_bodies = _fetch_template_messages_by_ids(tpl_tbl, template_ids)
-    if not tpl_bodies:
-        log.warning(f"⚠️ No valid template messages for {camp_name}; skipping.")
-        return (0, 0, 0)
-    tpl_ids_order = list(tpl_bodies.keys())
+    prospects = _fetch_records_by_ids(prospects_tbl, pids)
+    if not prospects:
+        log.info(f"⚠️ Campaign {cname} linked Prospects not found; skipped.")
+        return {"campaign": cname, "queued": 0, "skipped": "prospects_not_found"}
 
-    # Hydrate prospect records in chunks
-    prospects: List[Dict[str, Any]] = []
-    for i in range(0, len(prospects_linked), 90):
-        chunk = prospects_linked[i : i + 90]
-        formula = "OR(" + ",".join([f"RECORD_ID()='{_escape_quotes(pid)}'" for pid in chunk]) + ")"
-        try:
-            recs = pros_tbl.all(formula=formula, page_size=100)
-            prospects.extend(recs)
-        except Exception as e:
-            log.warning(f"⚠️ Prospect chunk fetch failed: {e}")
-        time.sleep(0.08)
+    # Templates (optional: rotate per message). If none linked, we still allow (message must be set later).
+    tmpl_ids = cf.get(CAMPAIGN_TEMPLATES_LINK_F) or []
+    templates = _fetch_template_messages(templates_tbl, tmpl_ids)  # list[(tid, message)]
+    if not templates:
+        log.warning(f"⚠️ Campaign {cname} has no valid templates; messages will be blank.")
+        templates = []
+
+    # Hard cap for run
+    take = len(prospects) if (not limit or limit <= 0) else min(limit, len(prospects))
 
     queued = 0
-    skipped = 0
-    processed = 0
+    previews: List[Dict[str, Any]] = []
+    reasons = defaultdict(int)
 
-    for idx, pr in enumerate(prospects):
-        if per_camp_limit and queued >= per_camp_limit:
-            break
-        processed += 1
+    for i, pr in enumerate(prospects[:take]):
         pf = (pr or {}).get("fields", {}) or {}
-
         phone = _best_phone(pf)
         if not phone:
-            skipped += 1
-            continue
-        last10 = _last10(phone)
-        if not last10:
-            skipped += 1
+            reasons["no_phone"] += 1
             continue
 
-        # Dedup (campaign_id + last10)
-        if campaign_id and _exists_dupe(drip_tbl, campaign_id, last10):
-            skipped += 1
-            continue
+        # Message/template
+        if templates:
+            tmpl_id, body = random.choice(templates)
+        else:
+            tmpl_id, body = None, ""
+        rendered = _render_message(body, pf)
 
-        market = _best_str_field(pf, PROSPECT_MARKET_F) or ""
-        from_number = _choose_from_number(market or (camp_fields.get(CAMPAIGN_MARKET_F) or ""))
-        if not from_number:
-            skipped += 1
-            continue
+        # Markets + from-number
+        drip_market = pf.get(PROSPECT_MARKET_F) or ""   # single select; matches your options (e.g., "Minneapolis, MN")
+        from_number = _choose_from_number(numbers_tbl, cmarket)
 
-        # Template rotation: pick at index (round-robin) for even spread
-        tpl_choice_id = tpl_ids_order[idx % len(tpl_ids_order)]
-        body = tpl_bodies.get(tpl_choice_id, "")
-
-        message = _render_message(body, pf)
-        if not message:
-            skipped += 1
-            continue
-
-        payload = {
-            DRIP_TBL_STATUS_F: "QUEUED",
-            DRIP_TBL_MARKET_F: market,
-            DRIP_TBL_MSG_F: message,
-            DRIP_TBL_TO_PHONE_F: phone,
-            DRIP_TBL_FROM_PHONE_F: from_number,
-            DRIP_TBL_NEXT_SEND_F: _now_jittered(),
-            DRIP_TBL_UI_F: HOURGLASS,
-            DRIP_TBL_CAMPAIGN_LINK_F: [campaign_id] if campaign_id else None,
-            DRIP_TBL_PROSPECT_LINK_F: [pr.get("id")] if pr.get("id") else None,
-            DRIP_TBL_TEMPLATE_LINK_F: [tpl_choice_id],
+        payload: Dict[str, Any] = {
+            DRIP_CAMPAIGN_LINK_F: [cid] if cid else None,
+            DRIP_PROSPECT_LINK_F: [pr.get("id")] if pr.get("id") else None,
+            DRIP_TEMPLATE_LINK_F: [tmpl_id] if tmpl_id else None,
+            DRIP_SELLER_PHONE_F: phone,
+            DRIP_FROM_NUMBER_F: from_number,
+            DRIP_MESSAGE_F: rendered,
+            DRIP_MARKET_F: drip_market,
+            DRIP_STATUS_F: DripStatus.QUEUED.value,
+            DRIP_UI_F: STATUS_ICON["QUEUED"],
+            DRIP_NEXT_SEND_F: _ct_future_iso_naive(JITTER_MIN_S, JITTER_MAX_S),
         }
 
-        # Robust create: if Market single-select mismatches, retry without Market
+        if dryrun:
+            queued += 1
+            if len(previews) < preview_limit:
+                previews.append({
+                    "prospect_id": pr.get("id"),
+                    "first": _first_name_from(next((pf.get(k) for k in PROSPECT_NAME_KEYS if pf.get(k)), "") or ""),
+                    "from_number": from_number,
+                    "market": drip_market,
+                    "message": rendered,
+                    "next_send": payload[DRIP_NEXT_SEND_F],
+                    "template_linked": bool(tmpl_id),
+                })
+            continue
+
+        # Real write
         try:
             drip_tbl.create(payload)
             queued += 1
         except Exception as e:
             msg = str(e)
-            if "INVALID_MULTIPLE_CHOICE_OPTIONS" in msg or "Insufficient permissions to create new select option" in msg:
+            # If market select mismatch, retry without Market
+            if "INVALID_MULTIPLE_CHOICE_OPTIONS" in msg and DRIP_MARKET_F in payload:
+                retry = dict(payload)
+                retry.pop(DRIP_MARKET_F, None)
                 try:
-                    payload2 = dict(payload)
-                    payload2.pop(DRIP_TBL_MARKET_F, None)
-                    drip_tbl.create(payload2)
+                    drip_tbl.create(retry)
                     queued += 1
-                    log.warning(f"⚠️ Market select rejected ({market}); queued without Market.")
+                    log.warning(f"⚠️ Market select rejected ({drip_market}); queued without Market.")
                 except Exception as e2:
-                    skipped += 1
-                    log.error(f"Queue insert failed for {camp_name} (prospect {pr.get('id')}): {e2}")
+                    reasons["create_failed"] += 1
+                    log.error(f"Airtable create failed [Drip Queue] after Market retry: {e2}")
             else:
-                skipped += 1
-                log.error(f"Queue insert failed for {camp_name} (prospect {pr.get('id')}): {e}")
+                reasons["create_failed"] += 1
+                log.error(f"Airtable create failed [Drip Queue]: {e}")
 
-    log.info(f"✅ Queued {queued} for {camp_name} (skipped {skipped} / processed {processed})")
-    # Optional: write last run
-    try:
-        if campaign_id and CONNECTOR and hasattr(CONNECTOR, "campaigns"):
-            CONNECTOR.campaigns().table.update(campaign_id, {CAMPAIGN_LAST_RUN_F: datetime.now(timezone.utc).isoformat()})
-    except Exception:
-        pass
-    return (queued, skipped, processed)
+    log.info(f"✅ Queued {queued} for {cname}")
+    if reasons:
+        log.info(f"   Skips: {dict(reasons)}")
+    out = {"campaign": cname, "queued": queued}
+    if dryrun and previews:
+        out["preview"] = previews
+    return out
 
-# ─────────────────────────────── Campaign fetch ───────────────────────
-def _fetch_due_campaigns(camp_tbl, campaign_name: Optional[str]) -> List[Dict[str, Any]]:
-    """
-    Returns campaigns that are either:
-      - Scheduled and start time <= now, or
-      - Active
-    If campaign_name is provided, fetch exactly that record by Campaign Name only.
-    """
-    if not camp_tbl:
-        return []
+# ---------- Orchestrator ----------
+def run_campaigns(limit: Optional[str] = "ALL", send_after_queue: bool = SEND_AFTER_QUEUE_DEFAULT,
+                  campaign_name: Optional[str] = None, dryrun: bool = False) -> Dict[str, Any]:
+    per_camp_limit = None if (limit is None or str(limit).upper() == "ALL") else max(int(limit), 1)
 
-    # Exact-name lookup (no {Name} fallback — it caused the 422)
-    if campaign_name:
-        name_val = _escape_quotes(campaign_name)
-        formula = f"{{{CAMPAIGN_NAME_F}}}='{name_val}'"
-        try:
-            recs = camp_tbl.all(formula=formula, page_size=100)
-            return recs or []
-        except Exception as e:
-            log.error(f"❌ Campaign lookup failed for '{campaign_name}': {e}")
-            return []
-
-    # Otherwise: Status in (Scheduled, Active) and Start Time <= NOW()
-    formula = (
-        f"AND(OR({{{CAMPAIGN_STATUS_F}}}='Scheduled',{{{CAMPAIGN_STATUS_F}}}='Active'),"
-        f"DATETIME_DIFF(NOW(),{{{CAMPAIGN_START_F}}},'seconds')>=0)"
-    )
-    try:
-        return camp_tbl.all(formula=formula, page_size=100) or []
-    except Exception as e:
-        log.error(f"❌ Failed to fetch campaigns: {e}")
-        return []
-
-# ─────────────────────────────── Public entry ─────────────────────────
-def run_campaigns(limit: str | int = "ALL", send_after_queue: bool = False, campaign_name: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Exposed function used by FastAPI /run-campaigns.
-    - limit: "ALL" or int per-campaign cap
-    - send_after_queue: trigger outbound send_batch after queueing
-    - campaign_name: optional exact campaign filter
-    """
     log.info(f"🚀 Campaign Runner — limit={limit}, send_after_queue={send_after_queue}")
+    if TEST_MODE or dryrun:
+        log.info("⚠️ TEST_MODE active — dry run only.")
+        dryrun = True
 
-    # Quiet hours hard-gate: skip entirely (you can queue-only here if you want)
-    if _is_quiet_hours():
-        log.warning(f"⏸️ Quiet hours ({QUIET_START_HOUR_LOCAL:02d}:00–{QUIET_END_HOUR_LOCAL:02d}:00 CT). Skipping queueing.")
+    # Quiet hours: allow **dry-run** to proceed; block real writes
+    if not dryrun and is_quiet_hours():
+        log.warning(f"⏸️ Quiet hours ({QUIET_START:02d}:00–{QUIET_END:02d}:00 CT). Skipping queueing.")
         return {"ok": True, "queued": 0, "quiet_hours": True}
 
-    # Resolve limit
-    per_camp_limit: Optional[int] = None
-    try:
-        s = str(limit).strip().upper()
-        if s not in {"", "ALL", "UNLIMITED", "NONE"}:
-            per_camp_limit = max(1, int(s))
-    except Exception:
-        per_camp_limit = None
-
-    # TEST_MODE short-circuit (no writes)
-    if TEST_MODE:
-        log.info("⚠️ TEST_MODE active — dry run only.")
-        # Still list due campaigns for visibility
+    camp_tbl = CONNECTOR.campaigns().table
+    if campaign_name:
+        camps = _fetch_campaign_by_name(camp_tbl, campaign_name)
+        if not camps:
+            log.warning(f"⚠️ No campaign found for '{campaign_name}'.")
+            return {"ok": True, "queued": 0, "test_mode": dryrun, "campaigns": []}
+    else:
         try:
-            camp_tbl = CONNECTOR.campaigns().table
-            due = _fetch_due_campaigns(camp_tbl, campaign_name)
-            names = [c.get("fields", {}).get(CAMPAIGN_NAME_F) or c.get("fields", {}).get("Name") for c in due]
-        except Exception:
-            names = []
-        return {"ok": True, "queued": 0, "test_mode": True, "campaigns": names}
-
-    # Live queueing
-    total_queued = 0
-    total_skipped = 0
-    total_processed = 0
-    errors: List[str] = []
-
-    try:
-        camp_tbl = CONNECTOR.campaigns().table
-    except Exception as e:
-        return {"ok": False, "error": f"campaigns table unavailable: {e}"}
-
-    due_campaigns = _fetch_due_campaigns(camp_tbl, campaign_name)
-    if not due_campaigns:
-        log.info("⚠️ No due/active campaigns found.")
-        return {"ok": True, "queued": 0, "note": "No due/active campaigns."}
-
-    for camp in due_campaigns:
-        try:
-            name = (camp.get("fields", {}) or {}).get(CAMPAIGN_NAME_F) or (camp.get("fields", {}) or {}).get("Name") or "Unnamed"
-            log.info(f"➡️ Queuing campaign: {name}")
-            q, s, p = _queue_one_campaign(camp, per_camp_limit)
-            total_queued += q
-            total_skipped += s
-            total_processed += p
-            log.info(f"🏁 Finished {name}")
+            camps = _fetch_due_campaigns(camp_tbl)
         except Exception as e:
-            errors.append(str(e))
-            log.error(f"Campaign run failed: {e}")
-            log.debug(traceback.format_exc())
+            log.error(f"❌ Failed to fetch campaigns: {e}")
+            return {"ok": False, "queued": 0, "error": str(e)}
 
-    result: Dict[str, Any] = {
-        "ok": len(errors) == 0,
-        "queued": total_queued,
-        "skipped": total_skipped,
-        "processed": total_processed,
-        "errors": errors,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
+    results = []
+    total = 0
+    for camp in camps:
+        r = _queue_one_campaign(camp, per_camp_limit, dryrun)
+        results.append(r)
+        total += int(r.get("queued", 0))
 
-    if send_after_queue:
+    # Optional send after queue (only when not dryrun and not quiet)
+    if (not dryrun) and send_after_queue and total > 0 and not is_quiet_hours():
         try:
             from sms.outbound_batcher import send_batch
             send_batch(limit=500)
-            result["send_after_queue"] = True
         except Exception as e:
-            result["send_after_queue"] = False
-            result["send_error"] = str(e)
+            log.warning(f"Send after queue failed: {e}")
 
-    return result
+    return {"ok": True, "queued": total, "test_mode": dryrun, "campaigns": [r["campaign"] for r in results], "details": results}
 
-# ─────────────────────────────── CLI shim ─────────────────────────────
+# ---------- CLI ----------
+def _parse_args():
+    p = argparse.ArgumentParser(description="Campaign Runner")
+    p.add_argument("--limit", type=str, default="ALL", help="Cap per campaign (int) or ALL")
+    p.add_argument("--campaign", type=str, default=None, help="Exact Campaign Name")
+    p.add_argument("--send-after-queue", action="store_true", help="Send immediately after queueing")
+    p.add_argument("--no-send-after-queue", action="store_true", help="Do not send after queueing")
+    p.add_argument("--dryrun", action="store_true", help="Simulate without writes (overrides TEST_MODE false)")
+    return p.parse_args()
+
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Campaign Runner")
-    parser.add_argument("--limit", default="ALL", help="Per-campaign cap (int) or ALL")
-    parser.add_argument("--send-after-queue", action="store_true", help="Trigger outbound send after queue")
-    parser.add_argument("--campaign", default=None, help="Exact campaign name to run")
-    parser.add_argument("--dryrun", action="store_true", help="Force dry-run (no writes) regardless of TEST_MODE")
-    parser.add_argument("--debug", action="store_true", help="Verbose logs")
-    args = parser.parse_args()
-
-    if args.debug:
-        log.setLevel("DEBUG")
-
-    # Allow --dryrun to override env
-    if args.dryrun:
-        TEST_MODE = True  # type: ignore
-
-    print(json.dumps(run_campaigns(args.limit, args.send_after_queue, args.campaign), indent=2))
+    args = _parse_args()
+    send_flag = SEND_AFTER_QUEUE_DEFAULT
+    if args.send_after_queue:
+        send_flag = True
+    if args.no_send_after_queue:
+        send_flag = False
+    try:
+        res = run_campaigns(
+            limit=args.limit,
+            send_after_queue=send_flag,
+            campaign_name=args.campaign,
+            dryrun=args.dryrun,
+        )
+        # Pretty print a compact JSON-like summary
+        import json
+        print(json.dumps(res, indent=2))
+    except Exception as e:
+        log.error(f"Campaign run failed: {e}")
+        raise
