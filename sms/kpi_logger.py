@@ -94,6 +94,18 @@ def log_kpi(
         logger.warning(msg)
         return {"ok": False, "action": "skipped", "error": msg}
 
+    # Pre-flight permission check to avoid noisy 403 errors.
+    probe = getattr(tbl, "first", None)
+    if callable(probe):
+        try:
+            probe()
+        except Exception as e:
+            if "INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND" in str(e):
+                logger.warning(
+                    f"⚠️ KPI table inaccessible; skipping event {metric}"
+                )
+                return {"ok": False, "action": "skipped", "error": str(e)}
+
     today = date_override or _today_local_str()
     ts = _utcnow_iso()
 
@@ -128,5 +140,8 @@ def log_kpi(
         return {"ok": True, "action": "created", "record_id": rec.get("id") if rec else None}
 
     except Exception as e:
+        if "INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND" in str(e):
+            logger.warning("⚠️ KPI write skipped: Performance table inaccessible")
+            return {"ok": False, "action": "skipped", "error": str(e)}
         logger.error(f"❌ KPI log failed {metric}: {e}", exc_info=True)
         return {"ok": False, "action": "skipped", "error": str(e)}
