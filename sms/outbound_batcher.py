@@ -28,7 +28,11 @@ from sms.dispatcher import get_policy  # provides quiet hours + rate caps
 # Schema + config
 # ──────────────────────────────────────────────────────────────────────────────
 from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
-from sms.status_utils import _sanitize_status
+try:
+    from sms.status_utils import _sanitize_status  # type: ignore
+except Exception:
+    def _sanitize_status(s):  # minimal passthrough if helper missing
+        return s
 
 DRIP_STATUS_F = DRIP_FIELDS.get("STATUS", "Status")
 DRIP_UI_F = DRIP_FIELDS.get("UI", "UI")

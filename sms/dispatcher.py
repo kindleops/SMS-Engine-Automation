@@ -129,23 +129,29 @@ async def run_engine(mode: str, **kwargs) -> Dict[str, Any]:
     try:
         # Outbound Campaign Engine
         if mode == "prospects":
-            from sms.campaign_runner import run_campaigns_sync
+            from sms.campaign_runner import run_campaigns
 
             send_after_queue = kwargs.get("send_after_queue", True)
-            limit = kwargs.get("limit", 50)
+            limit = kwargs.get("limit", "ALL")
+            campaign_name = kwargs.get("campaign_name")
+            dryrun = bool(kwargs.get("dryrun", False))
 
             if policy.is_quiet():
                 send_after_queue = False
                 logger.info(f"🌙 Quiet hours active — delaying send until {policy.next_quiet_end()}")
-            result = run_campaigns_sync(limit=limit, send_after_queue=send_after_queue)
+
+            # let the runner own the orchestration
+            result = run_campaigns(
+                limit=limit,
+                send_after_queue=send_after_queue,
+                campaign_name=campaign_name,
+                dryrun=dryrun,
+            )
 
             return _std_envelope(
                 True,
-                "Prospect",
-                {
-                    "result": result,
-                    "quiet_hours": policy.is_quiet(),
-                },
+                "Prospects",
+                {"result": result, "quiet_hours": policy.is_quiet()},
                 started,
             )
 
