@@ -1,10 +1,12 @@
 """
-🚀 Outbound Message Batcher v3.2 (Telemetry + No-Circulars Edition)
+🚀 Outbound Message Batcher v3.3 (Telemetry + No-Circulars Edition)
 ────────────────────────────────────────────────────────────────────
 - No self-imports / circular imports
 - Quiet hours via DispatchPolicy
 - Per-number + global rate limiting
 - Robust Airtable read/update with field whitelist
+- Campaign-status guard (skip Paused/Completed)
+- Duplicate (phone, property) suppression in a single batch
 - Optional integrations (KPI, run logs, number pools, message sender)
 """
 
@@ -12,7 +14,6 @@ from __future__ import annotations
 import os
 import re
 import time
-import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -378,16 +379,45 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
     # Order oldest first, respect limit
     due = sorted(due, key=lambda x: _parse_dt(x.get("fields", {}).get(next_send_date_key)) or now)[: max(1, int(limit))]
 
+    # Campaign status map for linked campaigns (skip paused/completed)
+    camp_ids: List[str] = []
+    for r in due:
+        f = r.get("fields", {}) or {}
+        links = f.get(campaign_link_key) or []
+        if isinstance(links, list):
+            camp_ids.extend([str(x) for x in links if x])
+        elif links:
+            camp_ids.append(str(links))
+    camp_ids = list({x for x in camp_ids if x})
+    camp_status = _campaign_status_map(camp_ids)
+
     limiter = build_limiter()
     total_sent = 0
     total_failed = 0
     errors: List[str] = []
-    SUPPRESS_DUPLICATE_PHONES = os.getenv("SUPPRESS_DUPLICATE_PHONES", "true").lower() in {"1","true","yes"}
-    seen = set()
+
+    SUPPRESS_DUPLICATE_PHONES = os.getenv("SUPPRESS_DUPLICATE_PHONES", "true").lower() in {"1", "true", "yes"}
+    seen: set[tuple[str, str]] = set()  # (e164_phone, property_id_or_blank)
 
     for r in due:
         rid = r.get("id")
         f = r.get("fields", {}) or {}
+
+        # Campaign-status guard (skip paused/completed)
+        links = f.get(campaign_link_key) or []
+        linked_id = str(links[0]) if isinstance(links, list) and links else (str(links) if links else "")
+        if linked_id and camp_status.get(linked_id) in {"paused", "completed"}:
+            _safe_update(
+                drip_tbl, rid,
+                {
+                    "STATUS": "Queued",  # ensure not stuck in Sending
+                    "UI": "⏳",
+                    "LAST_ERROR": "campaign_paused",
+                    "NEXT_SEND_DATE": _iso(now + timedelta(hours=24)),  # re-check later
+                },
+            )
+            total_failed += 1
+            continue
 
         phone_raw = (f.get(seller_phone_key) or "").strip()
         phone = _to_e164(phone_raw)
@@ -426,6 +456,8 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
             )
             total_failed += 1
             continue
+
+        # Duplicate suppression (per batch): (phone, property_id)
         if SUPPRESS_DUPLICATE_PHONES:
             key = (phone, str(property_id or ""))
             if key in seen:
