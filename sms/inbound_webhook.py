@@ -11,7 +11,6 @@ Inbound SMS + Opt-Out Webhook (schema-aware)
 from __future__ import annotations
 from typing import Any, Dict, Optional
 
-from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request, Header, Query
 
 from sms.runtime import get_logger, iso_now
@@ -44,9 +43,6 @@ logger = get_logger("inbound")
 # ---------------------------------------------------------------------------
 
 WEBHOOK_TOKEN = (
-    # Allow either of these to act as the shared secret
-    # (kept optional; if unset, auth is skipped)
-    # You can also pass ?token=... on the URL.
     __import__("os").getenv("WEBHOOK_TOKEN")
     or __import__("os").getenv("CRON_TOKEN")
     or None
@@ -113,7 +109,11 @@ async def _parse_payload(request: Request) -> Dict[str, Any]:
     """Parse inbound request to a dict (JSON or Form), case-normalized."""
     ct = request.headers.get("content-type", "").lower()
     if "application/json" in ct:
-        data = await request.json()
+        try:
+            data = await request.json()
+        except Exception:
+            # Some providers send invalid JSON with correct header; fall back to form
+            data = dict(await request.form())
     else:
         data = dict(await request.form())
 
@@ -129,8 +129,8 @@ async def _parse_payload(request: Request) -> Dict[str, Any]:
 
     return {
         "from": pick("From", "from", "sender"),
-        "to": pick("To", "to", "recipient"),
-        "body": pick("Body", "body", "message"),
+        "to": pick("To", "to", "recipient", "destination"),
+        "body": pick("Body", "body", "message", "text"),
         "sid": pick("MessageSid", "messagesid", "sid", "id", "messageid", "TextGridId", "textgridid"),
         "raw": data,
     }
@@ -148,18 +148,19 @@ def _log_conversation_inbound(
     lead_id: Optional[str],
     prospect_id: Optional[str],
     status: str = "DELIVERED",
-    processed_by: str = "Inbound Webhook",
+    processed_by: Optional[str] = None,   # IMPORTANT: keep None for normal inbound so AR can process
 ):
     """Create a Conversations row using schema-safe field names."""
-    fields = {
+    fields: Dict[str, Any] = {
         CONV_FROM_FIELD: from_e164,
         CONV_TO_FIELD: to_e164,
         CONV_BODY_FIELD: body,
         CONV_DIRECTION_FIELD: ConversationDirection.INBOUND.value,
         CONV_STATUS_FIELD: status,
         CONV_RECEIVED_AT: iso_now(),
-        CONV_PROCESSED_BY: processed_by,
     }
+    if processed_by:  # only set when we intentionally want to mark ownership (e.g., Opt-Out)
+        fields[CONV_PROCESSED_BY] = processed_by
     if sid:
         fields[CONV_TEXTGRID_ID] = sid
     if lead_id:
@@ -208,7 +209,7 @@ def _handle_inbound(data: Dict[str, Any]) -> Dict[str, Any]:
         lead_id=lead_id,
         prospect_id=prospect_id,
         status="DELIVERED",
-        processed_by="Inbound Webhook",
+        processed_by=None,  # leave blank so the Autoresponder can pick it up
     )
     _touch_lead_safe(lead_id, body)
 
