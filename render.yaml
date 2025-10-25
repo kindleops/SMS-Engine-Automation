@@ -1,5 +1,7 @@
 # =====================================================
 #  REI SMS Engine — Full Render Deployment (FINAL AUTOPILOT)
+#  Single source of truth: Scheduler queues; Worker sends.
+#  /schedule-campaigns cron replaces /run-campaigns.
 # =====================================================
 
 services:
@@ -48,7 +50,7 @@ services:
       - key: CRON_TOKEN
         sync: false
 
-      # === Redis / Upstash (Optional Distributed Locks) ===
+      # === Redis / Upstash (optional for locks/counters) ===
       - key: UPSTASH_REDIS_REST_URL
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
@@ -57,16 +59,26 @@ services:
         value: "true"
 
       # === Operational Toggles ===
+      - key: ENABLE_CAMPAIGNS
+        value: "true"          # exposes /schedule-campaigns
+      - key: RUNNER_SEND_AFTER_QUEUE
+        value: "true"          # worker will pick up queued items
+      - key: ENABLE_METRICS
+        value: "true"
+
+      # === Quiet Hours (America/Chicago) ===
       - key: QUIET_HOURS_ENFORCED
         value: "true"
       - key: QUIET_START_HOUR_LOCAL
         value: "21"
       - key: QUIET_END_HOUR_LOCAL
         value: "9"
-      - key: RATE_PER_NUMBER_PER_MIN
-        value: "20"
+
+      # === Global Rate/limits (worker respects these) ===
       - key: GLOBAL_RATE_PER_MIN
         value: "5000"
+      - key: RATE_PER_NUMBER_PER_MIN
+        value: "20"
       - key: DAILY_LIMIT
         value: "750"
       - key: DEDUPE_HOURS
@@ -75,12 +87,6 @@ services:
         value: "20"
       - key: JITTER_SECONDS
         value: "2"
-      - key: ENABLE_METRICS
-        value: "true"
-      - key: ENABLE_CAMPAIGNS
-        value: "true"
-      - key: RUNNER_SEND_AFTER_QUEUE
-        value: "true"
 
       # === Debugging / Mode Flags ===
       - key: LOG_LEVEL
@@ -126,6 +132,8 @@ services:
         sync: false
       - key: REDIS_TLS
         value: "true"
+
+      # Worker cadence & limits
       - key: WORKER_INTERVAL_SEC
         value: "30"
       - key: SEND_BATCH_LIMIT
@@ -136,71 +144,46 @@ services:
         value: "50"
       - key: AUTORESPONDER_VIEW
         value: "Unprocessed Inbounds"
-      - key: RUNNER_SEND_AFTER_QUEUE
-        value: "true"
+
+      # Feature flags
       - key: ENABLE_CAMPAIGNS
         value: "true"
+      - key: RUNNER_SEND_AFTER_QUEUE
+        value: "true"
+      - key: ENABLE_METRICS
+        value: "true"
+
+      # Quiet hours
       - key: QUIET_HOURS_ENFORCED
         value: "true"
       - key: QUIET_START_HOUR_LOCAL
         value: "21"
       - key: QUIET_END_HOUR_LOCAL
         value: "9"
+
+      # Auth
       - key: WEBHOOK_TOKEN
         sync: false
       - key: CRON_TOKEN
         sync: false
-      - key: ENABLE_METRICS
-        value: "true"
-      - key: STRICT_MODE
-        value: "false"
 
-  # 🚀 CAMPAIGN RUNNER — Continuous Campaign Queue Builder
-  - type: worker
-    name: rei-sms-campaign-runner
-    env: python
-    plan: free
-    runtime: python3.11
-    buildCommand: |
-      pip install --upgrade pip setuptools wheel
-      pip install --no-cache-dir -r requirements.txt
-    startCommand: python -u -m sms.campaign_runner
-    autoDeploy: true
-    previews:
-      enabled: false
-    envVars:
-      - key: AIRTABLE_API_KEY
-        sync: false
-      - key: LEADS_CONVOS_BASE
-        sync: false
-      - key: CAMPAIGN_CONTROL_BASE
-        sync: false
-      - key: PERFORMANCE_BASE
-        sync: false
-      - key: TEXTGRID_ACCOUNT_SID
-        sync: false
-      - key: TEXTGRID_AUTH_TOKEN
-        sync: false
-      - key: CRON_TOKEN
-        sync: false
-      - key: ENABLE_CAMPAIGNS
-        value: "true"
-      - key: RUNNER_SEND_AFTER_QUEUE
-        value: "true"
-      - key: TEST_MODE
+      # Debug
+      - key: STRICT_MODE
         value: "false"
 
 # =====================================================
 #  Cron Jobs — Automated Engine Orchestration
 # =====================================================
 cronJobs:
-  - name: run-campaigns
+  # ✅ NEW: Scheduler queues campaigns (replaces old /run-campaigns)
+  - name: schedule-campaigns
     schedule: "*/5 * * * *"
     command: >
-      curl -sf -X POST "https://rei-sms-engine.onrender.com/run-campaigns?limit=ALL&send_after_queue=true"
+      curl -sf -X POST "https://rei-sms-engine.onrender.com/schedule-campaigns"
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Autoresponder pass
   - name: run-autoresponder
     schedule: "*/10 * * * *"
     command: >
@@ -208,6 +191,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Retry/backoff pass
   - name: sms-retry-runner
     schedule: "*/30 * * * *"
     command: >
@@ -215,6 +199,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Reset daily quotas
   - name: reset-daily-quotas
     schedule: "0 0 * * *"
     command: >
@@ -222,6 +207,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # KPI aggregation
   - name: aggregate-kpis-daily
     schedule: "0 1 * * *"
     command: >
@@ -229,6 +215,7 @@ cronJobs:
       -H "Authorization: Bearer ${CRON_TOKEN}"
       -H "x-cron-token: ${CRON_TOKEN}"
 
+  # Health ping
   - name: health-ping
     schedule: "*/5 * * * *"
     command: >
