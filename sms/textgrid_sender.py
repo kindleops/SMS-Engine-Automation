@@ -25,6 +25,17 @@ try:
 except Exception:
     requests = None
 
+from .config import (
+    TEXTGRID_ACCOUNT_SID,
+    TEXTGRID_AUTH_TOKEN,
+    DEFAULT_FROM_NUMBER,
+    MESSAGING_SERVICE_SID,
+    E164_RE,
+)
+from .runtime import get_logger
+
+logger = get_logger("textgrid_sender")
+
 # --- Airtable (direct; no project wrappers) ---
 try:
     from pyairtable import Table  # type: ignore
@@ -34,8 +45,8 @@ except Exception:
 # =========================
 # ENV / CONFIG
 # =========================
-ACCOUNT_SID = os.getenv("TEXTGRID_ACCOUNT_SID")
-AUTH_TOKEN = os.getenv("TEXTGRID_AUTH_TOKEN")
+ACCOUNT_SID = TEXTGRID_ACCOUNT_SID
+AUTH_TOKEN = TEXTGRID_AUTH_TOKEN
 API_URL = (
     f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
     if ACCOUNT_SID
@@ -109,6 +120,8 @@ def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: i
 
     if httpx:
         resp = httpx.post(url, data=data, auth=auth, timeout=timeout)
+        if resp.status_code >= 400:
+            logger.error("TextGrid %s error body: %s", resp.status_code, resp.text)
         if resp.status_code == 429:
             raise RuntimeError(f"429 rate limited; retry_after={resp.headers.get('Retry-After')}")
         resp.raise_for_status()
@@ -119,6 +132,8 @@ def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: i
 
     # requests fallback
     resp = requests.post(url, data=data, auth=auth, timeout=timeout)
+    if resp.status_code >= 400:
+        logger.error("TextGrid %s error body: %s", resp.status_code, resp.text)
     if resp.status_code == 429:
         raise RuntimeError(f"429 rate limited; retry_after={resp.headers.get('Retry-After')}")
     resp.raise_for_status()
@@ -132,7 +147,7 @@ def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: i
 # =========================
 def send_message(
     *,
-    from_number: str,
+    from_number: Optional[str],
     to: str,
     message: str,
     media_url: Optional[str] = None,
@@ -156,9 +171,28 @@ def send_message(
 
     # --- Transport ---
     print(f"📤 Sending SMS → {to}: {message[:60]}...")
-    data: Dict[str, Any] = {"To": to, "From": from_number, "Body": message}
+    body = (message or "").strip()
+    data: Dict[str, Any] = {"To": to, "Body": body}
+
+    use_msid = bool(MESSAGING_SERVICE_SID and not from_number)
+    chosen_from = (from_number or DEFAULT_FROM_NUMBER or "").strip()
+    if use_msid:
+        data["MessagingServiceSid"] = MESSAGING_SERVICE_SID
+    else:
+        if not chosen_from:
+            raise ValueError("No From number and no MessagingServiceSid configured.")
+        data["From"] = chosen_from
+
+    if "From" in data and not E164_RE.fullmatch(str(data["From"])):
+        raise ValueError(f'From must be E.164; got "{data["From"]}"')
+    if not E164_RE.fullmatch(str(data["To"])):
+        raise ValueError(f'To must be E.164; got "{data["To"]}"')
+    if not body:
+        raise ValueError("Body is empty")
     if media_url:
         data["MediaUrl"] = media_url
+
+    from_number_log = data.get("From", chosen_from) or from_number
 
     try:
         resp = _http_post(API_URL, data=data, auth=(ACCOUNT_SID, AUTH_TOKEN), timeout=timeout)
@@ -167,7 +201,7 @@ def send_message(
         _log_conversation(
             status="FAILED",
             phone=to,
-            from_number=from_number,
+            from_number=from_number_log,
             body=message,
             sid=None,
             campaign=campaign or campaign_id,
@@ -187,7 +221,7 @@ def send_message(
     _log_conversation(
         status="SENT" if ok else "FAILED",
         phone=to,
-        from_number=from_number,
+        from_number=from_number_log,
         body=message,
         sid=sid,
         campaign=campaign or campaign_id,
