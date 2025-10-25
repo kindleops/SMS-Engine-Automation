@@ -204,25 +204,82 @@ def _fetch_template_messages(templates_tbl, ids: List[str]) -> List[Tuple[str, s
 _numbers_cache: Dict[str, List[str]] = {}
 _numbers_idx: Dict[str, int] = {}
 
+NUMBERS_FROM_KEYS = [
+    "TextGrid Phone Number",
+    "Number",
+    "Phone",
+    "From",
+    "From Number",
+]
+
 def _market_key(s: Optional[str]) -> str:
     return (s or "").strip().lower()
 
+def _norm(s: Optional[str]) -> str:
+    return (s or "").strip().lower()
+
+def _is_active_number(fields: Dict[str, Any]) -> bool:
+    # Accept if Active=true (bool or string), or Status='Active' (case-insensitive).
+    if "Active" in fields:
+        v = fields.get("Active")
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes")
+    if "Status" in fields:
+        return str(fields.get("Status") or "").strip().lower() == "active"
+    # If neither field exists, allow it.
+    return True
+
+def _extract_number(fields: Dict[str, Any]) -> Optional[str]:
+    for k in NUMBERS_FROM_KEYS:
+        v = fields.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
 def _get_numbers_for_market(numbers_tbl, market: str) -> List[str]:
+    """
+    Robust number lookup:
+      1) Filter by Market in Airtable (case-insensitive).
+      2) Client-side filter: is active (Active/Status if present).
+      3) Extract phone from any of NUMBERS_FROM_KEYS.
+    Caches per market key.
+    """
     mk = _market_key(market)
     if mk in _numbers_cache:
         return _numbers_cache[mk]
-    formula = (
-        f"AND(LOWER({{{NUMBERS_STATUS_F}}})='active',"
-        f"LOWER({{{NUMBERS_MARKET_F}}})=LOWER('{_escape_quotes(market)}'))"
-    )
-    recs = numbers_tbl.all(formula=formula, page_size=100) or []
-    pool = []
+
+    # Try to fetch by Market only (avoid referencing fields that may not exist)
+    formula = f"LOWER({{{NUMBERS_MARKET_F}}})=LOWER('{_escape_quotes(market)}')"
+    try:
+        recs = numbers_tbl.all(formula=formula, page_size=100) or []
+    except Exception as e:
+        # Fallback: fetch first page and filter locally
+        log.debug(f"Numbers .all(formula=Market) failed, falling back to client-side filter: {e}")
+        recs = numbers_tbl.all(page_size=100) or []
+
+    # Client-side filtering + extraction
+    pool: List[str] = []
     for r in recs:
         f = r.get("fields", {}) or {}
-        num = f.get(NUMBERS_FROM_F)
-        if isinstance(num, str) and num.strip():
-            pool.append(num.strip())
+        # Ensure Market matches when we didn't filter on server
+        mval = f.get(NUMBERS_MARKET_F)
+        if mval and _norm(mval) != _norm(market):
+            continue
+        if not _is_active_number(f):
+            continue
+        num = _extract_number(f)
+        if num:
+            pool.append(num)
+
     _numbers_cache[mk] = pool
+    if not pool:
+        log.warning(f"⚠️ No TextGrid numbers found for market '{market}'.")
+    else:
+        log.debug(f"📱 Number pool for '{market}': {pool}")
     return pool
 
 def _choose_from_number(numbers_tbl, campaign_market: Optional[str]) -> Optional[str]:
