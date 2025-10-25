@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional, Dict, Any
@@ -96,6 +97,21 @@ def env_float(key: str, default: float) -> float:
 def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(key)
     return v if (v and str(v).strip() != "") else default
+
+
+# -----------------------------
+# SMS / TextGrid settings
+# -----------------------------
+E164_RE = re.compile(r"^\+[1-9]\d{9,14}$")
+
+TEXTGRID_ACCOUNT_SID = env_str("TEXTGRID_ACCOUNT_SID") or env_str("ACCOUNT_SID")
+TEXTGRID_AUTH_TOKEN = env_str("TEXTGRID_AUTH_TOKEN") or env_str("AUTH_TOKEN")
+DEFAULT_FROM_NUMBER = (
+    env_str("TEXTGRID_DEFAULT_FROM_NUMBER")
+    or env_str("TEXTGRID_DEFAULT_FROM")
+    or env_str("DEFAULT_FROM_NUMBER")
+)
+MESSAGING_SERVICE_SID = env_str("TEXTGRID_MESSAGING_SERVICE_SID") or env_str("MESSAGING_SERVICE_SID")
 
 
 # -----------------------------
