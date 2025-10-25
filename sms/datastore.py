@@ -9,6 +9,7 @@ import time
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass, field as dataclass_field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -38,6 +39,18 @@ logger = get_logger(__name__)
 DEBUG = os.getenv("DEBUG", "").lower() in {"1", "true", "yes"}
 
 CONV_FIELDS = conversations_field_map()
+CONVERSATION_MESSAGES_TABLE_NAME = "Conversation Messages"
+MESSAGES_FIELD_MAP: Dict[str, str] = {
+    "CONVERSATION_LINK": "Conversation",
+    "DIRECTION": "Direction",
+    "TO": "To",
+    "FROM": "From",
+    "BODY": "Body",
+    "MESSAGE_STATUS": "Message Status",
+    "PROVIDER_SID": "Provider SID",
+    "PROVIDER_ERROR": "Provider Error",
+    "TIMESTAMP": "Timestamp",
+}
 LEAD_FIELDS = leads_field_map()
 PROSPECT_FIELDS = prospects_field_map()
 
@@ -279,6 +292,12 @@ class DataConnector:
     def numbers(self):
         return self._table(_first_non_empty("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"), NUMBERS_TABLE_DEF.name())
 
+    def conversation_messages(self):
+        return self._table(
+            _first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID"),
+            CONVERSATION_MESSAGES_TABLE_NAME,
+        )
+
 
 CONNECTOR = DataConnector()
 
@@ -290,6 +309,52 @@ CONNECTOR = DataConnector()
 
 def _compact(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in (payload or {}).items() if v not in (None, "", [], {}, ())}
+
+
+def _ensure_record_list(value: Any) -> List[str]:
+    if value in (None, "", [], (), {}):
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        record_id = value.get("id")
+        return [record_id] if record_id else []
+    if isinstance(value, (list, tuple, set)):
+        result: List[str] = []
+        for item in value:
+            if isinstance(item, str):
+                result.append(item)
+            elif isinstance(item, dict) and item.get("id"):
+                result.append(item["id"])
+        return result
+    return [str(value)]
+
+
+def _normalize_conversation_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    if not fields:
+        return {}
+
+    status_field = CONV_FIELDS.get("STATUS", "Status")
+    stage_field = CONV_FIELDS.get("STAGE", "Stage")
+    ai_intent_field = CONV_FIELDS.get("AI_INTENT", "AI Intent")
+    lead_link_field = CONV_FIELDS.get("LEAD_LINK", "Lead")
+    prospect_link_field = CONV_FIELDS.get("PROSPECT_LINK", "Prospect")
+
+    normalized: Dict[str, Any] = {}
+    for key, value in fields.items():
+        if key == "status":
+            normalized[status_field] = value
+        elif key == "stage":
+            normalized[stage_field] = value
+        elif key == "ai_intent":
+            normalized[ai_intent_field] = value
+        elif key == "lead_id":
+            normalized[lead_link_field] = _ensure_record_list(value)
+        elif key == "prospect_id":
+            normalized[prospect_link_field] = _ensure_record_list(value)
+        else:
+            normalized[key] = value
+    return normalized
 
 
 def _auto_field_map(handle: TableHandle) -> Dict[str, str]:
@@ -420,8 +485,18 @@ def _safe_update(handle: TableHandle, record_id: str, fields: Dict[str, Any]) ->
 # ============================================================
 
 
-class Repository:
-    """High-level helpers for schema-aware Airtable interactions."""
+    payload_fields = (
+        _normalize_conversation_fields(fields)
+        if handle.table_name == CONVERSATIONS_TABLE.name()
+        else fields
+    )
+    body = _compact(payload_fields)
+    payload_fields = (
+        _normalize_conversation_fields(fields)
+        if handle.table_name == CONVERSATIONS_TABLE.name()
+        else fields
+    )
+    body = _compact(payload_fields)
 
     def __init__(self) -> None:
         self._conversation_index: Dict[str, str] = {}
@@ -590,3 +665,61 @@ def update_record(handle: TableHandle, record_id: str, fields: Dict[str, Any]):
 
 def list_records(handle: TableHandle, **kwargs):
     return _safe_all(handle, **kwargs)
+def log_message(
+    *,
+    conversation_id: str,
+    direction: str,
+    to_phone: str,
+    from_phone: str,
+    body: str,
+    status: str,
+    provider_sid: Optional[str] = None,
+    provider_error: Optional[str] = None,
+    timestamp: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    if not conversation_id:
+        logger.warning("[messages] Missing conversation id; skipping log entry.")
+        return None
+
+    try:
+        handle = CONNECTOR.conversation_messages()
+    except Exception as exc:  # pragma: no cover - defensive safeguard
+        logger.warning("[messages] Unable to resolve Conversation Messages table: %s", exc)
+        return None
+
+    table = getattr(handle, "table", None)
+    if table is None:
+        logger.warning("[messages] Conversation Messages table unavailable; skipping persist.")
+        return None
+
+    # Normalize timestamp to ISO-8601 string
+    if timestamp is None:
+        ts_value = iso_now()
+    elif isinstance(timestamp, datetime):
+        ts = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+        ts_value = ts.astimezone(timezone.utc).isoformat()
+    else:
+        ts_value = str(timestamp)
+
+    fields = {
+        MESSAGES_FIELD_MAP.get("CONVERSATION_LINK", "Conversation"): [conversation_id],
+        MESSAGES_FIELD_MAP.get("DIRECTION", "Direction"): direction,
+        MESSAGES_FIELD_MAP.get("TO", "To"): to_phone,
+        MESSAGES_FIELD_MAP.get("FROM", "From"): from_phone,
+        MESSAGES_FIELD_MAP.get("BODY", "Body"): body,
+        MESSAGES_FIELD_MAP.get("MESSAGE_STATUS", "Message Status"): status,
+        MESSAGES_FIELD_MAP.get("TIMESTAMP", "Timestamp"): ts_value,
+    }
+
+    if provider_sid:
+        fields[MESSAGES_FIELD_MAP.get("PROVIDER_SID", "Provider SID")] = provider_sid
+    if provider_error:
+        fields[MESSAGES_FIELD_MAP.get("PROVIDER_ERROR", "Provider Error")] = provider_error
+
+    try:
+        return _safe_create(handle, fields)
+    except Exception as exc:  # pragma: no cover - defensive safeguard
+        logger.warning("[messages] Failed to persist message record: %s", exc)
+        return None
+
+
