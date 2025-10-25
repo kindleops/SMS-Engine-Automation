@@ -43,7 +43,7 @@ from sms.airtable_schema import (
     template_field_map,
 )
 from sms.config import settings
-from sms.datastore import CONNECTOR
+from sms.datastore import CONNECTOR, log_message
 from sms.dispatcher import get_policy
 from sms.runtime import get_logger, iso_now, last_10_digits
 
@@ -751,6 +751,21 @@ class Autoresponder:
         self.summary["breakdown"][event] = self.summary["breakdown"].get(event, 0) + 1
 
         # Quiet hours scheduling
+        to_value = _get_first(fields, CONV_TO_CANDIDATES)
+        to_number = str(to_value) if to_value is not None else None
+        try:
+            log_message(
+                conversation_id=record.get("id"),
+                direction="INBOUND",
+                to_phone=to_number,
+                from_phone=from_number,
+                body=body,
+                status="RECEIVED",
+                provider_sid=None,
+                provider_error=None,
+            )
+        except Exception:
+            pass
         send_time = next_allowed if is_quiet else datetime.now(timezone.utc)
 
         # Stage resolution & reply planning
