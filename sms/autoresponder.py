@@ -42,7 +42,7 @@ from sms.airtable_schema import (
     template_field_map,
 )
 from sms.config import settings
-from sms.datastore import CONNECTOR, create_record, list_records, promote_to_lead, update_record
+from sms.datastore import CONNECTOR
 from sms.dispatcher import get_policy
 from sms.runtime import get_logger, iso_now, last_10_digits
 
@@ -64,6 +64,11 @@ try:  # Local fallback templates for tests
 except Exception:  # pragma: no cover
     local_templates = None  # type: ignore
 
+try:  # Lead promotion utility
+    from sms.lead_promotion import promote_to_lead
+except (ImportError, ModuleNotFoundError):  # pragma: no cover
+    promote_to_lead = None  # type: ignore
+
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -82,13 +87,13 @@ class TableFacade:
         if max_records is not None:
             params["max_records"] = max_records
         params.update(kwargs)
-        return list_records(self.handle, **params)
+        return CONNECTOR.list_records(self.handle, **params)
 
     def create(self, payload: Dict[str, Any]):
-        return create_record(self.handle, payload)
+        return CONNECTOR.create_record(self.handle, payload)
 
     def update(self, record_id: str, payload: Dict[str, Any]):
-        return update_record(self.handle, record_id, payload)
+        return CONNECTOR.create.record(self.handle, record_id, payload)
 
 
 def conversations():
@@ -623,14 +628,15 @@ class Autoresponder:
 
     def _find_prospect(self, phone: str) -> Optional[Dict[str, Any]]:
         return self._find_record_by_phone(self.prospects, self.prospect_phone_fields, phone)
-
-    # -------------------------- Lead gating: only when interest confirmed (Stage 2+)
-    def _ensure_lead_if_interested(
-        self, event: str, phone: str, conv_fields: Dict[str, Any], prospect: Optional[Dict[str, Any]]
-    ) -> Tuple[Optional[str], Optional[str]]:
         promote_events = {"interest_yes", "price_provided", "ask_offer", "condition_info"}
         if event not in promote_events:
             return None, None
+        # Use the shared promote util if available (keeps schema-logic in one place)
+        if promote_to_lead:
+            try:
+                return promote_to_lead(phone, source=self.processed_by, conversation_fields=conv_fields)
+            except Exception:
+                pass
         # Use the shared promote util if available (keeps schema-logic in one place)
         try:
             return promote_to_lead(phone, source=self.processed_by, conversation_fields=conv_fields)
