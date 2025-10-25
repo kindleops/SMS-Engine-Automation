@@ -350,20 +350,33 @@ def _queue_one_campaign(
     drip_tbl = CONNECTOR.drip_queue().table
     numbers_tbl = CONNECTOR.numbers().table
 
+    # ⚠️ Safety guard — prevent re-queueing same campaign
+    try:
+        existing = drip_tbl.all(formula=f"{{{DRIP_CAMPAIGN_LINK_F}}} = '{cid}'", page_size=100)
+        if existing and len(existing) > 0:
+            log.warning(f"⚠️ Campaign {cname} already has {len(existing)} drips queued — skipping duplicate run.")
+            return {"campaign": cname, "queued": 0, "skipped": "already_queued"}
+    except Exception as e:
+        log.warning(f"Duplicate-check failed for {cname}: {e}")
+
     prospects = _fetch_records_by_ids(prospects_tbl, pids)
     if not prospects:
         log.info(f"⚠️ Campaign {cname} linked Prospects not found; skipped.")
         return {"campaign": cname, "queued": 0, "skipped": "prospects_not_found"}
 
-    # Templates (rotate per message). If none, messages will be blank.
+    # Templates (rotate per message)
     tmpl_ids = cf.get(CAMPAIGN_TEMPLATES_LINK_F) or []
-    templates = _fetch_template_messages(templates_tbl, tmpl_ids)  # -> list[(template_id, message)]
+    templates = _fetch_template_messages(templates_tbl, tmpl_ids)
     if not templates:
         log.warning(f"⚠️ Campaign {cname} has no valid templates; messages will be blank.")
         templates = []
 
     # Hard cap for this run
+    GLOBAL_MAX_DRIPS = 1000
     take = len(prospects) if (not limit or limit <= 0) else min(int(limit), len(prospects))
+    if take > GLOBAL_MAX_DRIPS:
+        log.warning(f"⚠️ Hard cap enforced: truncating from {take} → {GLOBAL_MAX_DRIPS}")
+        take = GLOBAL_MAX_DRIPS
 
     queued = 0
     previews: List[Dict[str, Any]] = []
@@ -372,28 +385,19 @@ def _queue_one_campaign(
     for pr in prospects[:take]:
         pf = (pr or {}).get("fields", {}) or {}
 
-        # pick a deliverable phone for the seller
         phone = _best_phone(pf)
         if not phone:
             reasons["no_phone"] += 1
             continue
 
         # Template & message render
-        if templates:
-            tmpl_id, body = random.choice(templates)
-        else:
-            tmpl_id, body = None, ""
+        tmpl_id, body = random.choice(templates) if templates else (None, "")
         rendered = _render_message(body, pf)
 
-        # Market (for Drip row) and From-number rotation
-        drip_market = pf.get(PROSPECT_MARKET_F) or ""  # single select; already aligned to your options
-        # Use campaign's Market to choose a TextGrid number; fallback to prospect market if campaign market missing
+        drip_market = pf.get(PROSPECT_MARKET_F) or ""
         from_number = _choose_from_number(numbers_tbl, cmarket or drip_market)
-
-        # Property ID from prospect
         prop_id = _prospect_property_id(pf)
 
-        # Construct the (only) payload — using schema constants
         payload: Dict[str, Any] = {
             DRIP_CAMPAIGN_LINK_F: [cid] if cid else None,
             DRIP_PROSPECT_LINK_F: [pr.get("id")] if pr.get("id") else None,
@@ -405,7 +409,7 @@ def _queue_one_campaign(
             DRIP_STATUS_F: DripStatus.QUEUED.value,
             DRIP_UI_F: STATUS_ICON["QUEUED"],
             DRIP_NEXT_SEND_F: _ct_future_iso_naive(JITTER_MIN_S, JITTER_MAX_S),
-            DRIP_PROPERTY_ID_F: prop_id,  # ← correctly set here
+            DRIP_PROPERTY_ID_F: prop_id,
         }
 
         if dryrun:
@@ -431,7 +435,6 @@ def _queue_one_campaign(
             queued += 1
         except Exception as e:
             msg = str(e)
-            # If market select mismatch, retry without Market (never invents new select options)
             if "INVALID_MULTIPLE_CHOICE_OPTIONS" in msg and DRIP_MARKET_F in payload:
                 retry = dict(payload)
                 retry.pop(DRIP_MARKET_F, None)
