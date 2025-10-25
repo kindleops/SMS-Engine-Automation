@@ -2,30 +2,35 @@
 """
 Optimized Delivery Webhook
 --------------------------
-Handles provider delivery receipts (TextGrid / Twilio / others)
-→ Updates Drip Queue + Conversations using datastore.py
-→ Increments Numbers table counters
-→ Deduplicates via Redis / Upstash idempotency
+• Accepts TextGrid/Twilio-like DLRs (JSON or form)
+• Updates Drip Queue + Conversations via datastore CONNECTOR
+• Increments Numbers counters
+• Idempotent (Redis / Upstash / in-memory)
+• Schema-safe (uses airtable_schema maps + unknown-field filtering)
+• Routes: POST /delivery  and POST /status  (both return 200 quickly)
 """
 
 from __future__ import annotations
 
 import os, re, json, traceback, asyncio
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Iterable, List
 
-from fastapi import APIRouter, Request, Header, HTTPException
+from fastapi import APIRouter, Request, Header, HTTPException, Query
 from sms.datastore import CONNECTOR, update_record, list_records
 from sms.runtime import get_logger
 from sms.inbound_webhook import normalize_e164
 
+# Schema maps (avoid hard-coded Airtable column names)
+from sms.airtable_schema import conversations_field_map, drip_field_map
+
 # Optional Redis / Upstash
 try:
-    import redis as _redis
+    import redis as _redis  # type: ignore
 except Exception:
     _redis = None
 try:
-    import requests
+    import requests  # type: ignore
 except Exception:
     requests = None
 
@@ -36,32 +41,55 @@ except Exception:
     increment_delivered = None
     increment_failed = None
 
-# ---------------------------------------------------------------------------
-# ENVIRONMENT
-# ---------------------------------------------------------------------------
-
 logger = get_logger(__name__)
-router = APIRouter(prefix="/delivery", tags=["Delivery"])
 
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE")
-CAMPAIGN_CONTROL_BASE = os.getenv("CAMPAIGN_CONTROL_BASE")
-WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN") or os.getenv("CRON_TOKEN") or os.getenv("TEXTGRID_AUTH_TOKEN")
+# Two routers: one under /delivery, one at root (/status) for providers that post there.
+router = APIRouter(prefix="/delivery", tags=["Delivery"])
+router_root = APIRouter(tags=["Delivery"])
+
+# ---------------------------------------------------------------------------
+# ENV
+# ---------------------------------------------------------------------------
+WEBHOOK_TOKEN = (
+    os.getenv("WEBHOOK_TOKEN")
+    or os.getenv("CRON_TOKEN")
+    or os.getenv("TEXTGRID_AUTH_TOKEN")
+)
 
 REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_URL")
 REDIS_TLS = os.getenv("REDIS_TLS", "true").lower() in {"1", "true", "yes"}
 UPSTASH_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
 UPSTASH_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN") or os.getenv("upstash_redis_rest_token")
 
+CONV_FIELDS = conversations_field_map()
+DRIP_FIELDS = drip_field_map()
+
+# Common field names (with safe fallbacks)
+CONV_STATUS = CONV_FIELDS.get("STATUS", "Status")
+CONV_TGID = CONV_FIELDS.get("TEXTGRID_ID", "TextGrid ID")
+CONV_SENT_AT = CONV_FIELDS.get("SENT_AT", "Sent At")
+CONV_DELIVERED_AT = CONV_FIELDS.get("DELIVERED_AT", "Delivered At")
+CONV_LAST_ERR = CONV_FIELDS.get("LAST_ERROR", "Last Error")
+CONV_UI = CONV_FIELDS.get("UI", "UI")
+
+DRIP_STATUS = DRIP_FIELDS.get("STATUS", "Status")
+DRIP_TGID = DRIP_FIELDS.get("TEXTGRID_ID", "TextGrid ID")
+DRIP_SENT_AT = DRIP_FIELDS.get("SENT_AT", "Sent At")
+DRIP_DELIVERED_AT = DRIP_FIELDS.get("DELIVERED_AT", "Delivered At")
+DRIP_LAST_ERR = DRIP_FIELDS.get("LAST_ERROR", "Last Error")
+DRIP_UI = DRIP_FIELDS.get("UI", "UI")
+
+# When searching by SID, try multiple common column names
+SID_SEARCH_CANDIDATES = [
+    CONV_TGID, DRIP_TGID, "Message SID", "SID", "Provider ID", "messageSid", "Textgrid SID"
+]
 
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
 
-
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
 
 def _digits_only(v: Any) -> Optional[str]:
     if not isinstance(v, str):
@@ -69,10 +97,13 @@ def _digits_only(v: Any) -> Optional[str]:
     ds = "".join(re.findall(r"\d+", v))
     return ds if len(ds) >= 10 else None
 
+def _is_authorized(header_token: Optional[str], query_token: Optional[str]) -> bool:
+    if not WEBHOOK_TOKEN:
+        return True  # auth disabled
+    return (header_token == WEBHOOK_TOKEN) or (query_token == WEBHOOK_TOKEN)
 
 class IdemStore:
     """Redis / Upstash idempotency with local fallback."""
-
     def __init__(self):
         self.r = None
         self.rest = bool(UPSTASH_REST_URL and UPSTASH_REST_TOKEN and requests)
@@ -113,25 +144,25 @@ class IdemStore:
         self._mem.add(key)
         return False
 
-
 IDEM = IdemStore()
-
 
 # ---------------------------------------------------------------------------
 # NUMBER COUNTERS
 # ---------------------------------------------------------------------------
 
-
 def _bump_numbers(did: str, delivered: bool):
-    """Increment counters on the Numbers table."""
+    """Increment counters on the Numbers table (best-effort)."""
     try:
         if delivered and increment_delivered:
-            return increment_delivered(did)
+            increment_delivered(did)
+            return
         if not delivered and increment_failed:
-            return increment_failed(did)
+            increment_failed(did)
+            return
     except Exception:
         traceback.print_exc()
 
+    # Fallback: manual update via datastore
     handle = CONNECTOR.numbers()
     rows = list_records(handle)
     for r in rows:
@@ -144,54 +175,101 @@ def _bump_numbers(did: str, delivered: bool):
             else:
                 patch["Failed Today"] = int(f.get("Failed Today") or 0) + 1
                 patch["Failed Total"] = int(f.get("Failed Total") or 0) + 1
-            update_record(handle, r["id"], patch)
+            try:
+                update_record(handle, r["id"], patch)
+            except Exception:
+                traceback.print_exc()
             break
 
-
 # ---------------------------------------------------------------------------
-# AIRTABLE UPDATES
+# AIRTABLE UTILS
 # ---------------------------------------------------------------------------
 
+def _existing_fields(handle) -> List[str]:
+    try:
+        rs = list_records(handle, max_records=1)
+        if rs:
+            return list((rs[0].get("fields") or {}).keys())
+    except Exception:
+        pass
+    return []
+
+def _filter_known(handle, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only columns that exist in this table."""
+    if not payload:
+        return {}
+    keys = set(_existing_fields(handle))
+    if not keys:
+        # If we can't probe, send raw; connector may ignore unknowns
+        return dict(payload)
+    return {k: v for k, v in payload.items() if k in keys}
+
+def _find_by_sid(handle, sid: str) -> Optional[Dict[str, Any]]:
+    """Find the record by trying multiple SID field names."""
+    for col in SID_SEARCH_CANDIDATES:
+        try:
+            recs = list_records(handle, formula=f"{{{col}}}='{sid}'", max_records=1)
+            if recs:
+                return recs[0]
+        except Exception:
+            continue
+    return None
 
 async def _update_airtable_status(sid: str, status: str, error: Optional[str], from_did: str, to_phone: str):
-    """Update Drip Queue + Conversations records via datastore."""
+    """Update Drip Queue + Conversations via datastore with schema-safe patches."""
     dq_handle = CONNECTOR.drip_queue()
     conv_handle = CONNECTOR.conversations()
 
     now = utcnow_iso()
-    status_map = {
-        "delivered": {"Status": "DELIVERED", "Delivered At": now, "UI": "✅"},
-        "failed": {"Status": "FAILED", "Last Error": (error or "failed")[:500], "UI": "❌"},
-        "undelivered": {"Status": "FAILED", "Last Error": (error or "undelivered")[:500], "UI": "❌"},
-        "queued": {"Status": "QUEUED", "UI": "⏳"},
-        "optout": {"Status": "OPTOUT", "UI": "🚫"},
-    }
-    patch = status_map.get(status, {"Status": "SENT", "Sent At": now, "UI": "✅"})
+    # Base patches (we'll filter to each table's known columns)
+    if status == "delivered":
+        conv_patch = {CONV_STATUS: "DELIVERED", CONV_DELIVERED_AT: now, CONV_UI: "✅"}
+        dq_patch = {DRIP_STATUS: "DELIVERED", DRIP_DELIVERED_AT: now, DRIP_UI: "✅"}
+    elif status in {"failed", "undelivered"}:
+        msg = (error or status)[:500]
+        conv_patch = {CONV_STATUS: "FAILED", CONV_LAST_ERR: msg, CONV_UI: "❌"}
+        dq_patch = {DRIP_STATUS: "FAILED", DRIP_LAST_ERR: msg, DRIP_UI: "❌"}
+    elif status == "queued":
+        conv_patch = {CONV_STATUS: "QUEUED", CONV_UI: "⏳"}
+        dq_patch = {DRIP_STATUS: "QUEUED", DRIP_UI: "⏳"}
+    elif status == "optout":
+        conv_patch = {CONV_STATUS: "OPT OUT", CONV_UI: "🚫"}
+        dq_patch = {DRIP_STATUS: "OPT OUT", DRIP_UI: "🚫"}
+    else:  # "sent" or unknown → mark sent
+        conv_patch = {CONV_STATUS: "SENT", CONV_SENT_AT: now, CONV_UI: "✅"}
+        dq_patch = {DRIP_STATUS: "SENT", DRIP_SENT_AT: now, DRIP_UI: "✅"}
 
+    # Conversations
     try:
-        for handle in (dq_handle, conv_handle):
-            records = list_records(handle, formula=f"{{TextGrid ID}}='{sid}'", max_records=1)
-            if records:
-                update_record(handle, records[0]["id"], patch)
+        conv_rec = _find_by_sid(conv_handle, sid)
+        if conv_rec:
+            update_record(conv_handle, conv_rec["id"], _filter_known(conv_handle, conv_patch))
     except Exception:
         traceback.print_exc()
 
+    # Drip Queue
+    try:
+        dq_rec = _find_by_sid(dq_handle, sid)
+        if dq_rec:
+            update_record(dq_handle, dq_rec["id"], _filter_known(dq_handle, dq_patch))
+    except Exception:
+        traceback.print_exc()
 
 # ---------------------------------------------------------------------------
 # PAYLOAD PARSER
 # ---------------------------------------------------------------------------
 
-
 def _extract_payload(req_body: Any, headers: Dict[str, str]) -> Dict[str, Any]:
     """Normalize JSON or form body from any provider."""
 
     def lower(d):
-        return {k.lower(): v for k, v in d.items()}
+        return {str(k).lower(): v for k, v in d.items()}
 
     def pick(d, *keys):
         for k in keys:
-            if k.lower() in d:
-                return d[k.lower()]
+            key = k.lower()
+            if key in d and d[key] not in (None, ""):
+                return d[key]
         return None
 
     if isinstance(req_body, str):
@@ -204,26 +282,26 @@ def _extract_payload(req_body: Any, headers: Dict[str, str]) -> Dict[str, Any]:
 
     d = lower(data)
     sid = pick(d, "message_sid", "sid", "id", "messageid")
-    status = (pick(d, "message_status", "status", "delivery_status", "eventtype") or "").lower()
-    from_n = pick(d, "from", "sender", "source")
-    to_n = pick(d, "to", "recipient", "destination")
+    status_raw = (pick(d, "message_status", "status", "delivery_status", "eventtype") or "").lower()
+    from_n = pick(d, "from", "sender", "source", "sourceaddress")
+    to_n = pick(d, "to", "recipient", "destination", "destinationaddress")
     error = pick(d, "error_message", "error", "reason")
 
     delivered = {"delivered", "success", "delivrd"}
     failed = {"failed"}
     undelivered = {"undelivered", "rejected", "blocked", "expired", "error"}
-    queued = {"queued", "accepted", "pending"}
+    queued = {"queued", "accepted", "pending", "enroute", "submitted"}
     optout = {"optout", "opt-out"}
 
-    if status in delivered:
+    if status_raw in delivered:
         norm = "delivered"
-    elif status in optout:
+    elif status_raw in optout:
         norm = "optout"
-    elif status in queued:
+    elif status_raw in queued:
         norm = "queued"
-    elif status in undelivered:
+    elif status_raw in undelivered:
         norm = "undelivered"
-    elif status in failed:
+    elif status_raw in failed:
         norm = "failed"
     else:
         norm = "sent"
@@ -231,33 +309,25 @@ def _extract_payload(req_body: Any, headers: Dict[str, str]) -> Dict[str, Any]:
     provider = headers.get("x-provider") or headers.get("user-agent") or "unknown"
     return {"sid": sid, "status": norm, "from": from_n, "to": to_n, "error": error, "provider": provider}
 
-
 # ---------------------------------------------------------------------------
-# MAIN ROUTE
+# ROUTES
 # ---------------------------------------------------------------------------
 
-
-@router.post("")
-async def delivery_webhook(
-    request: Request,
-    x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
-    content_type: Optional[str] = Header(None),
-):
-    """Handles message delivery receipts from any provider."""
-    if WEBHOOK_TOKEN and x_webhook_token and x_webhook_token != WEBHOOK_TOKEN:
+async def _handle_delivery(request: Request, header_token: Optional[str], content_type: Optional[str], query_token: Optional[str]):
+    if not _is_authorized(header_token, query_token):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Parse body safely
+    # Parse body safely (json or form)
     try:
         if content_type and "application/x-www-form-urlencoded" in content_type.lower():
             form = await request.form()
-            body = dict(form)
+            body = {k: (v if isinstance(v, str) else str(v)) for k, v in dict(form).items()}
         else:
             try:
                 body = await request.json()
             except Exception:
                 form = await request.form()
-                body = dict(form)
+                body = {k: (v if isinstance(v, str) else str(v)) for k, v in dict(form).items()}
     except Exception:
         traceback.print_exc()
         raise HTTPException(status_code=422, detail="Invalid payload")
@@ -276,7 +346,7 @@ async def delivery_webhook(
     if IDEM.seen(sid):
         return {"status": "ok", "sid": sid, "note": "duplicate"}
 
-    # Update Numbers
+    # Numbers counters
     try:
         if status == "delivered":
             _bump_numbers(from_norm, True)
@@ -285,7 +355,37 @@ async def delivery_webhook(
     except Exception:
         traceback.print_exc()
 
-    # Update Airtable asynchronously
+    # Async Airtable updates (so we ack 200 immediately)
     asyncio.create_task(_update_airtable_status(sid, status, err, from_norm, to_norm))
 
     return {"status": "ok", "sid": sid, "normalized": status}
+
+# Primary route under /delivery
+@router.post("")
+async def delivery_webhook(
+    request: Request,
+    x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
+    content_type: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    return await _handle_delivery(request, x_webhook_token, content_type, token)
+
+# Also accept /delivery/ (some providers insist on trailing slash)
+@router.post("/")
+async def delivery_webhook_slash(
+    request: Request,
+    x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
+    content_type: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    return await _handle_delivery(request, x_webhook_token, content_type, token)
+
+# Root-level alias for providers that post to /status (your logs showed this 404)
+@router_root.post("/status")
+async def delivery_webhook_root_status(
+    request: Request,
+    x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
+    content_type: Optional[str] = Header(None),
+    token: Optional[str] = Query(None),
+):
+    return await _handle_delivery(request, x_webhook_token, content_type, token)

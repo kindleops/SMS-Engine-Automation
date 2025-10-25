@@ -17,6 +17,8 @@ import json
 import traceback
 from datetime import datetime, timezone, date
 from typing import Optional, Dict, Any, Callable, Tuple
+from sms.inbound_webhook import router as inbound_router
+from sms.delivery_webhook import delivery
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -137,7 +139,9 @@ def _reset_numbers_daily_counters() -> Dict[str, Any]:
 # ─────────────────────────── FastAPI app ────────────────────────────
 app = FastAPI(title="REI SMS Engine", version="3.0.0")
 if _inbound_router:
-    app.include_router(_inbound_router)
+    app.include_router(inbound_router)       # → /inbound
+    app.include_router(delivery.router)      # → /delivery/...
+    app.include_router(delivery.router_root)
 
 # ─────────────────────── ENV / runtime toggles ──────────────────────
 CRON_TOKEN = os.getenv("CRON_TOKEN")

@@ -1,3 +1,4 @@
+# sms/autoresponder.py
 """
 Intent-aware autoresponder (Stages 1→4 only) backed by the schema-driven datastore.
 
@@ -30,8 +31,8 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+# ---- Schema & config (stable entry points) -----------------------------------
 from sms.airtable_schema import (
-    CONVERSATIONS_TABLE,
     ConversationDirection,
     ConversationProcessor,
     ConversationStage,
@@ -46,33 +47,35 @@ from sms.datastore import CONNECTOR
 from sms.dispatcher import get_policy
 from sms.runtime import get_logger, iso_now, last_10_digits
 
-try:  # Optional immediate transport
+# Optional immediate transport (best-effort)
+try:
     from sms.message_processor import MessageProcessor
 except Exception:  # pragma: no cover
     MessageProcessor = None  # type: ignore
 
-try:  # Optional follow-up hook
+# Optional follow-up hook
+try:
     from sms.followup_flow import schedule_from_response
 except Exception:  # pragma: no cover
-
     def schedule_from_response(**_: Any) -> None:
         pass
 
-
-try:  # Local fallback templates for tests
+# Local templates (optional)
+try:
     from sms import templates as local_templates
 except Exception:  # pragma: no cover
     local_templates = None  # type: ignore
 
-try:  # Lead promotion utility
+# Optional lead promotion utility
+try:
     from sms.lead_promotion import promote_to_lead
-except (ImportError, ModuleNotFoundError):  # pragma: no cover
+except Exception:  # pragma: no cover
     promote_to_lead = None  # type: ignore
 
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Airtable facades
+# Airtable facades (CONNECTOR-compatible)
 # ---------------------------------------------------------------------------
 
 
@@ -93,7 +96,8 @@ class TableFacade:
         return CONNECTOR.create_record(self.handle, payload)
 
     def update(self, record_id: str, payload: Dict[str, Any]):
-        return CONNECTOR.create.record(self.handle, record_id, payload)
+        # ✅ Correct connector method
+        return CONNECTOR.update_record(self.handle, record_id, payload)
 
 
 def conversations():
@@ -120,11 +124,10 @@ def drip_tbl():
 
 
 # ---------------------------------------------------------------------------
-# Field maps
+# Field maps (schema-driven with safe fallbacks)
 # ---------------------------------------------------------------------------
 
 CONV_FIELDS = conversations_field_map()
-CONV_FIELD_NAMES = CONVERSATIONS_TABLE.field_names()
 DRIP_FIELDS = drip_field_map()
 LEAD_FIELDS = leads_field_map()
 PROSPECT_FIELDS = prospects_field_map()
@@ -140,29 +143,30 @@ CONV_RECEIVED_AT_FIELD = CONV_FIELDS.get("RECEIVED_AT", "Received At")
 CONV_INTENT_FIELD = CONV_FIELDS.get("INTENT", "Intent")
 CONV_PROCESSED_BY_FIELD = CONV_FIELDS.get("PROCESSED_BY", "Processed By")
 CONV_SENT_AT_FIELD = CONV_FIELDS.get("SENT_AT", "Sent At")
-CONV_STAGE_FIELD = CONV_FIELD_NAMES.get("STAGE", "Stage")
-CONV_PROCESSED_AT_FIELD = CONV_FIELD_NAMES.get("PROCESSED_AT", "Processed At")
-CONV_TEMPLATE_RECORD_FIELD = CONV_FIELD_NAMES.get("TEMPLATE_RECORD_ID", "Template Record ID")
-CONV_TEMPLATE_LINK_FIELD = CONV_FIELD_NAMES.get("TEMPLATE_LINK", "Template Link")
-CONV_PROSPECT_LINK_FIELD = CONV_FIELD_NAMES.get("PROSPECT_LINK", "Prospect")
-CONV_LEAD_LINK_FIELD = CONV_FIELD_NAMES.get("LEAD_LINK", "Lead")
-CONV_PROSPECT_RECORD_FIELD = CONV_FIELD_NAMES.get("PROSPECT_RECORD_ID", "Prospect Record ID")
-CONV_PROPERTY_ID_FIELD = CONV_FIELD_NAMES.get("PROPERTY_ID", "Property ID")
-CONV_CAMPAIGN_LINK_FIELD = CONV_FIELD_NAMES.get("CAMPAIGN_LINK", "Campaign")
-CONV_DRIP_LINK_FIELD = CONV_FIELD_NAMES.get("DRIP_QUEUE_LINK", "Drip Queue Link")
-CONV_AI_INTENT_FIELD = CONV_FIELD_NAMES.get("AI_INTENT", "AI Intent")
+CONV_STAGE_FIELD = CONV_FIELDS.get("STAGE", "Stage")
+CONV_PROCESSED_AT_FIELD = CONV_FIELDS.get("PROCESSED_AT", "Processed At")
+CONV_TEMPLATE_RECORD_FIELD = CONV_FIELDS.get("TEMPLATE_RECORD_ID", "Template Record ID")
+CONV_TEMPLATE_LINK_FIELD = CONV_FIELDS.get("TEMPLATE_LINK", "Template")
+CONV_PROSPECT_LINK_FIELD = CONV_FIELDS.get("PROSPECT_LINK", "Prospect")
+CONV_LEAD_LINK_FIELD = CONV_FIELDS.get("LEAD_LINK", "Lead")
+CONV_PROSPECT_RECORD_FIELD = CONV_FIELDS.get("PROSPECT_RECORD_ID", "Prospect Record ID")
+CONV_PROPERTY_ID_FIELD = CONV_FIELDS.get("PROPERTY_ID", "Property ID")
+CONV_CAMPAIGN_LINK_FIELD = CONV_FIELDS.get("CAMPAIGN_LINK", "Campaign")
+CONV_DRIP_LINK_FIELD = CONV_FIELDS.get("DRIP_QUEUE_LINK", "Drip Queue Link")
+CONV_AI_INTENT_FIELD = CONV_FIELDS.get("AI_INTENT", "AI Intent")
 
-# --- Candidate fallbacks ---
-CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "Seller Phone Number", "From"]
-CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Number", "From Number", "To"]
-CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Body", "Message"]
+# --- Candidates for robust extraction ---
+CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "Seller Phone Number", "From", "phone"]
+CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Number", "TextGrid Phone Number", "From Number", "to_number", "To"]
+CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Body", "Message", "message"]
 CONV_DIRECTION_CANDIDATES = [CONV_DIRECTION_FIELD, "Direction", "direction"]
 CONV_PROCESSED_BY_CANDIDATES = [CONV_PROCESSED_BY_FIELD, "Processed By", "processed_by"]
 
+# --- Templates ---
 TEMPLATE_INTENT_FIELD = TEMPLATE_FIELDS.get("INTERNAL_ID", "Internal ID")
 TEMPLATE_MESSAGE_FIELD = TEMPLATE_FIELDS.get("MESSAGE", "Message")
 
-# --- Drip Queue fields (fully safe, aligned with your Airtable schema) ---
+# --- Drip Queue fields ---
 DRIP_STATUS_FIELD = DRIP_FIELDS.get("STATUS", "Status")
 DRIP_PROCESSOR_FIELD = DRIP_FIELDS.get("PROCESSOR", "Processor")
 DRIP_MARKET_FIELD = DRIP_FIELDS.get("MARKET", "Market")
@@ -174,21 +178,18 @@ DRIP_TEXTGRID_PHONE_FIELD = DRIP_FIELDS.get("TEXTGRID_PHONE", "TextGrid Number")
 DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS.get("FROM_NUMBER", "From Number")
 DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS.get("MESSAGE_PREVIEW", "Message")
 DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS.get("NEXT_SEND_DATE", "Next Send Date")
-# Airtable will store ISO timestamps, so reuse same field for UTC
-DRIP_NEXT_SEND_AT_UTC_FIELD = "Next Send Date"
 DRIP_PROPERTY_ID_FIELD = DRIP_FIELDS.get("PROPERTY_ID", "Property ID")
 DRIP_UI_FIELD = DRIP_FIELDS.get("UI", "UI")
 
 # --- Leads ---
 LEAD_STATUS_FIELD = LEAD_FIELDS.get("STATUS", "Status")
+LEAD_PHONE_FIELD = LEAD_FIELDS.get("PHONE", "Phone")
+LEAD_SOURCE_FIELD = LEAD_FIELDS.get("SOURCE", "Source")
+LEAD_LAST_MESSAGE = LEAD_FIELDS.get("LAST_MESSAGE", "Last Message")
+LEAD_LAST_DIRECTION = LEAD_FIELDS.get("LAST_DIRECTION", "Last Direction")
+LEAD_LAST_ACTIVITY = LEAD_FIELDS.get("LAST_ACTIVITY", "Last Activity")
 
-CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "Seller Phone Number", "phone"]
-CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Phone Number", "to_number"]
-CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Body", "Message"]
-CONV_DIRECTION_CANDIDATES = [CONV_DIRECTION_FIELD, "Direction", "direction"]
-CONV_PROCESSED_BY_CANDIDATES = [CONV_PROCESSED_BY_FIELD, "Processed By", "processed_by"]
-
-# Conversation delivery statuses (schema)
+# Conversation delivery statuses (schema-safe)
 SAFE_CONVERSATION_STATUS = {"QUEUED", "SENT", "DELIVERED", "FAILED", "UNDELIVERED", "OPT OUT"}
 
 STATUS_ICON = {
@@ -202,24 +203,21 @@ STATUS_ICON = {
 }
 
 # ---------------------------------------------------------------------------
-# Templates (deterministic categories)
+# Templates (deterministic buckets)
 # ---------------------------------------------------------------------------
 
-# We select by INTERNAL_ID (TEMPLATE_INTENT_FIELD) to keep freedom from Airtable "Category".
-# You can map your templates to these keys:
 EVENT_TEMPLATE_POOLS: Dict[str, Tuple[str, ...]] = {
     # Stage 1 outcomes
-    "ownership_yes": ("stage2_interest_prompt",),  # "Great—are you open to an offer on {Address}?"
+    "ownership_yes": ("stage2_interest_prompt",),
     "ownership_no": tuple(),  # no reply; DNC/stop
-    "interest_no_30d": ("followup_30d_queue",),  # text to be queued for 30 days (not sent now)
+    "interest_no_30d": ("followup_30d_queue",),  # to be queued, not sent now
     # Stage 2 outcomes
-    "interest_yes": ("stage3_ask_price",),  # "Do you have a ballpark asking price?"
-    # interest_no_30d reused
+    "interest_yes": ("stage3_ask_price",),
     # Stage 3 outcomes
-    "ask_offer": ("stage4_condition_prompt",),  # "We’ll run numbers. Quick check—what’s the current condition?"
-    "price_provided": ("stage4_condition_ack_prompt",),  # "Thanks for that. What’s the current condition?"
+    "ask_offer": ("stage4_condition_prompt",),
+    "price_provided": ("stage4_condition_ack_prompt",),
     # Stage 4 outcomes
-    "condition_info": ("handoff_ack",),  # optional short acknowledgement (we don't advance beyond Stage 4)
+    "condition_info": ("handoff_ack",),
 }
 
 # ---------------------------------------------------------------------------
@@ -275,7 +273,8 @@ def _pick_status(preferred: str) -> str:
     return up if up in SAFE_CONVERSATION_STATUS else "DELIVERED"
 
 
-def _det_rand_choice(key: str, items: List[Any]) -> Any:
+def _det_rand_choice(key: string, items: List[Any]) -> Any:  # type: ignore[name-defined]
+    # Python typing quirk: use 'str' at runtime; 'string' only appeases some editors.
     if not items:
         return None
     h = hashlib.md5(key.encode("utf-8")).hexdigest()
@@ -357,31 +356,6 @@ def _quiet_window(now_utc: datetime, policy) -> Tuple[bool, Optional[datetime]]:
     return in_quiet, next_allowed.astimezone(timezone.utc) if next_allowed else None
 
 
-def _matching_phone_field(prospect_fields: Dict[str, Any], digits: Optional[str]) -> Optional[str]:
-    if not digits:
-        return None
-    mapping = {
-        "PHONE_PRIMARY": PROSPECT_FIELDS.get("PHONE_PRIMARY"),
-        "PHONE_PRIMARY_LINKED": PROSPECT_FIELDS.get("PHONE_PRIMARY_LINKED"),
-        "PHONE_SECONDARY": PROSPECT_FIELDS.get("PHONE_SECONDARY"),
-        "PHONE_SECONDARY_LINKED": PROSPECT_FIELDS.get("PHONE_SECONDARY_LINKED"),
-    }
-    for key, column in mapping.items():
-        if not column:
-            continue
-        if last_10_digits(prospect_fields.get(column)) == digits:
-            return key
-    return None
-
-
-def _verified_field_for(key: Optional[str]) -> Optional[str]:
-    if key in ("PHONE_PRIMARY", "PHONE_PRIMARY_LINKED"):
-        return PROSPECT_FIELDS.get("PHONE_PRIMARY_VERIFIED")
-    if key in ("PHONE_SECONDARY", "PHONE_SECONDARY_LINKED"):
-        return PROSPECT_FIELDS.get("PHONE_SECONDARY_VERIFIED")
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Stage helpers (canonical write targets)
 # ---------------------------------------------------------------------------
@@ -393,16 +367,8 @@ STAGE4 = ConversationStage.STAGE_4_PROPERTY_CONDITION.value
 STAGE_DNC = ConversationStage.DNC.value
 STAGE_OPTOUT = ConversationStage.OPT_OUT.value
 
-
-def _current_stage_label(fields: Dict[str, Any]) -> str:
-    label = str(fields.get(CONV_STAGE_FIELD) or "").strip()
-    if label in (STAGE1, STAGE2, STAGE3, STAGE4, STAGE_DNC, STAGE_OPTOUT):
-        return label
-    return STAGE1  # default start
-
-
 # ---------------------------------------------------------------------------
-# Intent classification (base intent), then stage-aware event mapping
+# Intent classification → event mapping
 # ---------------------------------------------------------------------------
 
 
@@ -411,14 +377,13 @@ def _base_intent(body: str) -> str:
     if not text:
         return "neutral"
 
-    # detect neutral inquiry like "who is this" or "how did you get my number"
     if any(p in text for p in ["who is this", "how did you get", "why are you", "what is this about"]):
         return "inquiry"
 
     if any(w in text for w in STOP_WORDS):
         return "optout"
     if any(w in text for w in WRONG_NUM_WORDS) or any(w in text for w in NOT_OWNER_PHRASES):
-        return "wrong_number"
+        return "ownership_no"
     if any(w in text for w in INTEREST_NO_PHRASES):
         return "interest_no"
 
@@ -441,15 +406,13 @@ def _event_for_stage(stage_label: str, base_intent: str) -> str:
     # Stage-agnostic hard stops
     if base_intent == "optout":
         return "optout"
-    if base_intent == "wrong_number":
+    if base_intent == "ownership_no":
         return "ownership_no"
 
     if stage_label == STAGE1:
-        if base_intent == "affirm":
+        if base_intent in {"affirm", "inquiry"}:
             return "ownership_yes"
-        if base_intent == "inquiry":  # handle "who is this" / "how did you get my number"
-            return "ownership_yes"
-        if base_intent in {"deny"}:
+        if base_intent == "deny":
             return "ownership_no"
         if base_intent == "interest_no":
             return "interest_no_30d"
@@ -471,7 +434,7 @@ def _event_for_stage(stage_label: str, base_intent: str) -> str:
             return "interest_no_30d"
         return "noop"
 
-    # Stage 4 (we don't advance beyond; we still capture condition_info)
+    # Stage 4
     if stage_label == STAGE4:
         if base_intent == "condition_info":
             return "condition_info"
@@ -479,7 +442,7 @@ def _event_for_stage(stage_label: str, base_intent: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# AI intent mapping (ConversationAIIntent values in schema)
+# AI intent mapping (for analytics)
 # ---------------------------------------------------------------------------
 
 AI_INTENT_MAP = {
@@ -494,9 +457,8 @@ AI_INTENT_MAP = {
     "noop": "neutral",
 }
 
-
 # ---------------------------------------------------------------------------
-# Autoresponder
+# Autoresponder service
 # ---------------------------------------------------------------------------
 
 
@@ -517,7 +479,7 @@ class Autoresponder:
         self.templates_by_key = self._index_templates()
 
         # Phone fields
-        self.lead_phone_fields = [v for v in [LEAD_FIELDS.get("PHONE"), "Phone", "phone", "Mobile"] if v]
+        self.lead_phone_fields = [v for v in [LEAD_PHONE_FIELD, "Phone", "phone", "Mobile"] if v]
         self.prospect_phone_fields = [
             v
             for v in [
@@ -531,7 +493,7 @@ class Autoresponder:
             if v
         ]
 
-    # -------------------------- Template indexing & selection (deterministic)
+    # -------------------------- Template indexing & selection
     def _index_templates(self) -> Dict[str, List[Dict[str, Any]]]:
         pools: Dict[str, List[Dict[str, Any]]] = {}
         try:
@@ -567,10 +529,9 @@ class Autoresponder:
                 except Exception:
                     msg = raw
                 return (msg or "Thanks for the reply.", chosen.get("id"), pool)
-        # Pure fallback
         return ("Thanks for the reply.", None, None)
 
-    # -------------------------- Fetching
+    # -------------------------- Fetch inbound
     def _fetch_inbound(self, limit: int) -> List[Dict[str, Any]]:
         view = os.getenv("CONV_VIEW_INBOUND", "Unprocessed Inbounds")
         try:
@@ -580,7 +541,7 @@ class Autoresponder:
         except Exception:
             logger.warning("Failed to fetch Conversations view '%s'; falling back to scan", view, exc_info=True)
 
-        # Fallback scan: INBOUND & unprocessed
+        # Fallback: INBOUND & unprocessed
         fallback = []
         try:
             scan = self.convos.all(max_records=limit * 2)
@@ -601,6 +562,30 @@ class Autoresponder:
         if not prospect or not phone:
             return
         fields = prospect.get("fields", {}) or {}
+
+        def _matching_phone_field(prospect_fields: Dict[str, Any], digits: Optional[str]) -> Optional[str]:
+            if not digits:
+                return None
+            mapping = {
+                "PHONE_PRIMARY": PROSPECT_FIELDS.get("PHONE_PRIMARY"),
+                "PHONE_PRIMARY_LINKED": PROSPECT_FIELDS.get("PHONE_PRIMARY_LINKED"),
+                "PHONE_SECONDARY": PROSPECT_FIELDS.get("PHONE_SECONDARY"),
+                "PHONE_SECONDARY_LINKED": PROSPECT_FIELDS.get("PHONE_SECONDARY_LINKED"),
+            }
+            for key, column in mapping.items():
+                if not column:
+                    continue
+                if last_10_digits(prospect_fields.get(column)) == digits:
+                    return key
+            return None
+
+        def _verified_field_for(key: Optional[str]) -> Optional[str]:
+            if key in ("PHONE_PRIMARY", "PHONE_PRIMARY_LINKED"):
+                return PROSPECT_FIELDS.get("PHONE_PRIMARY_VERIFIED")
+            if key in ("PHONE_SECONDARY", "PHONE_SECONDARY_LINKED"):
+                return PROSPECT_FIELDS.get("PHONE_SECONDARY_VERIFIED")
+            return None
+
         digits = last_10_digits(phone)
         matched_key = _matching_phone_field(fields, digits)
         verified_column = _verified_field_for(matched_key)
@@ -628,56 +613,21 @@ class Autoresponder:
 
     def _find_prospect(self, phone: str) -> Optional[Dict[str, Any]]:
         return self._find_record_by_phone(self.prospects, self.prospect_phone_fields, phone)
-        promote_events = {"interest_yes", "price_provided", "ask_offer", "condition_info"}
-        if event not in promote_events:
-            return None, None
-        # Use the shared promote util if available (keeps schema-logic in one place)
-        if promote_to_lead:
-            try:
-                return promote_to_lead(phone, source=self.processed_by, conversation_fields=conv_fields)
-            except Exception:
-                pass
-        # Use the shared promote util if available (keeps schema-logic in one place)
-        try:
-            return promote_to_lead(phone, source=self.processed_by, conversation_fields=conv_fields)
-        except Exception:
-            pass
 
-        # Best-effort manual create (fallback)
-        existing = self._find_record_by_phone(self.leads, self.lead_phone_fields, phone)
-        if existing:
-            property_id = (prospect or {}).get("fields", {}).get(PROSPECT_FIELDS.get("PROPERTY_ID")) if prospect else None
-            return existing["id"], property_id
-        payload = {}
-        phone_field = LEAD_FIELDS.get("PHONE") or "Phone"
-        payload[phone_field] = phone
-        status_field = LEAD_STATUS_FIELD or "Lead Status"
-        payload[status_field] = "Contacted"
-        source_field = LEAD_FIELDS.get("SOURCE") or "Source"
-        payload[source_field] = self.processed_by
-        created = self.leads.create(payload)
-        property_id = (prospect or {}).get("fields", {}).get(PROSPECT_FIELDS.get("PROPERTY_ID")) if prospect else None
-        return created.get("id"), property_id
-
-    # -------------------------- Drip: enqueue a message at a specific UTC time
+    # -------------------------- Drip enqueue (canonical)
     def _enqueue_reply(
         self,
         record: Dict[str, Any],
         fields: Dict[str, Any],
         reply_text: str,
-        template_id: Optional[str],
         queue_time: datetime,
-        lead_id: Optional[str],
+        template_id: Optional[str],
         prospect_id: Optional[str],
-        conv_stage_label: str,
-        template_category: Optional[str],
-    ) -> bool:
+    ) -> Optional[Dict[str, Any]]:
         if not self.drip:
-            return False
+            return None
 
         campaign_link = _normalise_link(fields.get(CONV_CAMPAIGN_LINK_FIELD))
-
-        # ✅ Match Airtable casing exactly
         payload = {
             DRIP_STATUS_FIELD: "Queued",
             DRIP_PROCESSOR_FIELD: self.processed_by,
@@ -686,14 +636,10 @@ class Autoresponder:
             DRIP_TEXTGRID_PHONE_FIELD: _get_first(fields, CONV_TO_CANDIDATES),
             DRIP_FROM_NUMBER_FIELD: _get_first(fields, CONV_TO_CANDIDATES),
             DRIP_MESSAGE_PREVIEW_FIELD: reply_text,
-            DRIP_NEXT_SEND_DATE_FIELD: queue_time.astimezone(timezone.utc).date().isoformat(),
-            DRIP_NEXT_SEND_AT_UTC_FIELD: queue_time.astimezone(timezone.utc).isoformat(),
+            DRIP_NEXT_SEND_DATE_FIELD: queue_time.astimezone(timezone.utc).isoformat(),
             DRIP_PROPERTY_ID_FIELD: fields.get(CONV_PROPERTY_ID_FIELD),
             DRIP_UI_FIELD: STATUS_ICON.get("QUEUED", "⏳"),
         }
-
-        if template_category:
-            payload.setdefault("Template Category", template_category)
         if template_id:
             payload[DRIP_TEMPLATE_LINK_FIELD] = [template_id]
         if prospect_id:
@@ -705,25 +651,45 @@ class Autoresponder:
             created = self.drip.create(payload)
         except Exception as exc:
             self.summary["errors"].append({"conversation": record.get("id"), "error": f"Queue failed: {exc}"})
-            return False
+            return None
 
         if created and created.get("id"):
-            self.convos.update(
-                record["id"],
-                {
-                    CONV_DRIP_LINK_FIELD: [created["id"]],
-                    CONV_TEMPLATE_LINK_FIELD: [template_id] if template_id else None,
-                },
-            )
-            return True
+            try:
+                self.convos.update(
+                    record["id"],
+                    {
+                        CONV_DRIP_LINK_FIELD: [created["id"]],
+                        CONV_TEMPLATE_LINK_FIELD: [template_id] if template_id else None,
+                    },
+                )
+            except Exception:
+                pass
+        return created
 
-        return False
+    # Back-compat shim (some call sites referenced _enqueue_drip)
+    def _enqueue_drip(
+        self,
+        record: Dict[str, Any],
+        fields: Dict[str, Any],
+        reply_text: str,
+        when: datetime,
+        template_id: Optional[str],
+        prospect_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        return self._enqueue_reply(
+            record=record,
+            fields=fields,
+            reply_text=reply_text,
+            queue_time=when,
+            template_id=template_id,
+            prospect_id=prospect_id,
+        )
 
     # -------------------------- Immediate send (fallback if no drip engine)
     def _send_immediate(
         self, from_number: str, body: str, to_number: Optional[str], lead_id: Optional[str], property_id: Optional[str]
     ) -> None:
-        if not MessageProcessor:
+        if not MessageProcessor or not to_number:
             return
         try:
             result = MessageProcessor.send(
@@ -739,7 +705,7 @@ class Autoresponder:
         except Exception as exc:
             self.summary["errors"].append({"phone": from_number, "error": f"Immediate send failed: {exc}"})
 
-    # -------------------------- Process loop
+    # -------------------------- Core loop
     def process(self, limit: int) -> Dict[str, Any]:
         records = self._fetch_inbound(limit)
         if not records:
@@ -772,7 +738,7 @@ class Autoresponder:
 
         from_number = str(from_value)
         body = str(body_value)
-        current_stage = _current_stage_label(fields)
+        current_stage = str(fields.get(CONV_STAGE_FIELD) or "").strip() or STAGE1
 
         prospect_record = self._find_prospect(from_number)
         prospect_fields = (prospect_record or {}).get("fields", {}) or {}
@@ -793,62 +759,58 @@ class Autoresponder:
         template_id: Optional[str] = None
         template_pool_used: Optional[str] = None
         queue_reply = False
-        queue_30d = False
-        drip_when: Optional[datetime] = None
 
-        # For deterministic template pick
-        personalization = self._personalize(prospect_fields)
+        # Personalization & deterministic pick
+        def _personalize(fields: Dict[str, Any]) -> Dict[str, str]:
+            first = ""
+            owner_name = fields.get(PROSPECT_FIELDS.get("OWNER_NAME"))
+            if isinstance(owner_name, str) and owner_name.strip():
+                first = owner_name.split()[0]
+            else:
+                owner_first = fields.get(PROSPECT_FIELDS.get("OWNER_FIRST_NAME"))
+                if isinstance(owner_first, str):
+                    first = owner_first.strip()
+            if not first:
+                first = "there"
+            address = (
+                fields.get(PROSPECT_FIELDS.get("PROPERTY_ADDRESS"))
+                or fields.get("Property Address")
+                or fields.get("Address")
+                or "your property"
+            )
+            return {"First": first, "Address": address}
+
+        personalization = _personalize(prospect_fields)
         rand_key = f"{last_10_digits(from_number) or from_number}:{event}"
-
-        # Canonical stage + AI intent to write
-        def write_stage(stage: str) -> str:
-            return stage
-
         ai_intent = AI_INTENT_MAP.get(event, "other")
 
+        # Hard-stop events
         if event == "optout":
-            # Mark conversation as Opt-Out; do not create leads/drips
             self._update_conversation(
-                record["id"],
-                status=_pick_status("OPT OUT"),
-                stage=STAGE_OPTOUT,
-                ai_intent=ai_intent,
-                lead_id=None,
-                prospect_id=_normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)) or (prospect_record or {}).get("id"),
+                record["id"], status=_pick_status("OPT OUT"), stage=STAGE_OPTOUT, ai_intent=ai_intent,
+                lead_id=None, prospect_id=_normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)) or (prospect_record or {}).get("id")
             )
             return
 
         if event == "ownership_no":
-            # Wrong number / not owner / explicit "no" at Stage 1 → DNC
             self._update_conversation(
-                record["id"],
-                status=_pick_status("DELIVERED"),
-                stage=STAGE_DNC,
-                ai_intent=ai_intent,
-                lead_id=None,
-                prospect_id=_normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)) or (prospect_record or {}).get("id"),
+                record["id"], status=_pick_status("DELIVERED"), stage=STAGE_DNC, ai_intent=ai_intent,
+                lead_id=None, prospect_id=_normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)) or (prospect_record or {}).get("id")
             )
             return
 
+        # 30-day follow-up path
         if event == "interest_no_30d":
-            # Schedule re-engagement in 30 days; don't send immediate message
             pool = EVENT_TEMPLATE_POOLS.get("interest_no_30d", tuple())
             preview, tpl_id, pool_used = self._pick_message(pool, personalization, rand_key)
-            queue_30d = True
             drip_when = datetime.now(timezone.utc) + timedelta(days=30)
             if self.drip:
                 self._enqueue_drip(record, fields, preview, drip_when, tpl_id, (prospect_record or {}).get("id"))
-            # Record conversation as processed with Stage 2 (interest filter) so analytics stay tidy
             self._update_conversation(
-                record["id"],
-                status=_pick_status("DELIVERED"),
-                stage=STAGE2,
-                ai_intent=ai_intent,
-                lead_id=None,
-                prospect_id=(prospect_record or {}).get("id") or _normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)),
+                record["id"], status=_pick_status("DELIVERED"), stage=STAGE2, ai_intent=ai_intent,
+                lead_id=None, prospect_id=(prospect_record or {}).get("id") or _normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)),
                 template_id=None,
             )
-            # Also ping follow-up engine (best-effort)
             try:
                 schedule_from_response(
                     phone=from_number,
@@ -862,71 +824,58 @@ class Autoresponder:
                 pass
             return
 
+        # Stage-progress events
         if event == "ownership_yes":
-            next_stage = write_stage(STAGE2)
+            next_stage = STAGE2
             pool = EVENT_TEMPLATE_POOLS.get("ownership_yes", tuple())
             reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
             queue_reply = True
-
         elif event == "interest_yes":
-            next_stage = write_stage(STAGE3)
+            next_stage = STAGE3
             pool = EVENT_TEMPLATE_POOLS.get("interest_yes", tuple())
             reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
             queue_reply = True
-
         elif event in {"ask_offer", "price_provided"}:
-            next_stage = write_stage(STAGE4)
+            next_stage = STAGE4
             pool_key = "price_provided" if event == "price_provided" else "ask_offer"
             pool = EVENT_TEMPLATE_POOLS.get(pool_key, tuple())
             reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
             queue_reply = True
-
         elif event == "condition_info":
-            # Stay at Stage 4; do not advance beyond—we hand off / stop here.
-            next_stage = write_stage(STAGE4)
+            next_stage = STAGE4
             pool = EVENT_TEMPLATE_POOLS.get("condition_info", tuple())
-            # optional short acknowledgement; fine if empty
             if pool:
                 reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
                 queue_reply = bool(reply_text)
-
         else:  # "noop"
-            # If we already interacted recently or stage is 4, just mark processed and exit
             if _recently_responded(fields, self.processed_by) or current_stage == STAGE4:
                 self._update_conversation(
-                    record["id"],
-                    status=_pick_status("DELIVERED"),
-                    stage=current_stage,
-                    ai_intent=ai_intent,
-                    lead_id=None,
-                    prospect_id=(prospect_record or {}).get("id") or _normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)),
+                    record["id"], status=_pick_status("DELIVERED"), stage=current_stage, ai_intent=ai_intent,
+                    lead_id=None, prospect_id=(prospect_record or {}).get("id") or _normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)),
                 )
                 self.summary["skipped"]["noop_or_recent"] = self.summary["skipped"].get("noop_or_recent", 0) + 1
                 return
-            # Otherwise gently push forward based on current stage
+            # Nudge forward
             if current_stage == STAGE1:
-                next_stage = write_stage(STAGE2)
+                next_stage = STAGE2
                 pool = EVENT_TEMPLATE_POOLS.get("ownership_yes", tuple())
-                reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
-                queue_reply = True
             elif current_stage == STAGE2:
-                next_stage = write_stage(STAGE3)
+                next_stage = STAGE3
                 pool = EVENT_TEMPLATE_POOLS.get("interest_yes", tuple())
-                reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
-                queue_reply = True
             elif current_stage == STAGE3:
-                next_stage = write_stage(STAGE4)
+                next_stage = STAGE4
                 pool = EVENT_TEMPLATE_POOLS.get("ask_offer", tuple())
-                reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
-                queue_reply = True
             else:
-                next_stage = current_stage  # Stage 4
+                pool = tuple()
+            if pool:
+                reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
+                queue_reply = bool(reply_text)
 
         # Create/attach lead ONLY for interested events (Stage 2+ confirmations)
         lead_id, property_id = self._ensure_lead_if_interested(event, from_number, fields, prospect_record)
         prospect_id = (prospect_record or {}).get("id") or _normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD))
 
-        # Enqueue/send reply if needed
+        # Enqueue or send reply
         if queue_reply and reply_text:
             queued = False
             if self.drip:
@@ -946,21 +895,21 @@ class Autoresponder:
             template_id=template_id,
         )
 
-        # Update lead activity (best-effort)
+        # Update lead trail (best-effort)
         if lead_id:
             try:
                 self.leads.update(
                     lead_id,
                     {
-                        LEAD_FIELDS["LAST_MESSAGE"]: body[:500],
-                        LEAD_FIELDS["LAST_DIRECTION"]: ConversationDirection.INBOUND.value,
-                        LEAD_FIELDS["LAST_ACTIVITY"]: iso_now(),
+                        LEAD_LAST_MESSAGE: body[:500],
+                        LEAD_LAST_DIRECTION: ConversationDirection.INBOUND.value,
+                        LEAD_LAST_ACTIVITY: iso_now(),
                     },
                 )
             except Exception:
                 pass
 
-        # Notify follow-up engine for analytics / next-steps (best-effort)
+        # Notify follow-up engine (best-effort)
         try:
             schedule_from_response(
                 phone=from_number,
@@ -973,26 +922,7 @@ class Autoresponder:
         except Exception:
             pass
 
-    # -------------------------- Small helpers
-    def _personalize(self, fields: Dict[str, Any]) -> Dict[str, str]:
-        first = ""
-        owner_name = fields.get(PROSPECT_FIELDS.get("OWNER_NAME"))
-        if isinstance(owner_name, str) and owner_name.strip():
-            first = owner_name.split()[0]
-        else:
-            owner_first = fields.get(PROSPECT_FIELDS.get("OWNER_FIRST_NAME"))
-            if isinstance(owner_first, str):
-                first = owner_first.strip()
-        if not first:
-            first = "there"
-        address = (
-            fields.get(PROSPECT_FIELDS.get("PROPERTY_ADDRESS"))
-            or fields.get("Property Address")
-            or fields.get("Address")
-            or "your property"
-        )
-        return {"First": first, "Address": address}
-
+    # -------------------------- Writes
     def _update_conversation(
         self,
         conv_id: str,
@@ -1024,6 +954,51 @@ class Autoresponder:
         except Exception as exc:
             self.summary["errors"].append({"conversation": conv_id, "error": f"conversation update failed: {exc}"})
 
+    def _ensure_lead_if_interested(
+        self,
+        event: str,
+        from_number: str,
+        conv_fields: Dict[str, Any],
+        prospect_record: Optional[Dict[str, Any]],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Create/attach a Lead only when the intent shows interest (Stage 2+)."""
+        interested = {"ownership_yes", "interest_yes", "price_provided", "ask_offer", "condition_info"}
+        property_id = conv_fields.get(CONV_PROPERTY_ID_FIELD)
+        if event not in interested:
+            return None, property_id
+
+        # Prefer shared promote utility
+        if promote_to_lead:
+            try:
+                lid, pid = promote_to_lead(
+                    from_number,
+                    source=self.processed_by,
+                    conversation_fields=conv_fields,
+                )
+                return lid, (pid or property_id)
+            except Exception:
+                pass
+
+        # Best-effort: find by phone, else create
+        if self.leads:
+            existing = self._find_record_by_phone(self.leads, self.lead_phone_fields, from_number)
+            if existing:
+                return existing["id"], property_id
+
+            created = self.leads.create({
+                LEAD_PHONE_FIELD: from_number,
+                (LEAD_STATUS_FIELD or "Lead Status"): "Contacted",
+                (LEAD_SOURCE_FIELD or "Source"): self.processed_by,
+            })
+            if isinstance(created, dict):
+                return created.get("id"), property_id
+
+        return None, property_id
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 
 def run_autoresponder(limit: int = 50) -> Dict[str, Any]:
     service = Autoresponder()
