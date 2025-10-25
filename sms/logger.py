@@ -57,8 +57,16 @@ def log_run(
     Example:
         log_run("CAMPAIGN_RUN", processed=500)
     """
-    tbl = CONNECTOR.performance_logs()
-    if not tbl:
+    tbl_factory = getattr(CONNECTOR, "performance_logs", None)
+    tbl_handle = tbl_factory() if callable(tbl_factory) else None
+
+    if tbl_handle is None:
+        perf_accessor = getattr(CONNECTOR, "performance", None)
+        if callable(perf_accessor):
+            tbl_handle = perf_accessor()
+
+    tbl = getattr(tbl_handle, "table", tbl_handle)
+    if not getattr(tbl, "create", None):
         logger.warning(f"⚠️ Skipping log_run for {run_type} — table unavailable.")
         return {"ok": False, "error": "Performance Logs table unavailable"}
 
