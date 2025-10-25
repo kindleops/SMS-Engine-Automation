@@ -59,6 +59,7 @@ LEGACY_PHONE_COLUMNS = (
 
 _FIELD_NORMALISER = re.compile(r"[^a-z0-9]+")
 _field_map_cache: Dict[str, Dict[str, str]] = {}
+_MESSAGE_LOG_BUFFER: List[Dict[str, Any]] = []
 
 
 TABLES = {
@@ -590,3 +591,71 @@ def update_record(handle: TableHandle, record_id: str, fields: Dict[str, Any]):
 
 def list_records(handle: TableHandle, **kwargs):
     return _safe_all(handle, **kwargs)
+
+
+def log_message(
+    connector: Optional[DataConnector] = None,
+    *,
+    conversation_id: Optional[str],
+    direction: str,
+    to_phone: Optional[str],
+    from_phone: Optional[str],
+    body: Optional[str],
+    status: str,
+    provider_sid: Optional[str] = None,
+    provider_error: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Persist an outbound/inbound message attempt in memory (best-effort)."""
+
+    payload: Dict[str, Any] = {
+        "conversation_id": conversation_id,
+        "direction": (direction or "").upper(),
+        "to_phone": to_phone,
+        "from_phone": from_phone,
+        "body": body,
+        "status": status.upper() if status else status,
+        "provider_sid": provider_sid or "",
+        "provider_error": provider_error,
+        "metadata": dict(metadata or {}),
+        "logged_at": iso_now(),
+    }
+
+    _MESSAGE_LOG_BUFFER.append(payload)
+
+    target_connector = connector or CONNECTOR
+    handle_getter = getattr(target_connector, "message_logs", None)
+    if not handle_getter:
+        handle_getter = getattr(target_connector, "messages", None)
+
+    handle: Optional[TableHandle]
+    try:
+        handle = handle_getter() if callable(handle_getter) else None
+    except Exception:
+        handle = None
+
+    if handle:
+        fields = _compact(
+            {
+                "Conversation": [conversation_id] if conversation_id else None,
+                "Direction": payload["direction"],
+                "To": to_phone,
+                "From": from_phone,
+                "Body": body,
+                "Status": payload["status"],
+                "Provider SID": payload["provider_sid"],
+                "Provider Error": provider_error,
+                "Metadata": payload["metadata"],
+                "Logged At": payload["logged_at"],
+            }
+        )
+        try:
+            _safe_create(handle, fields)
+        except Exception:
+            logger.debug("Message log persistence skipped", exc_info=True)
+
+    return payload
+
+
+def get_message_logs() -> List[Dict[str, Any]]:
+    return list(_MESSAGE_LOG_BUFFER)
