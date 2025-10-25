@@ -107,7 +107,13 @@ def _iso(dt: datetime) -> str:
 
 def _parse_dt(val: Any) -> Optional[datetime]:
     try:
-        return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+        s = str(val).strip()
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            # Treat naive as local (America/Chicago) then convert to UTC
+            tz = get_policy().quiet_tz or timezone.utc
+            dt = dt.replace(tzinfo=tz)
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
