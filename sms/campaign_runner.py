@@ -61,6 +61,7 @@ DRIP_MARKET_F = "Market"                     # single select
 DRIP_STATUS_F = "Status"
 DRIP_NEXT_SEND_F = "Next Send Date"
 DRIP_UI_F = "UI"
+DRIP_PROPERTY_ID_F = "Property ID"           # property identifier field
 
 TEMPLATE_MESSAGE_F = "Message"               # Templates.Message
 
@@ -329,7 +330,7 @@ def _queue_one_campaign(
 ) -> Dict[str, Any]:
     cf = (campaign or {}).get("fields", {}) or {}
     cid = campaign.get("id")
-    cname = cf.get(CAMPAIGN_NAME_F) or "Unnamed Campaign"
+    cname = cf.get(CAMPAIGN_NAME_F) or cf.get("Name") or "Unnamed Campaign"
     cstatus = str(cf.get(CAMPAIGN_STATUS_F) or "").strip().lower()
     cstart = cf.get(CAMPAIGN_START_F)
     cmarket = cf.get(CAMPAIGN_MARKET_F)
@@ -354,38 +355,45 @@ def _queue_one_campaign(
         log.info(f"⚠️ Campaign {cname} linked Prospects not found; skipped.")
         return {"campaign": cname, "queued": 0, "skipped": "prospects_not_found"}
 
-    # Templates (optional: rotate per message). If none linked, we still allow (message must be set later).
+    # Templates (rotate per message). If none, messages will be blank.
     tmpl_ids = cf.get(CAMPAIGN_TEMPLATES_LINK_F) or []
-    templates = _fetch_template_messages(templates_tbl, tmpl_ids)  # list[(tid, message)]
+    templates = _fetch_template_messages(templates_tbl, tmpl_ids)  # -> list[(template_id, message)]
     if not templates:
         log.warning(f"⚠️ Campaign {cname} has no valid templates; messages will be blank.")
         templates = []
 
-    # Hard cap for run
-    take = len(prospects) if (not limit or limit <= 0) else min(limit, len(prospects))
+    # Hard cap for this run
+    take = len(prospects) if (not limit or limit <= 0) else min(int(limit), len(prospects))
 
     queued = 0
     previews: List[Dict[str, Any]] = []
     reasons = defaultdict(int)
 
-    for i, pr in enumerate(prospects[:take]):
+    for pr in prospects[:take]:
         pf = (pr or {}).get("fields", {}) or {}
+
+        # pick a deliverable phone for the seller
         phone = _best_phone(pf)
         if not phone:
             reasons["no_phone"] += 1
             continue
 
-        # Message/template
+        # Template & message render
         if templates:
             tmpl_id, body = random.choice(templates)
         else:
             tmpl_id, body = None, ""
         rendered = _render_message(body, pf)
 
-        # Markets + from-number
-        drip_market = pf.get(PROSPECT_MARKET_F) or ""   # single select; matches your options (e.g., "Minneapolis, MN")
-        from_number = _choose_from_number(numbers_tbl, cmarket)
+        # Market (for Drip row) and From-number rotation
+        drip_market = pf.get(PROSPECT_MARKET_F) or ""  # single select; already aligned to your options
+        # Use campaign's Market to choose a TextGrid number; fallback to prospect market if campaign market missing
+        from_number = _choose_from_number(numbers_tbl, cmarket or drip_market)
 
+        # Property ID from prospect
+        prop_id = _prospect_property_id(pf)
+
+        # Construct the (only) payload — using schema constants
         payload: Dict[str, Any] = {
             DRIP_CAMPAIGN_LINK_F: [cid] if cid else None,
             DRIP_PROSPECT_LINK_F: [pr.get("id")] if pr.get("id") else None,
@@ -397,6 +405,7 @@ def _queue_one_campaign(
             DRIP_STATUS_F: DripStatus.QUEUED.value,
             DRIP_UI_F: STATUS_ICON["QUEUED"],
             DRIP_NEXT_SEND_F: _ct_future_iso_naive(JITTER_MIN_S, JITTER_MAX_S),
+            DRIP_PROPERTY_ID_F: prop_id,  # ← correctly set here
         }
 
         if dryrun:
@@ -404,9 +413,12 @@ def _queue_one_campaign(
             if len(previews) < preview_limit:
                 previews.append({
                     "prospect_id": pr.get("id"),
-                    "first": _first_name_from(next((pf.get(k) for k in PROSPECT_NAME_KEYS if pf.get(k)), "") or ""),
+                    "first": _first_name_from(
+                        next((pf.get(k) for k in PROSPECT_NAME_KEYS if pf.get(k)), "") or ""
+                    ),
                     "from_number": from_number,
                     "market": drip_market,
+                    "property_id": prop_id,
                     "message": rendered,
                     "next_send": payload[DRIP_NEXT_SEND_F],
                     "template_linked": bool(tmpl_id),
@@ -419,7 +431,7 @@ def _queue_one_campaign(
             queued += 1
         except Exception as e:
             msg = str(e)
-            # If market select mismatch, retry without Market
+            # If market select mismatch, retry without Market (never invents new select options)
             if "INVALID_MULTIPLE_CHOICE_OPTIONS" in msg and DRIP_MARKET_F in payload:
                 retry = dict(payload)
                 retry.pop(DRIP_MARKET_F, None)
@@ -437,6 +449,7 @@ def _queue_one_campaign(
     log.info(f"✅ Queued {queued} for {cname}")
     if reasons:
         log.info(f"   Skips: {dict(reasons)}")
+
     out = {"campaign": cname, "queued": queued}
     if dryrun and previews:
         out["preview"] = previews
