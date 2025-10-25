@@ -25,9 +25,14 @@ def debug_env():
 def run_test():
     try:
         debug_env()
+        from_number = os.getenv("TEST_FROM_NUMBER") or os.getenv("TEXTGRID_ALERT_FROM") or os.getenv("TEXTGRID_PHONE_NUMBER")
+        if not from_number:
+            raise RuntimeError("TEST_FROM_NUMBER or TEXTGRID_PHONE_NUMBER must be set")
+
         res = send_message(
+            from_number=from_number,
             to="+16128072000",  # 🔔 replace with your test number
-            body="🔥 Test message from Everline engine",
+            message="🔥 Test message from Everline engine",
             market="houston",  # pulls number from pools
         )
         print("✅ RESULT:")

@@ -212,6 +212,8 @@ class RetryRunner:
                 self.summary["rescheduled"] += 1
 
     def _send(self, phone, body, from_number, template_id, campaign_id, lead_id) -> Dict[str, Any]:
+        if not from_number:
+            return {"status": "failed", "error": "missing_from_number"}
         if _Processor:
             return _Processor.send(
                 phone=phone,
@@ -223,7 +225,7 @@ class RetryRunner:
                 direction=ConversationDirection.OUTBOUND.value,
                 metadata={"retry": True},
             )
-        return _send_direct(phone, body, from_number=from_number)
+        return _send_direct(from_number=from_number, to=phone, message=body)
 
     def _mark_success(self, record, sid, retries) -> None:
         update_record(

@@ -80,6 +80,7 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
 
 PHONE_FIELD = CONV_FIELDS["FROM"]
+TO_FIELD = CONV_FIELDS["TO"]
 MESSAGE_FIELD = CONV_FIELDS["BODY"]
 STATUS_FIELD = CONV_FIELDS["STATUS"]
 DIRECTION_FIELD = CONV_FIELDS["DIRECTION"]
@@ -167,14 +168,16 @@ def _is_permanent_error(err: str) -> bool:
     return False
 
 
-def _send(phone: str, body: str) -> None:
+def _send(phone: str, body: str, from_number: Optional[str]) -> None:
+    if not from_number:
+        raise RuntimeError("missing_from_number")
     if _MP:
-        res = _MP.send(phone=phone, body=body, direction="OUT")
+        res = _MP.send(phone=phone, body=body, direction="OUT", from_number=from_number)
         if not res or res.get("status") != "sent":
             raise RuntimeError(res.get("error", "send_failed"))
         return
     if _send_direct:
-        _send_direct(phone, body)
+        _send_direct(from_number=from_number, to=phone, message=body)
         return
     log.info(f"[MOCK] send → {phone}: {body[:100]}")
 
@@ -215,6 +218,7 @@ def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
         rid, f = r.get("id"), r.get("fields", {})
         phone = f.get(PHONE_FIELD) or f.get("From")
         body = f.get(MESSAGE_FIELD) or f.get("Body")
+        from_number = f.get(TO_FIELD) or f.get("TextGrid Phone Number") or f.get("To")
         retries_prev = int(f.get(RETRY_COUNT_FIELD) or 0)
         if not (rid and phone and body):
             continue
@@ -227,7 +231,7 @@ def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
             pass
 
         try:
-            _send(phone, body)
+            _send(phone, body, from_number)
             patch = {
                 STATUS_FIELD: "SENT",
                 RETRY_COUNT_FIELD: retries_prev + 1,

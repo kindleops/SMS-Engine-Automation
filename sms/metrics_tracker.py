@@ -59,6 +59,7 @@ except Exception:
 
 # ─────────────────────────── Alerts / thresholds ───────────────────────────
 ALERT_PHONE = os.getenv("ALERT_PHONE")
+ALERT_FROM_NUMBER = os.getenv("ALERT_FROM_NUMBER") or os.getenv("TEXTGRID_ALERT_FROM")
 ALERT_WEBHOOK = os.getenv("ALERT_EMAIL_WEBHOOK")
 OPT_OUT_THRESHOLD = float(os.getenv("OPT_OUT_ALERT_THRESHOLD", "2.5"))  # %
 DELIVERY_THRESHOLD = float(os.getenv("DELIVERY_ALERT_THRESHOLD", "90"))  # %
@@ -159,11 +160,13 @@ def _direction(rec):
 
 def _notify(msg: str):
     logger.warning(f"🚨 ALERT: {msg}")
-    if ALERT_PHONE and send_message:
+    if ALERT_PHONE and ALERT_FROM_NUMBER and send_message:
         try:
-            send_message(ALERT_PHONE, msg)
+            send_message(from_number=ALERT_FROM_NUMBER, to=ALERT_PHONE, message=msg)
         except Exception as e:
             logger.warning(f"❌ SMS alert failed: {e}")
+    elif ALERT_PHONE and send_message and not ALERT_FROM_NUMBER:
+        logger.warning("❌ SMS alert skipped: ALERT_FROM_NUMBER not configured")
     if ALERT_WEBHOOK and ALERT_WEBHOOK.startswith(("http://", "https://")):
         try:
             import requests

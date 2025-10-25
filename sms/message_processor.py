@@ -206,13 +206,29 @@ class MessageProcessor:
                 "property_id": property_id,
             }
 
+        if not from_number:
+            err = "missing_from_number"
+            logger.error(f"Transport error sending to {phone}: {err}")
+            return {
+                "ok": False,
+                "status": "failed",
+                "sid": None,
+                "phone": phone,
+                "body": body,
+                "convo_id": None,
+                "provider_status": None,
+                "error": err,
+                "timestamp": utcnow_iso(),
+                "property_id": property_id,
+            }
+
         convos = get_convos()
         leads = get_leads()
         meta = dict(metadata or {})
 
         # --- 1) Transport
         try:
-            send_result = send_message(phone, body, from_number=from_number)
+            send_result = send_message(from_number=from_number, to=phone, message=body)
         except Exception as e:
             err = str(e)
             logger.error(f"Transport error sending to {phone}: {err}", exc_info=True)
@@ -232,9 +248,12 @@ class MessageProcessor:
             # telemetry (best-effort)
             try:
                 log_run("OUTBOUND_ERROR", processed=0, breakdown={"phone": phone, "error": err})
+            except Exception as log_exc:
+                logger.warning(f"Run logging skipped: {log_exc}")
+            try:
                 log_kpi("OUTBOUND_FAILED", 1)
-            except Exception:
-                pass
+            except Exception as kpi_exc:
+                logger.warning(f"KPI logging skipped: {kpi_exc}")
             return {
                 "ok": False,
                 "status": "failed",
@@ -278,10 +297,17 @@ class MessageProcessor:
 
         # telemetry (best-effort)
         try:
-            log_run("OUTBOUND_MESSAGE", processed=1, breakdown={"phone": phone, "sid": sid, "provider_status": provider_status, "ok": ok})
+            log_run(
+                "OUTBOUND_MESSAGE",
+                processed=1,
+                breakdown={"phone": phone, "sid": sid, "provider_status": provider_status, "ok": ok},
+            )
+        except Exception as log_exc:
+            logger.warning(f"Run logging skipped: {log_exc}")
+        try:
             log_kpi("OUTBOUND_SENT" if ok else "OUTBOUND_FAILED", 1)
-        except Exception:
-            pass
+        except Exception as kpi_exc:
+            logger.warning(f"KPI logging skipped: {kpi_exc}")
 
         result = {
             "ok": ok,
