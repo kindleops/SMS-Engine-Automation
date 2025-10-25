@@ -176,6 +176,86 @@ class ConversationAIIntent(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Conversation messages table schema (Leads & Conversations base)
+# ---------------------------------------------------------------------------
+
+
+class MessageStatus(str, Enum):
+    RECEIVED = "RECEIVED"
+    SENT = "SENT"
+    FAILED = "FAILED"
+
+
+MESSAGES_TABLE = TableDefinition(
+    default="Conversation Messages",
+    env_vars=("MESSAGES_TABLE", "CONVERSATION_MESSAGES_TABLE"),
+    fields={
+        "CONVERSATION": FieldDefinition(
+            default="Conversation",
+            env_vars=("MSG_CONVERSATION_FIELD",),
+        ),
+        "DIRECTION": FieldDefinition(
+            default="Direction",
+            env_vars=("MSG_DIRECTION_FIELD",),
+            options=tuple(direction.value for direction in ConversationDirection),
+        ),
+        "TO": FieldDefinition(
+            default="To",
+            env_vars=("MSG_TO_FIELD",),
+        ),
+        "FROM": FieldDefinition(
+            default="From",
+            env_vars=("MSG_FROM_FIELD",),
+        ),
+        "BODY": FieldDefinition(
+            default="Body",
+            env_vars=("MSG_BODY_FIELD",),
+        ),
+        "STATUS": FieldDefinition(
+            default="Message Status",
+            env_vars=("MSG_STATUS_FIELD",),
+            options=tuple(status.value for status in MessageStatus),
+        ),
+        "PROVIDER_SID": FieldDefinition(
+            default="Provider SID",
+            env_vars=("MSG_PROVIDER_SID_FIELD",),
+        ),
+        "PROVIDER_ERROR": FieldDefinition(
+            default="Provider Error",
+            env_vars=("MSG_PROVIDER_ERROR_FIELD",),
+        ),
+        "TIMESTAMP": FieldDefinition(
+            default="Timestamp",
+            env_vars=("MSG_TIMESTAMP_FIELD",),
+        ),
+    },
+)
+
+
+def messages_field_map() -> Dict[str, str]:
+    fields = MESSAGES_TABLE.fields
+    return {
+        "CONVERSATION": fields["CONVERSATION"].resolve(),
+        "DIRECTION": fields["DIRECTION"].resolve(),
+        "TO": fields["TO"].resolve(),
+        "FROM": fields["FROM"].resolve(),
+        "BODY": fields["BODY"].resolve(),
+        "STATUS": fields["STATUS"].resolve(),
+        "PROVIDER_SID": fields["PROVIDER_SID"].resolve(),
+        "PROVIDER_ERROR": fields["PROVIDER_ERROR"].resolve(),
+        "TIMESTAMP": fields["TIMESTAMP"].resolve(),
+    }
+
+
+def messages_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = MESSAGES_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Conversations table schema (Leads & Conversations base)
 # ---------------------------------------------------------------------------
 
