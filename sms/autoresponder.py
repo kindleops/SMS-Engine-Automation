@@ -78,10 +78,65 @@ logger = get_logger(__name__)
 # Airtable facades (CONNECTOR-compatible)
 # ---------------------------------------------------------------------------
 
+from sms.datastore import CONNECTOR, list_records, update_record
+try:
+    # Optional in some builds
+    from sms.datastore import create_record as _create_record  # type: ignore
+except Exception:  # not exported in your current build
+    _create_record = None  # type: ignore
+
+try:
+    # Conversations upsert helper (preferred for convos)
+    from sms.datastore import create_conversation  # type: ignore
+except Exception:
+    create_conversation = None  # type: ignore
+
+
+def _safe_create(handle, payload, *, kind: str | None = None):
+    """
+    Create a record in a schema-safe way across datastore variants.
+    - For Conversations: prefer create_conversation(sid, fields) if available.
+    - Else: use module-level create_record(handle, payload) if exported.
+    - Else: try CONNECTOR.create_record(handle, payload) if present.
+    - Else: no-op (return None) but DO NOT crash.
+    """
+    # Conversations often want idempotency via TextGrid ID
+    if kind == "conversations" and create_conversation:
+        # Try to pull a unique SID-ish key from common fields
+        sid = (
+            payload.get("TextGrid ID")
+            or payload.get("TextGridId")
+            or payload.get("sid")
+            or payload.get("MessageSid")
+            or None
+        )
+        try:
+            return create_conversation(sid, payload)
+        except Exception:
+            pass
+
+    if _create_record:
+        try:
+            return _create_record(handle, payload)
+        except Exception:
+            pass
+
+    # Some datastore variants hang functions off CONNECTOR
+    for attr in ("create_record", "create"):
+        if hasattr(CONNECTOR, attr):
+            try:
+                return getattr(CONNECTOR, attr)(handle, payload)
+            except Exception:
+                pass
+
+    # Last resort: no create path available
+    return None
+
 
 class TableFacade:
-    def __init__(self, handle):
+    def __init__(self, handle, kind: str | None = None):
         self.handle = handle
+        self.kind = kind  # 'conversations' | 'leads' | 'prospects' | 'templates' | 'drip' | None
 
     def all(self, view: str | None = None, max_records: Optional[int] = None, **kwargs):
         params: Dict[str, Any] = {}
@@ -90,38 +145,32 @@ class TableFacade:
         if max_records is not None:
             params["max_records"] = max_records
         params.update(kwargs)
-        return CONNECTOR.list_records(self.handle, **params)
+        return list_records(self.handle, **params)
 
     def create(self, payload: Dict[str, Any]):
-        return CONNECTOR.create_record(self.handle, payload)
+        return _safe_create(self.handle, payload, kind=self.kind)
 
     def update(self, record_id: str, payload: Dict[str, Any]):
-        # ✅ Correct connector method
-        return CONNECTOR.update_record(self.handle, record_id, payload)
+        return update_record(self.handle, record_id, payload)
 
 
 def conversations():
-    return TableFacade(CONNECTOR.conversations())
-
+    return TableFacade(CONNECTOR.conversations(), kind="conversations")
 
 def leads_tbl():
-    return TableFacade(CONNECTOR.leads())
-
+    return TableFacade(CONNECTOR.leads(), kind="leads")
 
 def prospects_tbl():
-    return TableFacade(CONNECTOR.prospects())
-
+    return TableFacade(CONNECTOR.prospects(), kind="prospects")
 
 def templates_tbl():
-    return TableFacade(CONNECTOR.templates())
-
+    return TableFacade(CONNECTOR.templates(), kind="templates")
 
 def drip_tbl():
     try:
-        return TableFacade(CONNECTOR.drip_queue())
+        return TableFacade(CONNECTOR.drip_queue(), kind="drip")
     except Exception:
         return None
-
 
 # ---------------------------------------------------------------------------
 # Field maps (schema-driven with safe fallbacks)

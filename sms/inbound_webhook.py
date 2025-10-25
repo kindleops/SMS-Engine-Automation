@@ -1,26 +1,28 @@
-# sms/inbound_webhook.py
 """
-Inbound SMS + Opt-Out Webhook (schema-aware)
---------------------------------------------
+Inbound SMS + Opt-Out Webhook (schema-aware, failsafe)
+------------------------------------------------------
 • Accepts TextGrid/Twilio-style JSON or form payloads
 • Uses datastore CONNECTOR helpers (schema safe)
-• Exports normalize_e164 (used by delivery webhook)
+• Automatically logs every inbound message to Airtable
 • Marks Conversations + Lead activity consistently
 """
 
 from __future__ import annotations
 from typing import Any, Dict, Optional
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request, Header, Query
 
 from sms.runtime import get_logger, iso_now
 from sms.datastore import (
     CONNECTOR,
-    create_conversation,        # create_conversation(unique_key, fields) — schema-safe
-    ensure_prospect_or_lead,    # ensure + return (lead_rec, prospect_rec)
-    update_conversation,        # update by record id with fields
-    update_record,              # generic table update
-    touch_lead,                 # update last-activity trails
+    create_conversation,
+    ensure_prospect_or_lead,
+    update_conversation,
+    update_record,
+    touch_lead,
+    safe_create_conversation,   # <-- added
+    safe_log_message,           # <-- added
 )
 from sms.airtable_schema import (
     ConversationDirection,
@@ -77,7 +79,6 @@ def _digits(v: str | None) -> str:
     return "".join(ch for ch in str(v or "") if ch.isdigit())
 
 def normalize_e164(v: str | None, *, field: str = "Phone") -> str:
-    """Exported for other modules (e.g., delivery webhook)."""
     d = _digits(v)
     if len(d) == 10:
         return "+1" + d
@@ -106,18 +107,15 @@ def _is_authorized(header_token: Optional[str], query_token: Optional[str]) -> b
 # ---------------------------------------------------------------------------
 
 async def _parse_payload(request: Request) -> Dict[str, Any]:
-    """Parse inbound request to a dict (JSON or Form), case-normalized."""
     ct = request.headers.get("content-type", "").lower()
     if "application/json" in ct:
         try:
             data = await request.json()
         except Exception:
-            # Some providers send invalid JSON with correct header; fall back to form
             data = dict(await request.form())
     else:
         data = dict(await request.form())
 
-    # Case-insensitive access
     lower = {str(k).lower(): v for k, v in (data or {}).items()}
 
     def pick(*keys: str) -> Optional[str]:
@@ -148,9 +146,8 @@ def _log_conversation_inbound(
     lead_id: Optional[str],
     prospect_id: Optional[str],
     status: str = "DELIVERED",
-    processed_by: Optional[str] = None,   # IMPORTANT: keep None for normal inbound so AR can process
+    processed_by: Optional[str] = None,
 ):
-    """Create a Conversations row using schema-safe field names."""
     fields: Dict[str, Any] = {
         CONV_FROM_FIELD: from_e164,
         CONV_TO_FIELD: to_e164,
@@ -159,7 +156,7 @@ def _log_conversation_inbound(
         CONV_STATUS_FIELD: status,
         CONV_RECEIVED_AT: iso_now(),
     }
-    if processed_by:  # only set when we intentionally want to mark ownership (e.g., Opt-Out)
+    if processed_by:
         fields[CONV_PROCESSED_BY] = processed_by
     if sid:
         fields[CONV_TEXTGRID_ID] = sid
@@ -168,8 +165,17 @@ def _log_conversation_inbound(
     if prospect_id:
         fields[CONV_PROSPECT_LINK] = [prospect_id]
 
-    # create_conversation will upsert by unique key (sid) when provided
-    return create_conversation(sid, fields)
+    try:
+        # Attempt schema-safe write first
+        rec = create_conversation(sid, fields)
+        if not rec:
+            # Hard fallback if schema mismatch occurs
+            logger.warning("⚠️ create_conversation returned None; using safe_create_conversation fallback")
+            rec = safe_create_conversation(fields)
+        return rec
+    except Exception:
+        logger.warning("⚠️ Standard create_conversation failed; invoking safe_create_conversation", exc_info=True)
+        return safe_create_conversation(fields)
 
 def _touch_lead_safe(lead_id: Optional[str], body: str):
     if not lead_id:
@@ -197,6 +203,9 @@ def _handle_inbound(data: Dict[str, Any]) -> Dict[str, Any]:
     if _is_stop(body):
         return _handle_optout(data)
 
+    # Always log message first to ensure visibility
+    safe_log_message("INBOUND", to_e164, from_e164, body, status="RECEIVED", sid=sid)
+
     lead, prospect = ensure_prospect_or_lead(from_e164)
     lead_id = (lead or {}).get("id")
     prospect_id = (prospect or {}).get("id")
@@ -209,7 +218,7 @@ def _handle_inbound(data: Dict[str, Any]) -> Dict[str, Any]:
         lead_id=lead_id,
         prospect_id=prospect_id,
         status="DELIVERED",
-        processed_by=None,  # leave blank so the Autoresponder can pick it up
+        processed_by=None,
     )
     _touch_lead_safe(lead_id, body)
 
@@ -232,6 +241,9 @@ def _handle_optout(data: Dict[str, Any]) -> Dict[str, Any]:
     body = _sanitize_body(data.get("body"))
     sid = data.get("sid")
 
+    # Log opt-out message regardless
+    safe_log_message("INBOUND", to_e164, from_e164, body, status="OPT OUT", sid=sid)
+
     if to_e164 and increment_opt_out:
         try:
             increment_opt_out(to_e164)
@@ -242,7 +254,6 @@ def _handle_optout(data: Dict[str, Any]) -> Dict[str, Any]:
     lead_id = (lead or {}).get("id")
     prospect_id = (prospect or {}).get("id")
 
-    # Conversations: mark as OPT OUT (consistent with delivery webhook + reports)
     record = _log_conversation_inbound(
         from_e164=from_e164,
         to_e164=to_e164,
@@ -254,7 +265,6 @@ def _handle_optout(data: Dict[str, Any]) -> Dict[str, Any]:
         processed_by="Opt-Out Webhook",
     )
 
-    # Leads: mark DNC (pipeline label), and update activity
     if lead_id:
         try:
             update_record(CONNECTOR.leads(), lead_id, {LEAD_STATUS_FIELD: "DNC"})
@@ -262,7 +272,6 @@ def _handle_optout(data: Dict[str, Any]) -> Dict[str, Any]:
             logger.warning("Lead DNC update failed", exc_info=True)
         _touch_lead_safe(lead_id, body)
 
-    # Ensure the created convo row is flagged consistently (best-effort)
     if record and record.get("id"):
         try:
             update_conversation(record["id"], {CONV_STATUS_FIELD: "OPT OUT", CONV_PROCESSED_BY: "Opt-Out Webhook"})
@@ -286,7 +295,6 @@ async def inbound_entry(
     x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
     token: Optional[str] = Query(None),
 ):
-    """Unified webhook for inbound + opt-out detection (JSON or form)."""
     if not _is_authorized(x_webhook_token, token):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -301,7 +309,6 @@ async def inbound_entry(
         logger.exception("Inbound failure")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Optional trailing slash for providers that insist on it
 @router.post("/")
 async def inbound_entry_slash(
     request: Request,

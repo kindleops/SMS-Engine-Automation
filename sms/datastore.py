@@ -346,6 +346,64 @@ def _log_airtable_exception(handle: TableHandle, exc: Exception, action: str) ->
     if DEBUG:
         traceback.print_exc()
 
+    # --- Schema-safe remap (case/space insensitive) -----------------------------
+import re
+from functools import lru_cache
+from typing import Any, Dict
+
+def _norm_key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").strip().lower())
+
+@lru_cache(maxsize=128)
+def _field_map_for_table(base_id: str, table_name: str, sample_key: str = "::_") -> Dict[str, str]:
+    """
+    Probe columns once per table and cache a normalized->actual map.
+    The 'sample_key' keeps the cache distinct across processes even if base changes.
+    """
+    try:
+        # We only need 1 record to inspect headers; if empty, Airtable returns [] and we map nothing.
+        # `Table` is already initialized for this handle.
+        from pyairtable.api.table import Table  # type: ignore
+    except Exception:
+        Table = None  # type: ignore
+
+    # We can't probe without a Table instance; return empty → no remap
+    if not Table:
+        return {}
+
+    # We rely on the handle in the callsite to pass base_id/table_name
+    # Actual probing happens in _remap_payload below using handle.table
+    return {}  # real map is built on demand (see _remap_payload)
+    
+
+def _remap_payload(handle: Any, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Map incoming keys (e.g. 'status') to real Airtable columns (e.g. 'Status').
+    Falls back to original keys if probing fails.
+    """
+    try:
+        table = handle.table  # pyairtable.Table
+        base_id = getattr(table, "base_id", None) or getattr(handle, "base_id", "")
+        table_name = getattr(table, "table_name", None) or getattr(handle, "name", "")
+        # Build a map by probing header keys once
+        try:
+            probe = table.all(max_records=1)
+            keys = list(probe[0].get("fields", {}).keys()) if probe else []
+        except Exception:
+            # If table is empty or call fails, try schema endpoint (optional), else no remap
+            keys = []
+        amap = {_norm_key(k): k for k in keys}
+        if not amap:
+            # No map → return original payload untouched
+            return dict(fields or {})
+        out: Dict[str, Any] = {}
+        for k, v in (fields or {}).items():
+            mk = amap.get(_norm_key(str(k)))
+            out[mk or k] = v
+        return out
+    except Exception:
+        return dict(fields or {})
+
 
 # ============================================================
 # SAFE WRAPPERS
@@ -590,3 +648,54 @@ def update_record(handle: TableHandle, record_id: str, fields: Dict[str, Any]):
 
 def list_records(handle: TableHandle, **kwargs):
     return _safe_all(handle, **kwargs)
+
+# ============================================================
+# HARD FAILSAFE: Guaranteed Conversation + Message Logging
+# ============================================================
+
+from datetime import datetime, timezone
+
+def safe_create_conversation(fields: dict) -> dict | None:
+    """
+    Always attempt to write to Conversations, even if schema cache is empty.
+    """
+    try:
+        handle = CONNECTOR.conversations()
+        tbl = getattr(handle, "table", None)
+        if not tbl:
+            logger.error("❌ Conversations table handle missing.")
+            return None
+
+        # Title-case keys so Airtable accepts them even if cache is empty
+        fixed = {k.title() if " " not in k else k: v for k, v in (fields or {}).items()}
+        rec = tbl.create({"fields": fixed})
+        logger.info(f"🗒️ Conversation row created {rec.get('id')}")
+        return rec
+    except Exception as e:
+        logger.error(f"⚠️ safe_create_conversation failed: {e}", exc_info=True)
+        return None
+
+
+def safe_log_message(direction: str, to: str, from_: str, body: str, status="SENT", sid=None, error=None):
+    """
+    Lightweight message trail writer (optional secondary table).
+    """
+    try:
+        tbl = CONNECTOR.conversations().table  # reuse same table if no separate Messages table
+        rec = tbl.create({
+            "fields": {
+                "Direction": direction,
+                "TextGrid Phone Number": to,
+                "Seller Phone Number": from_,
+                "Message": body or "",
+                "Status": status,
+                "TextGrid ID": sid or "",
+                "Error": error or "",
+                "Timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        })
+        logger.info(f"📩 Logged {direction} message → {to}")
+        return rec
+    except Exception as e:
+        logger.error(f"⚠️ safe_log_message failed: {e}", exc_info=True)
+        return None

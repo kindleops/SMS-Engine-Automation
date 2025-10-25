@@ -1,18 +1,18 @@
 """
-🔥 Bulletproof Message Processor (v3.1)
+🔥 Bulletproof Message Processor (v3.2)
 --------------------------------------
 Responsible for:
  - Sending outbound SMS via TextGrid
- - Logging to Conversations table
+ - Logging to Conversations table (guaranteed)
  - Updating Leads table activity
  - Handling retries and delivery status
 
-Upgrades in v3.1:
- - Centralized structured logging
+Upgrades in v3.2:
+ - Automatic failsafe logging to Airtable
+ - Schema-safe + fallback via datastore
  - KPI + Run telemetry (best-effort)
- - Schema-safe Airtable updates w/ auto-field map
  - Uniform return envelope
- """
+"""
 
 from __future__ import annotations
 
@@ -40,21 +40,21 @@ from sms.airtable_schema import ConversationDirection, ConversationDeliveryStatu
 # Central logger
 from sms.runtime import get_logger
 
+# ✅ Add failsafe datastore imports
+from sms.datastore import safe_create_conversation, safe_log_message
+
 logger = get_logger("message_processor")
 
 # Best-effort telemetry imports (won't crash if missing)
 try:
-    from sms.kpi_logger import log_kpi  # -> log_kpi(metric, value, ...)
+    from sms.kpi_logger import log_kpi
 except Exception:
-
     def log_kpi(*_a, **_k):  # type: ignore
         return {"ok": False, "action": "skipped", "error": "kpi_logger unavailable"}
 
-
 try:
-    from sms.logger import log_run  # -> log_run(run_type, processed, breakdown, ...)
+    from sms.logger import log_run
 except Exception:
-
     def log_run(*_a, **_k):  # type: ignore
         pass
 
@@ -62,8 +62,8 @@ except Exception:
 # ---------------------------
 # Field mappings (canonical)
 # ---------------------------
-FROM_FIELD = CONV_FIELDS["FROM"]  # Seller phone
-TO_FIELD = CONV_FIELDS["TO"]  # Our TextGrid number (DID)
+FROM_FIELD = CONV_FIELDS["FROM"]
+TO_FIELD = CONV_FIELDS["TO"]
 MSG_FIELD = CONV_FIELDS["BODY"]
 STATUS_FIELD = CONV_FIELDS["STATUS"]
 DIR_FIELD = CONV_FIELDS["DIRECTION"]
@@ -85,6 +85,7 @@ LEAD_DELIVERED_COUNT_FIELD = LEAD_FIELDS["DELIVERED_COUNT"]
 LEAD_FAILED_COUNT_FIELD = LEAD_FIELDS["FAILED_COUNT"]
 LEAD_SENT_COUNT_FIELD = LEAD_FIELDS["SENT_COUNT"]
 LEAD_PROPERTY_ID_FIELD = LEAD_FIELDS["PROPERTY_ID"]
+
 
 # ---------------------------
 # Env config
@@ -117,10 +118,8 @@ def _auto_field_map(tbl: Any) -> Dict[str, str]:
 
 
 def _remap_existing_only(tbl: Any, payload: Dict) -> Dict:
-    """Only write columns that actually exist in the Airtable table."""
     amap = _auto_field_map(tbl)
     if not amap:
-        # If we can't probe, send raw — Airtable will ignore unknowns
         return dict(payload)
     out = {}
     for k, v in payload.items():
@@ -174,153 +173,81 @@ class MessageProcessor:
         direction: str = ConversationDirection.OUTBOUND.value,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> dict:
-        """
-        Sends SMS via provider → logs Conversations → updates Lead.
-        Returns a normalized envelope:
-
-        {
-          "ok": bool,
-          "status": "sent"|"failed"|"skipped",
-          "sid": str|None,
-          "phone": str,
-          "body": str,
-          "convo_id": str|None,
-          "provider_status": str|None,
-          "error": str|None,
-          "timestamp": iso8601,
-          "property_id": str|None,
-        }
-        """
+        """Sends SMS → logs Conversations → updates Leads."""
         if not phone or not body:
             logger.warning("Skipping send: missing phone or body")
             return {
-                "ok": False,
-                "status": "skipped",
-                "sid": None,
-                "phone": phone,
-                "body": body,
-                "convo_id": None,
-                "provider_status": None,
-                "error": "missing phone or body",
-                "timestamp": utcnow_iso(),
-                "property_id": property_id,
+                "ok": False, "status": "skipped", "sid": None,
+                "phone": phone, "body": body, "convo_id": None,
+                "provider_status": None, "error": "missing phone or body",
+                "timestamp": utcnow_iso(), "property_id": property_id,
             }
 
         if not from_number:
             err = "missing_from_number"
             logger.error(f"Transport error sending to {phone}: {err}")
             return {
-                "ok": False,
-                "status": "failed",
-                "sid": None,
-                "phone": phone,
-                "body": body,
-                "convo_id": None,
-                "provider_status": None,
-                "error": err,
-                "timestamp": utcnow_iso(),
-                "property_id": property_id,
+                "ok": False, "status": "failed", "sid": None,
+                "phone": phone, "body": body, "convo_id": None,
+                "provider_status": None, "error": err,
+                "timestamp": utcnow_iso(), "property_id": property_id,
             }
 
         convos = get_convos()
         leads = get_leads()
         meta = dict(metadata or {})
 
-        # --- 1) Transport
-        to_phone = phone
+        # --- 1) Send via TextGrid
         try:
-            send_result = send_message(from_number=from_number, to=to_phone, message=body)
+            send_result = send_message(from_number=from_number, to=phone, message=body)
         except Exception as e:
             err = str(e)
             logger.error(f"Transport error sending to {phone}: {err}", exc_info=True)
             convo_id = MessageProcessor._log_conversation(
-                status="FAILED",
-                phone=phone,
-                body=body,
-                from_number=from_number,
-                direction=direction,
-                sid=None,
-                campaign_id=campaign_id,
-                template_id=template_id,
-                drip_queue_id=drip_queue_id,
+                status="FAILED", phone=phone, body=body, from_number=from_number,
+                direction=direction, sid=None, campaign_id=campaign_id,
+                template_id=template_id, drip_queue_id=drip_queue_id,
                 metadata={"error": err, **meta},
             )
             MessageProcessor._safe_retry(convo_id, err)
-            # telemetry (best-effort)
-            try:
-                log_run("OUTBOUND_ERROR", processed=0, breakdown={"phone": phone, "error": err})
-            except Exception as log_exc:
-                logger.warning(f"Run logging skipped: {log_exc}")
-            try:
-                log_kpi("OUTBOUND_FAILED", 1)
-            except Exception as kpi_exc:
-                logger.warning(f"KPI logging skipped: {kpi_exc}")
-            return {
-                "ok": False,
-                "status": "failed",
-                "sid": None,
-                "phone": phone,
-                "body": body,
-                "convo_id": convo_id,
-                "provider_status": None,
-                "error": err,
-                "timestamp": utcnow_iso(),
-                "property_id": property_id,
-            }
+            log_run("OUTBOUND_ERROR", processed=0, breakdown={"phone": phone, "error": err})
+            log_kpi("OUTBOUND_FAILED", 1)
+            return {"ok": False, "status": "failed", "sid": None, "phone": phone,
+                    "body": body, "convo_id": convo_id, "provider_status": None,
+                    "error": err, "timestamp": utcnow_iso(), "property_id": property_id}
 
         # --- 2) Normalize provider response
         sid = send_result.get("sid") or send_result.get("message_sid") or send_result.get("id")
         provider_status = (send_result.get("status") or "sent").lower()
         ok = provider_status in {"sent", "queued", "accepted", "submitted", "enroute", "delivered"}
 
-        # --- 3) Conversations log
+        # --- 3) Log Conversations
         convo_status = ConversationDeliveryStatus.SENT.value if ok else ConversationDeliveryStatus.FAILED.value
         convo_id = MessageProcessor._log_conversation(
-            status=convo_status,
-            phone=phone,
-            body=body,
-            from_number=from_number,
-            direction=direction,
-            sid=sid,
-            campaign_id=campaign_id,
-            template_id=template_id,
-            drip_queue_id=drip_queue_id,
+            status=convo_status, phone=phone, body=body,
+            from_number=from_number, direction=direction,
+            sid=sid, campaign_id=campaign_id,
+            template_id=template_id, drip_queue_id=drip_queue_id,
             metadata={"provider_status": provider_status, **meta},
         )
 
-        # --- 4) Lead activity update (safe)
+        # --- 4) Lead activity update
         if lead_id and leads:
             MessageProcessor._update_lead_activity(leads, lead_id, body, direction, property_id=property_id)
 
-        # --- 5) Retry hook if provider signaled non-ok
+        # --- 5) Retry on failure
         if not ok:
             MessageProcessor._safe_retry(convo_id, f"provider_status={provider_status}")
 
-        # telemetry (best-effort)
-        try:
-            log_run(
-                "OUTBOUND_MESSAGE",
-                processed=1,
-                breakdown={"phone": phone, "sid": sid, "provider_status": provider_status, "ok": ok},
-            )
-        except Exception as log_exc:
-            logger.warning(f"Run logging skipped: {log_exc}")
-        try:
-            log_kpi("OUTBOUND_SENT" if ok else "OUTBOUND_FAILED", 1)
-        except Exception as kpi_exc:
-            logger.warning(f"KPI logging skipped: {kpi_exc}")
+        log_run("OUTBOUND_MESSAGE", processed=1, breakdown={"phone": phone, "sid": sid, "provider_status": provider_status, "ok": ok})
+        log_kpi("OUTBOUND_SENT" if ok else "OUTBOUND_FAILED", 1)
 
         result = {
-            "ok": ok,
-            "status": "sent" if ok else "failed",
-            "sid": sid,
-            "phone": phone,
-            "body": body,
-            "convo_id": convo_id,
+            "ok": ok, "status": "sent" if ok else "failed", "sid": sid,
+            "phone": phone, "body": body, "convo_id": convo_id,
             "provider_status": provider_status,
             "error": None if ok else provider_status,
-            "timestamp": utcnow_iso(),
-            "property_id": property_id,
+            "timestamp": utcnow_iso(), "property_id": property_id,
         }
         logger.info(f"📤 Outbound → {phone} | {result['status'].upper()} | sid={sid} | provider={provider_status}")
         return result
@@ -328,19 +255,12 @@ class MessageProcessor:
     # -----------------------------------------------------------
     @staticmethod
     def _log_conversation(
-        *,
-        status: str,
-        phone: str,
-        body: str,
-        from_number: Optional[str],
-        direction: str,
-        sid: Optional[str],
-        campaign_id: Optional[str],
-        template_id: Optional[str],
-        drip_queue_id: Optional[str],
+        *, status: str, phone: str, body: str, from_number: Optional[str],
+        direction: str, sid: Optional[str], campaign_id: Optional[str],
+        template_id: Optional[str], drip_queue_id: Optional[str],
         metadata: Optional[Dict[str, Any]],
     ) -> Optional[str]:
-        """Logs the message to Conversations table (or no-op if Airtable not configured)."""
+        """Logs outbound message to Conversations (with failsafe)."""
         convos = get_convos()
         canonical_dir = (
             ConversationDirection.OUTBOUND.value
@@ -359,24 +279,24 @@ class MessageProcessor:
         }
         canonical_status = status_map.get(status.upper(), status)
 
-        payload = _compact(
-            {
-                FROM_FIELD: phone,
-                TO_FIELD: from_number,
-                MSG_FIELD: body,
-                DIR_FIELD: canonical_dir,
-                STATUS_FIELD: canonical_status,
-                SENT_AT_FIELD: utcnow_iso(),
-                TEXTGRID_ID_FIELD: sid,
-                CAMPAIGN_LINK_FIELD: [campaign_id] if campaign_id else None,
-                TEMPLATE_LINK_FIELD: [template_id] if template_id else None,
-                DRIP_QUEUE_LINK_FIELD: [drip_queue_id] if drip_queue_id else None,
-                **(metadata or {}),
-            }
-        )
+        payload = _compact({
+            FROM_FIELD: phone,
+            TO_FIELD: from_number,
+            MSG_FIELD: body,
+            DIR_FIELD: canonical_dir,
+            STATUS_FIELD: canonical_status,
+            SENT_AT_FIELD: utcnow_iso(),
+            TEXTGRID_ID_FIELD: sid,
+            CAMPAIGN_LINK_FIELD: [campaign_id] if campaign_id else None,
+            TEMPLATE_LINK_FIELD: [template_id] if template_id else None,
+            DRIP_QUEUE_LINK_FIELD: [drip_queue_id] if drip_queue_id else None,
+            **(metadata or {}),
+        })
+
+        # ✅ Always log a local copy first (guaranteed visibility)
+        safe_log_message("OUTBOUND", phone, from_number or "", body, status=canonical_status, sid=sid)
 
         if not convos:
-            # no Airtable → keep running without side-effects
             logger.info(f"[MOCK] Conversations ← {payload}")
             return "mock_convo"
 
@@ -387,12 +307,21 @@ class MessageProcessor:
             return rid
         except Exception as e:
             logger.error(f"Failed to create Conversations row: {e}", exc_info=True)
+            # 🔥 Failsafe fallback to datastore’s safe_create_conversation
+            safe_create_conversation({
+                "Seller Phone Number": phone,
+                "TextGrid Phone Number": from_number,
+                "Message": body,
+                "Direction": canonical_dir,
+                "Status": canonical_status,
+                "TextGrid ID": sid,
+                "Sent At": datetime.now(timezone.utc).isoformat(),
+            })
             return None
 
     # -----------------------------------------------------------
     @staticmethod
     def _update_lead_activity(leads_tbl: Any, lead_id: str, body: str, direction: str, *, property_id: Optional[str] = None):
-        """Safely update lead activity metrics."""
         now = utcnow_iso()
         canonical_dir = (
             ConversationDirection.OUTBOUND.value
@@ -401,17 +330,14 @@ class MessageProcessor:
             if direction.upper().startswith("IN")
             else direction
         )
-        patch = _compact(
-            {
-                LEAD_LAST_ACTIVITY_FIELD: now,
-                LEAD_LAST_MESSAGE_FIELD: body[:500] if body else "",
-                LEAD_LAST_DIRECTION_FIELD: canonical_dir,
-                LEAD_LAST_OUTBOUND_FIELD: now if canonical_dir == ConversationDirection.OUTBOUND.value else None,
-                LEAD_LAST_INBOUND_FIELD: now if canonical_dir == ConversationDirection.INBOUND.value else None,
-                LEAD_PROPERTY_ID_FIELD: property_id,
-            }
-        )
-
+        patch = _compact({
+            LEAD_LAST_ACTIVITY_FIELD: now,
+            LEAD_LAST_MESSAGE_FIELD: body[:500] if body else "",
+            LEAD_LAST_DIRECTION_FIELD: canonical_dir,
+            LEAD_LAST_OUTBOUND_FIELD: now if canonical_dir == ConversationDirection.OUTBOUND.value else None,
+            LEAD_LAST_INBOUND_FIELD: now if canonical_dir == ConversationDirection.INBOUND.value else None,
+            LEAD_PROPERTY_ID_FIELD: property_id,
+        })
         try:
             leads_tbl.update(lead_id, _remap_existing_only(leads_tbl, patch))
         except Exception as e:
@@ -420,7 +346,6 @@ class MessageProcessor:
     # -----------------------------------------------------------
     @staticmethod
     def _safe_retry(convo_id: Optional[str], error: str):
-        """Retry handler wrapper."""
         if not convo_id:
             return
         try:
