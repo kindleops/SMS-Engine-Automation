@@ -220,7 +220,7 @@ def _campaign_status_map(ids: List[str]) -> Dict[str, str]:
     for i in range(0, len(ids), 90):
         chunk = ids[i:i+90]
         formula = "OR(" + ",".join([f"RECORD_ID()='{rid}'" for rid in chunk]) + ")"
-        for r in camp_tbl.all(filterByFormula=formula):
+        for r in camp_tbl.all(formula=formula):
             f = r.get("fields", {}) or {}
             out[r["id"]] = str(f.get("Status", "")).strip().lower()
     return out
@@ -293,13 +293,13 @@ def _pick_number_for_market(market: Optional[str]) -> Optional[str]:
     try:
         # Prefer market match
         if market:
-            recs = tbl.all(filterByFormula=f"LOWER({{Market}}) = '{str(market).strip().lower()}'")
+            recs = tbl.all(formula=f"LOWER({{Market}}) = '{str(market).strip().lower()}'")
             did = _first_or_none(recs)
             if did:
                 return did
 
         # Fallback: any active
-        recs = tbl.all(filterByFormula="OR({Active} = 1, LOWER({Status}) = 'active')")
+        recs = tbl.all(formula="OR({Active} = 1, LOWER({Status}) = 'active')")
         return _first_or_none(recs)
     except Exception as e:  # pragma: no cover
         log.warning(f"Number pick failed: {e}")
@@ -340,7 +340,7 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
         formula = f"AND({formula}, SEARCH('{campaign_id}', ARRAYJOIN({{{campaign_link_key}}}))>0)"
 
     try:
-        rows = drip_tbl.all(filterByFormula=formula)
+        rows = drip_tbl.all(formula=formula)
     except Exception as e:
         log.warning(f"filterByFormula fallback due to: {e}")
         try:
