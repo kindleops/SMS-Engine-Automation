@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 # -----------------------------
 from sms.airtable_schema import (
     CONVERSATIONS_TABLE,
+    MESSAGES_TABLE,
     LEADS_TABLE,
     CAMPAIGNS_TABLE,
     TEMPLATES_TABLE,
@@ -46,6 +47,7 @@ from sms.airtable_schema import (
     devops_integrations_field_map,
     devops_health_checks_field_map,
     devops_metrics_field_map,
+    messages_field_map,
 )
 
 # -----------------------------
@@ -134,6 +136,8 @@ MARKET_FIELD_MAP = markets_field_map()
 LOG_FIELDS = LOGS_TABLE.field_names()
 LOG_FIELD_MAP = logs_field_map()
 
+MESSAGES_FIELDS = MESSAGES_TABLE.field_names()
+MESSAGES_FIELD_MAP = messages_field_map()
 KPI_FIELDS = KPIS_TABLE_DEF.field_names()
 KPI_FIELD_MAP = kpi_field_map()
 
@@ -217,6 +221,7 @@ class Settings:
     OPTOUTS_TABLE: str
     MARKETS_TABLE: str
     LOGS_TABLE: str
+    MESSAGES_TABLE: str
     KPIS_TABLE: str
     DEVOPS_SERVICES_TABLE: str
     DEVOPS_DEPLOYMENTS_TABLE: str
@@ -263,6 +268,7 @@ def settings() -> Settings:
         OPTOUTS_TABLE="Opt-Outs",
         MARKETS_TABLE="Markets",
         LOGS_TABLE="Logs",
+        MESSAGES_TABLE="Conversation Messages",
         KPIS_TABLE="KPIs",
         DEVOPS_SERVICES_TABLE="Services",
         DEVOPS_DEPLOYMENTS_TABLE="Deployments",
@@ -364,3 +370,8 @@ def table_perf(table_name: str):
 @lru_cache(maxsize=None)
 def drip_queue():
     return table_main(settings().DRIP_QUEUE_TABLE)
+
+
+@lru_cache(maxsize=None)
+def messages_table():
+    return table_main(settings().MESSAGES_TABLE)
