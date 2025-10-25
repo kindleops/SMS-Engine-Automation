@@ -218,7 +218,7 @@ def _drip_table(): return CONNECTOR.drip_queue().table
 def _fetch_due_campaigns() -> List[Dict[str, Any]]:
     tbl = _campaigns_table()
     try:
-        recs = tbl.all(page_size=200)
+        recs = tbl.all(page_size=100)
     except Exception as e:
         log.error(f"❌ Failed to fetch campaigns: {e}")
         return []
