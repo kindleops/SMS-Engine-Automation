@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional, Dict, Any
@@ -99,10 +100,31 @@ def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
 
 
 # -----------------------------
+# SMS / TextGrid settings
+# -----------------------------
+E164_RE = re.compile(r"^\+[1-9]\d{9,14}$")
+
+TEXTGRID_ACCOUNT_SID = env_str("TEXTGRID_ACCOUNT_SID") or env_str("ACCOUNT_SID")
+TEXTGRID_AUTH_TOKEN = env_str("TEXTGRID_AUTH_TOKEN") or env_str("AUTH_TOKEN")
+DEFAULT_FROM_NUMBER = (
+    env_str("TEXTGRID_DEFAULT_FROM_NUMBER")
+    or env_str("TEXTGRID_DEFAULT_FROM")
+    or env_str("DEFAULT_FROM_NUMBER")
+)
+MESSAGING_SERVICE_SID = env_str("TEXTGRID_MESSAGING_SERVICE_SID") or env_str("MESSAGING_SERVICE_SID")
+
+
+# -----------------------------
 # Static Field Maps
 # -----------------------------
 CONVERSATIONS_FIELDS = CONVERSATIONS_TABLE.field_names()
 CONV_FIELDS = conversations_field_map()
+
+CONV_STATUS_FIELD = CONVERSATIONS_TABLE.field_name("STATUS")
+CONV_STAGE_FIELD = CONVERSATIONS_TABLE.field_name("STAGE")
+CONV_AI_INTENT_FIELD = CONVERSATIONS_TABLE.field_name("AI_INTENT")
+CONV_LEAD_FIELD = CONVERSATIONS_TABLE.field_name("LEAD_LINK")
+CONV_PROSPECT_FIELD = CONVERSATIONS_TABLE.field_name("PROSPECT_LINK")
 
 LEADS_FIELDS = LEADS_TABLE.field_names()
 LEAD_FIELDS = leads_field_map()
@@ -195,6 +217,10 @@ PHONE_FIELDS = [
     "Phone 2 (from Linked Owner)",
     "Phone 3 (from Linked Owner)",
 ]
+
+
+MSG_TABLE_NAME = env_str("MSG_TABLE_NAME")
+RUNS_TABLE_NAME = env_str("RUNS_TABLE_NAME", "Logs")
 
 
 # -----------------------------
