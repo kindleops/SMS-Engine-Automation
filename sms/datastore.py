@@ -9,11 +9,21 @@ import time
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass, field as dataclass_field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from sms.runtime import get_logger, iso_now, last_10_digits, normalize_phone, retry
+from sms.config import (
+    CONV_STATUS_FIELD,
+    CONV_STAGE_FIELD,
+    CONV_AI_INTENT_FIELD,
+    CONV_LEAD_FIELD,
+    CONV_PROSPECT_FIELD,
+    MSG_TABLE_NAME,
+    RUNS_TABLE_NAME,
+)
 from sms.airtable_schema import (
     CAMPAIGNS_TABLE,
     CONVERSATIONS_TABLE,
@@ -276,6 +286,24 @@ class DataConnector:
             setattr(handle, "_performance_verified", True)
         return handle
 
+    def performance_logs(self) -> Optional[TableHandle]:
+        table_name = RUNS_TABLE_NAME
+        if not table_name:
+            return None
+        base = _first_non_empty("PERFORMANCE_BASE", "AIRTABLE_PERFORMANCE_BASE_ID")
+        if not base and os.getenv("SMS_FORCE_IN_MEMORY", "").lower() not in {"1", "true", "yes"}:
+            return None
+        return self._table(base, table_name)
+
+    def message_logs(self) -> Optional[TableHandle]:
+        table_name = MSG_TABLE_NAME
+        if not table_name:
+            return None
+        base = _first_non_empty("LEADS_CONVOS_BASE", "AIRTABLE_LEADS_CONVOS_BASE_ID")
+        if not base and os.getenv("SMS_FORCE_IN_MEMORY", "").lower() not in {"1", "true", "yes"}:
+            return None
+        return self._table(base, table_name)
+
     def numbers(self):
         return self._table(_first_non_empty("CAMPAIGN_CONTROL_BASE", "AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"), NUMBERS_TABLE_DEF.name())
 
@@ -290,6 +318,32 @@ CONNECTOR = DataConnector()
 
 def _compact(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in (payload or {}).items() if v not in (None, "", [], {}, ())}
+
+
+_FIELD_ALIASES: Dict[str, str] = {
+    "status": CONV_STATUS_FIELD,
+    "stage": CONV_STAGE_FIELD,
+    "ai_intent": CONV_AI_INTENT_FIELD,
+    "lead_id": CONV_LEAD_FIELD,
+    "prospect_id": CONV_PROSPECT_FIELD,
+}
+
+_LINK_FIELD_TARGETS = {CONV_LEAD_FIELD, CONV_PROSPECT_FIELD}
+
+
+def _normalize_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key, value in (payload or {}).items():
+        target = _FIELD_ALIASES.get(key, key)
+        if target in _LINK_FIELD_TARGETS:
+            if value is None:
+                value = []
+            elif isinstance(value, str):
+                value = [value]
+            elif isinstance(value, dict) and "id" in value:
+                value = [value["id"]]
+        normalized[target] = value
+    return normalized
 
 
 def _auto_field_map(handle: TableHandle) -> Dict[str, str]:
@@ -420,8 +474,8 @@ def _safe_update(handle: TableHandle, record_id: str, fields: Dict[str, Any]) ->
 # ============================================================
 
 
-class Repository:
-    """High-level helpers for schema-aware Airtable interactions."""
+    body = _compact(_normalize_fields(fields))
+    body = _compact(_normalize_fields(fields))
 
     def __init__(self) -> None:
         self._conversation_index: Dict[str, str] = {}
@@ -590,3 +644,39 @@ def update_record(handle: TableHandle, record_id: str, fields: Dict[str, Any]):
 
 def list_records(handle: TableHandle, **kwargs):
     return _safe_all(handle, **kwargs)
+def create_record(handle: TableHandle, fields: Dict[str, Any]):
+    return _safe_create(handle, fields)
+
+
+
+
+def log_message(
+    *,
+    conversation_id: str,
+    direction: str,
+    to_phone: str,
+    from_phone: str,
+    body: str,
+    status: str,
+    provider_sid: Optional[str] = None,
+    provider_error: Optional[str] = None,
+    timestamp: Optional[datetime] = None,
+):
+    handle = CONNECTOR.message_logs()
+    if not handle:
+        logger.warning("[message_logs] Table handle missing; message not persisted.")
+        return None
+
+    ts = (timestamp or datetime.now(timezone.utc)).isoformat()
+    fields = {
+        "Conversation": [conversation_id] if conversation_id else [],
+        "Direction": direction,
+        "To": to_phone,
+        "From": from_phone,
+        "Body": body or "",
+        "Message Status": status,
+        "Provider SID": provider_sid or "",
+        "Provider Error": provider_error or "",
+        "Timestamp": ts,
+    }
+    return create_record(handle, fields)

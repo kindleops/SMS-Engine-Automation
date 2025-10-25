@@ -104,6 +104,12 @@ def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
 CONVERSATIONS_FIELDS = CONVERSATIONS_TABLE.field_names()
 CONV_FIELDS = conversations_field_map()
 
+CONV_STATUS_FIELD = CONVERSATIONS_TABLE.field_name("STATUS")
+CONV_STAGE_FIELD = CONVERSATIONS_TABLE.field_name("STAGE")
+CONV_AI_INTENT_FIELD = CONVERSATIONS_TABLE.field_name("AI_INTENT")
+CONV_LEAD_FIELD = CONVERSATIONS_TABLE.field_name("LEAD_LINK")
+CONV_PROSPECT_FIELD = CONVERSATIONS_TABLE.field_name("PROSPECT_LINK")
+
 LEADS_FIELDS = LEADS_TABLE.field_names()
 LEAD_FIELDS = leads_field_map()
 
@@ -195,6 +201,10 @@ PHONE_FIELDS = [
     "Phone 2 (from Linked Owner)",
     "Phone 3 (from Linked Owner)",
 ]
+
+
+MSG_TABLE_NAME = env_str("MSG_TABLE_NAME")
+RUNS_TABLE_NAME = env_str("RUNS_TABLE_NAME", "Logs")
 
 
 # -----------------------------
