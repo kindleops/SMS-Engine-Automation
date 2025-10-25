@@ -87,6 +87,7 @@ except Exception:
 LEADS_BASE_ENV = "LEADS_CONVOS_BASE"
 DRIP_TABLE_NAME = os.getenv("DRIP_QUEUE_TABLE", "Drip Queue")
 NUMBERS_TABLE_NAME = os.getenv("NUMBERS_TABLE", "Numbers")
+CAMPAIGNS_TABLE_NAME = os.getenv("CAMPAIGNS_TABLE", "Campaigns")
 
 SLEEP_BETWEEN_SENDS_SEC = float(os.getenv("SLEEP_BETWEEN_SENDS_SEC", "0.03"))
 REQUEUE_SOFT_ERROR_SECONDS = float(os.getenv("REQUEUE_SOFT_ERROR_SECONDS", "3600"))
@@ -103,15 +104,32 @@ def utcnow() -> datetime:
 def _iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat()
 
-def _parse_dt(val: Any, fallback: datetime) -> datetime:
+def _parse_dt(val: Any) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
     except Exception:
-        return fallback
+        return None
 
 _PHONE_RE = re.compile(r"^\+1\d{10}$")
-def _valid_us_e164(s: Optional[str]) -> bool:
-    return bool(s and _PHONE_RE.match(s))
+
+def _to_e164(phone: Optional[str]) -> Optional[str]:
+    if not phone:
+        return None
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    if _PHONE_RE.match(phone):
+        return phone
+    return None
+
+def _valid_us_e164(phone: Optional[str]) -> bool:
+    """Validate that phone is in valid US E.164 format (+1XXXXXXXXXX)."""
+    if not phone:
+        return False
+    normalized = _to_e164(phone)
+    return normalized is not None and _PHONE_RE.match(normalized) is not None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Airtable thin wrappers (no circulars)
@@ -137,9 +155,9 @@ def get_table(base_env_name: str, table_name: str):
         log.error("AIRTABLE_API_KEY missing")
         return None
 
-    base_id = _env(base_env_name)
+    base_id = _env(base_env_name) or _env("AIRTABLE_LEADS_CONVOS_BASE_ID")
     if not base_id:
-        log.error(f"{base_env_name} missing")
+        log.error(f"{base_env_name} (or AIRTABLE_LEADS_CONVOS_BASE_ID) missing")
         return None
 
     try:
@@ -151,20 +169,19 @@ def get_table(base_env_name: str, table_name: str):
 def _safe_update(tbl, rid: str, payload: Dict[str, Any]) -> None:
     """
     Only allow updates to known DRIP fields. Avoids 422 from unknown fields.
+    Uses *mapped* field names for the whitelist.
     """
     try:
-        allow_keys = {
-            k
-            for k in ["STATUS", "NEXT_SEND_DATE", "SENT_AT", "LAST_ERROR", "FROM_NUMBER", "UI"]
-            if k in DRIP_FIELDS
-        }
+        allowed_keys = ["STATUS", "NEXT_SEND_DATE", "SENT_AT", "LAST_ERROR", "FROM_NUMBER", "UI"]
+        allowed_fields = {DRIP_FIELDS.get(k, k) for k in allowed_keys}
 
         status_field = DRIP_STATUS_F
         ui_field = DRIP_UI_F
+
         clean: Dict[str, Any] = {}
         for key, value in payload.items():
-            mapped = DRIP_FIELDS.get(key, key)
-            if key in allow_keys or mapped in {status_field, ui_field}:
+            mapped = DRIP_FIELDS.get(key, key)  # map logical -> Airtable
+            if mapped in allowed_fields or mapped in {status_field, ui_field}:
                 if mapped == status_field and isinstance(value, (str, type(None))):
                     value = _sanitize_status(value)
                 clean[mapped] = value
@@ -182,6 +199,24 @@ def _safe_update(tbl, rid: str, payload: Dict[str, Any]) -> None:
                     raise
     except Exception as e:
         log.warning(f"⚠️ Update failed: {e}", exc_info=True)
+
+# --- Campaign status lookup (used to skip paused/completed) ---
+# (Module scope; not nested in _safe_update)
+def _campaign_status_map(ids: List[str]) -> Dict[str, str]:
+    if not ids:
+        return {}
+    camp_tbl = get_table(LEADS_BASE_ENV, CAMPAIGNS_TABLE_NAME)
+    if not camp_tbl:
+        return {}
+    out: Dict[str, str] = {}
+    # chunk to ≤90 ids for Airtable OR() formula
+    for i in range(0, len(ids), 90):
+        chunk = ids[i:i+90]
+        formula = "OR(" + ",".join([f"RECORD_ID()='{rid}'" for rid in chunk]) + ")"
+        for r in camp_tbl.all(filterByFormula=formula):
+            f = r.get("fields", {}) or {}
+            out[r["id"]] = str(f.get("Status", "")).strip().lower()
+    return out
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Rate limiter (per-DID + global) using DispatchPolicy caps
@@ -282,12 +317,30 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
         log_run("OUTBOUND_BATCH", processed=0, breakdown={"quiet_hours": True})
         return {"ok": True, "quiet_hours": True, "total_sent": 0}
 
-    # Read queue
+    # Read queue (server-side filtered where possible)
+    status_field = DRIP_STATUS_F
+    next_send_date_key = DRIP_FIELDS.get("NEXT_SEND_DATE", "Next Send Date")
+    campaign_link_key = DRIP_FIELDS.get("CAMPAIGN_LINK", "Campaign")
+
+    formula = (
+        f"AND("
+        f"OR({{{status_field}}}='Queued',{{{status_field}}}='Sending'),"
+        f"DATETIME_DIFF(NOW(),{{{next_send_date_key}}},'seconds')>=0"
+        f")"
+    )
+    if campaign_id:
+        # Campaign is a linked-record array; ARRAYJOIN + SEARCH works well
+        formula = f"AND({formula}, SEARCH('{campaign_id}', ARRAYJOIN({{{campaign_link_key}}}))>0)"
+
     try:
-        rows = drip_tbl.all()
+        rows = drip_tbl.all(filterByFormula=formula)
     except Exception as e:
-        log.error(f"Failed to read Drip Queue: {e}", exc_info=True)
-        return {"ok": False, "error": "read_failed", "total_sent": 0}
+        log.warning(f"filterByFormula fallback due to: {e}")
+        try:
+            rows = drip_tbl.all()
+        except Exception as e2:
+            log.error(f"Failed to read Drip Queue: {e2}", exc_info=True)
+            return {"ok": False, "error": "read_failed", "total_sent": 0}
 
     now = utcnow()
 
@@ -310,7 +363,7 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
         status = _sanitize_status(str(f.get(status_key, "")).strip())
         if status not in {"Queued", "Sending"}:
             continue
-        due_at = _parse_dt(f.get(next_send_date_key), now)
+        due_at = _parse_dt(f.get(next_send_date_key)) or now
         if due_at <= now:
             if campaign_id:
                 links = f.get(campaign_link_key) or []
@@ -323,25 +376,29 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
         return {"ok": True, "total_sent": 0, "note": "no_due_messages"}
 
     # Order oldest first, respect limit
-    due = sorted(due, key=lambda x: _parse_dt(x.get("fields", {}).get(next_send_date_key), now))[: max(1, int(limit))]
+    due = sorted(due, key=lambda x: _parse_dt(x.get("fields", {}).get(next_send_date_key)) or now)[: max(1, int(limit))]
 
     limiter = build_limiter()
     total_sent = 0
     total_failed = 0
     errors: List[str] = []
+    SUPPRESS_DUPLICATE_PHONES = os.getenv("SUPPRESS_DUPLICATE_PHONES", "true").lower() in {"1","true","yes"}
+    seen = set()
 
     for r in due:
         rid = r.get("id")
         f = r.get("fields", {}) or {}
 
-        phone = (f.get(seller_phone_key) or "").strip()
-        did = (f.get(from_number_key) or "").strip()
+        phone_raw = (f.get(seller_phone_key) or "").strip()
+        phone = _to_e164(phone_raw)
+        did_raw = (f.get(from_number_key) or "").strip()
+        did = _to_e164(did_raw) if did_raw else ""
         market = f.get(market_key)
         body = (f.get(message_preview_key) or "").strip()
         property_id = f.get(property_id_key)
 
         # Validate phone
-        if not _valid_us_e164(phone):
+        if not phone:
             _safe_update(
                 drip_tbl,
                 rid,
@@ -369,10 +426,27 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
             )
             total_failed += 1
             continue
+        if SUPPRESS_DUPLICATE_PHONES:
+            key = (phone, str(property_id or ""))
+            if key in seen:
+                _safe_update(
+                    drip_tbl,
+                    rid,
+                    {
+                        "STATUS": "Queued",
+                        "UI": "⏳",
+                        "LAST_ERROR": "duplicate_suppressed",
+                        "NEXT_SEND_DATE": _iso(now + timedelta(hours=24)),
+                    },
+                )
+                total_failed += 1
+                continue
+            seen.add(key)
 
         # Ensure DID
         if not did and AUTO_BACKFILL_FROM_NUMBER:
             did = _pick_number_for_market(market)
+            did = _to_e164(did) if did else None
             if did:
                 _safe_update(drip_tbl, rid, {"FROM_NUMBER": did})
 
