@@ -135,7 +135,7 @@ def _robust_create_drip(tbl, payload: Dict[str, Any], dryrun=False) -> bool:
 def _queue_one_campaign(camp: Dict, limit: int, dryrun=False) -> int:
     cf = camp.get("fields", {}) or {}
     cid = camp.get("id")
-    cname = cf.get("Name") or "Unnamed Campaign"
+    cname = cf.get("Campaign Name") or "Unnamed Campaign"
     log.info(f"➡️ Queuing campaign: {cname}")
 
     drip_tbl = CONNECTOR.drip_queue().table
