@@ -47,20 +47,27 @@ PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
 LEAD_PHONE_FIELD = os.getenv("LEAD_PHONE_FIELD", "phone")
 
 # === FIELD MAPPINGS ===
-FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
-TO_FIELD = os.getenv("CONV_TO_FIELD", "to_number")
-MSG_FIELD = os.getenv("CONV_MESSAGE_FIELD", "message")
-STATUS_FIELD = os.getenv("CONV_STATUS_FIELD", "status")
-DIR_FIELD = os.getenv("CONV_DIRECTION_FIELD", "direction")
-TG_ID_FIELD = os.getenv("CONV_TEXTGRID_ID_FIELD", "TextGrid ID")
-RECEIVED_AT = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
-SENT_AT = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
-PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
+from sms.airtable_schema import conversations_field_map
+
+# Get the proper field mappings for Conversations table
+CONV_FIELDS = conversations_field_map()
+
+FROM_FIELD = CONV_FIELDS["FROM"]
+TO_FIELD = CONV_FIELDS["TO"]
+MSG_FIELD = CONV_FIELDS["BODY"]
+STATUS_FIELD = CONV_FIELDS["STATUS"]
+DIR_FIELD = CONV_FIELDS["DIRECTION"]
+TG_ID_FIELD = CONV_FIELDS["TEXTGRID_ID"]
+RECEIVED_AT = CONV_FIELDS["RECEIVED_AT"]
+SENT_AT = CONV_FIELDS["SENT_AT"]
+PROCESSED_BY = CONV_FIELDS["PROCESSED_BY"]
+STAGE_FIELD = CONV_FIELDS["STAGE"]
+INTENT_FIELD = CONV_FIELDS["INTENT"]
+AI_INTENT_FIELD = CONV_FIELDS["AI_INTENT"]
+
+# Legacy env var support for link fields
 LEAD_LINK_FIELD = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")
 PROSPECT_LINK_FIELD = os.getenv("CONV_PROSPECT_LINK_FIELD", "Prospect")
-STAGE_FIELD = os.getenv("CONV_STAGE_FIELD", "Stage")
-INTENT_FIELD = os.getenv("CONV_INTENT_FIELD", "Intent Detected")
-AI_INTENT_FIELD = os.getenv("CONV_AI_INTENT_FIELD", "AI Intent")
 
 # === AIRTABLE CLIENTS ===
 convos = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
@@ -1009,19 +1016,46 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
 
 
 def log_conversation(payload: dict):
-    print(f"🔍 Attempting to log conversation: {payload.get('phone', 'unknown phone')}")
+    print(f"🔍 Attempting to log conversation: {payload.get('Seller Phone Number', 'unknown phone')}")
     
     if not convos:
         print(f"⚠️ Conversations table not initialized. AIRTABLE_API_KEY: {'SET' if AIRTABLE_API_KEY else 'NOT SET'}, BASE_ID: {'SET' if BASE_ID else 'NOT SET'}")
         return
     
+    # Filter payload to only include fields that exist in the table
+    # Based on our field check, these are the available fields:
+    valid_fields = {
+        "AI Response Trigger",
+        "Conversation ID", 
+        "Direction",
+        "Lead Record ID",
+        "Message",
+        "Message Summary (AI)",
+        "Processed By",
+        "Processed Time", 
+        "Received Time",
+        "Record ID",
+        "Response Time (Minutes)",
+        "Seller Phone Number",
+        "TextGrid ID",
+        "TextGrid Phone Number"
+    }
+    
+    # Create a filtered payload with only valid fields
+    filtered_payload = {}
+    for key, value in payload.items():
+        if key in valid_fields:
+            filtered_payload[key] = value
+        else:
+            print(f"⚠️ Skipping field '{key}' - not in Airtable schema")
+    
     try:
-        print(f"📝 Creating conversation record with {len(payload)} fields")
-        result = convos.create(payload)
+        print(f"📝 Creating conversation record with {len(filtered_payload)} valid fields: {list(filtered_payload.keys())}")
+        result = convos.create(filtered_payload)
         print(f"✅ Successfully logged conversation to Airtable: {result.get('id', 'unknown ID')}")
     except Exception as e:
         print(f"⚠️ Failed to log to Conversations: {e}")
-        print(f"🔍 Payload keys: {list(payload.keys())}")
+        print(f"🔍 Filtered payload keys: {list(filtered_payload.keys())}")
         traceback.print_exc()
 
 
@@ -1080,7 +1114,7 @@ def handle_inbound(payload: dict):
         TO_FIELD: to_number,
         MSG_FIELD: body,
         STATUS_FIELD: "UNPROCESSED",
-        DIR_FIELD: "IN",
+        DIR_FIELD: "INBOUND",  # Use "INBOUND" instead of "IN"
         TG_ID_FIELD: msg_id,
         RECEIVED_AT: iso_timestamp(),
     }
@@ -1147,7 +1181,7 @@ def process_optout(payload: dict):
         FROM_FIELD: from_number,
         MSG_FIELD: body,
         STATUS_FIELD: "OPT OUT",
-        DIR_FIELD: "IN",
+        DIR_FIELD: "INBOUND",  # Use "INBOUND" instead of "IN"
         TG_ID_FIELD: msg_id,
         RECEIVED_AT: iso_timestamp(),
         PROCESSED_BY: "OptOut Handler",
