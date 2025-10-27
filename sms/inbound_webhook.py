@@ -268,6 +268,30 @@ def _last10(value: Any) -> Optional[str]:
     return digits[-10:] if len(digits) >= 10 else None
 
 
+def normalize_e164(phone: str, field: str = "phone") -> str:
+    """Normalize phone number to E.164 format (+1XXXXXXXXXX)."""
+    if not phone:
+        return ""
+    
+    # Extract digits only
+    digits = _digits(phone)
+    
+    # If no digits, return original
+    if not digits:
+        return phone
+    
+    # If already has country code (11+ digits), assume it's correct
+    if len(digits) >= 11:
+        return f"+{digits}"
+    
+    # If 10 digits, assume US number and add +1
+    if len(digits) == 10:
+        return f"+1{digits}"
+    
+    # Otherwise return with + prefix
+    return f"+{digits}"
+
+
 def _first_existing_fields(tbl, candidates):
     try:
         probe = tbl.all(max_records=1) or []
