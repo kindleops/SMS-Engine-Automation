@@ -99,6 +99,86 @@ AUTO_BACKFILL_FROM_NUMBER = os.getenv("AUTO_BACKFILL_FROM_NUMBER", "true").lower
 # ──────────────────────────────────────────────────────────────────────────────
 # Utilities
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _safe_update_prospect_outbound(
+    prospects_tbl: Any,
+    prospect_id: Optional[str],
+    phone: str,
+    body: str,
+    textgrid_phone: str
+) -> None:
+    """Update prospect with outbound message data"""
+    if not prospects_tbl or not prospect_id:
+        return
+    
+    try:
+        from sms.runtime import iso_now
+        
+        # Get current prospect data
+        prospect = prospects_tbl.get(prospect_id)
+        if not prospect:
+            return
+            
+        fields = prospect.get("fields", {}) or {}
+        
+        # Build update payload
+        update_payload = {
+            "Last Outbound": iso_now(),
+            "Last Activity": iso_now(),
+            "Last Direction": "Outbound",
+            "TextGrid Phone Number": textgrid_phone,
+            "Last Message": body[:500] if body else "",
+        }
+        
+        # Update send count
+        current_sends = fields.get("Send Count", 0) or 0
+        update_payload["Send Count"] = current_sends + 1
+        
+        # Update status if currently unmessaged/queued
+        current_status = fields.get("Status", "")
+        if current_status in ("Unmessaged", "Queued", ""):
+            update_payload["Status"] = "Messaged"
+        
+        # Determine active phone slot
+        phone1 = fields.get("Phone 1 (from Linked Owner)") or fields.get("Phone 1")
+        phone2 = fields.get("Phone 2 (from Linked Owner)") or fields.get("Phone 2")
+        
+        from sms.runtime import last_10_digits
+        digits_used = last_10_digits(phone)
+        
+        if phone2 and last_10_digits(phone2) == digits_used:
+            update_payload["Last Tried Slot"] = "2"
+        else:
+            update_payload["Last Tried Slot"] = "1"
+        
+        prospects_tbl.update(prospect_id, update_payload)
+        log.debug(f"Updated prospect {prospect_id} with outbound data")
+        
+    except Exception as exc:
+        log.warning(f"Failed to update prospect {prospect_id}: {exc}")
+
+
+def _extract_prospect_id_from_drip(drip_record: Dict[str, Any]) -> Optional[str]:
+    """Extract prospect ID from drip queue record linking"""
+    if not drip_record:
+        return None
+    
+    fields = drip_record.get("fields", {}) or {}
+    
+    # Try linked prospect field first
+    prospect_link = fields.get("Prospect")
+    if prospect_link:
+        if isinstance(prospect_link, list) and prospect_link:
+            return prospect_link[0]
+        elif isinstance(prospect_link, str):
+            return prospect_link
+    
+    # Try prospect record ID field
+    prospect_id = fields.get("Prospect Record ID")
+    if prospect_id:
+        return prospect_id
+    
+    return None
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -316,6 +396,9 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
     drip_tbl = get_table(LEADS_BASE_ENV, DRIP_TABLE_NAME)
     if not drip_tbl:
         return {"ok": False, "error": "missing_drip_table", "total_sent": 0}
+    
+    # Get prospects table for updates
+    prospects_tbl = get_table(LEADS_BASE_ENV, "Prospects")
 
     # Quiet hours guard
     if is_quiet_hours_local():
@@ -537,6 +620,9 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
         _safe_update(drip_tbl, rid, {"STATUS": "Sending", "UI": "⏳"})
 
         delivered = False
+        # Extract prospect ID for updates
+        prospect_id = _extract_prospect_id_from_drip(rec)
+
         try:
             if MessageProcessor is None:
                 raise RuntimeError("no_sender_available")
@@ -585,6 +671,18 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
                 log_kpi("OUTBOUND_SENT", 1, campaign=campaign_id or "ALL")
             except Exception as kpi_exc:
                 log.warning(f"KPI logging skipped: {kpi_exc}")
+            
+            # Update prospect with outbound data
+            try:
+                _safe_update_prospect_outbound(
+                    prospects_tbl=prospects_tbl,
+                    prospect_id=prospect_id,
+                    phone=phone,
+                    body=body,
+                    textgrid_phone=did
+                )
+            except Exception as prospect_exc:
+                log.warning(f"Prospect update skipped: {prospect_exc}")
         else:
             total_failed += 1
             _safe_update(

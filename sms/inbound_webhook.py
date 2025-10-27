@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pyairtable import Table
 
 from sms.number_pools import increment_delivered, increment_failed, increment_opt_out
+from sms.airtable_schema import PROSPECT_FIELDS
 
 router = APIRouter()
 
@@ -92,6 +93,47 @@ TIMELINE_KEYWORDS = {"timeline", "move", "closing", "close"}
 STOP_WORDS = {"stop", "unsubscribe", "remove", "opt out", "quit"}
 
 _SEEN_MESSAGE_IDS: set[str] = set()
+
+# === PROSPECT FIELD MAPPING ===
+PROSPECT_FIELD_MAP = {
+    "SELLER_ASKING_PRICE": "Seller Asking Price",
+    "CONDITION_NOTES": "Condition Notes",
+    "TIMELINE_MOTIVATION": "Timeline / Motivation",
+    "LAST_INBOUND": "Last Inbound",
+    "LAST_OUTBOUND": "Last Outbound", 
+    "LAST_ACTIVITY": "Last Activity",
+    "OWNERSHIP_CONFIRMED_DATE": "Ownership Confirmation Date",
+    "LEAD_PROMOTION_DATE": "Lead Promotion Date",
+    "PHONE_1_VERIFIED": "Phone 1 Ownership Verified",
+    "PHONE_2_VERIFIED": "Phone 2 Ownership Verified", 
+    "INTENT_LAST_DETECTED": "Intent Last Detected",
+    "LAST_DIRECTION": "Last Direction",
+    "ACTIVE_PHONE_SLOT": "Active Phone Slot",
+    "LAST_TRIED_SLOT": "Last Tried Slot",
+    "TEXTGRID_PHONE": "TextGrid Phone Number",
+    "LAST_MESSAGE": "Last Message",
+    "REPLY_COUNT": "Reply Count",
+    "OPT_OUT": "Opt Out",
+    "SEND_COUNT": "Send Count",
+    "STAGE": "Stage",
+    "STATUS": "Status",
+}
+
+# Enhanced price regex for comprehensive price extraction
+PRICE_REGEX = re.compile(
+    r'\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)|(\d{1,4})\s*k(?:\s|$|[^\w])|(\d{1,4})k',
+    re.IGNORECASE
+)
+
+# Enhanced condition keywords
+ENHANCED_COND_WORDS = [
+    "repair", "fix", "renovation", "remodel", "update", "condition", "shape",
+    "needs work", "fixer upper", "handyman special", "as-is", "move-in ready",
+    "turnkey", "cosmetic", "structural", "foundation", "electrical", "plumbing",
+    "hvac", "roof", "flooring", "kitchen", "bathroom", "paint", "carpet",
+    "appliances", "windows", "siding", "landscaping", "pool", "deck", "garage",
+    "renovated", "updated", "new", "old", "vintage", "restored", "tenant"
+]
 
 
 def iso_timestamp() -> str:
@@ -210,6 +252,18 @@ def promote_prospect_to_lead(phone_number: str, source: str = "Inbound"):
             "Reply Count": 0,
             "Last Inbound": iso_timestamp(),
         })
+        
+        # Update prospect with lead promotion date
+        if prospects and prospect:
+            try:
+                prospects.update(prospect["id"], {
+                    PROSPECT_FIELD_MAP["LEAD_PROMOTION_DATE"]: iso_timestamp(),
+                    PROSPECT_FIELD_MAP["STATUS"]: "Promoted to Lead"
+                })
+                print(f"✅ Updated prospect {prospect['id']} with lead promotion date")
+            except Exception as e:
+                print(f"⚠️ Failed to update prospect with lead promotion: {e}")
+        
         print(f"✨ Promoted {phone_number} → Lead")
         return new_lead["id"], property_id
 
@@ -293,6 +347,468 @@ def _is_opt_out(body: str) -> bool:
     return any(token in body_lower for token in STOP_WORDS)
 
 
+# === COMPREHENSIVE PROSPECT DATA EXTRACTION ===
+def _extract_price_from_message(body: str) -> Optional[str]:
+    """Extract price information from message text with enhanced pattern matching"""
+    if not body:
+        return None
+    
+    text = body.lower()
+    
+    # Enhanced price patterns including more variations
+    # Pattern 1: Standard price formats ($250,000 or $250000)
+    standard_pattern = r'\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)'
+    
+    # Pattern 2: 'k' notation (250k, 250K)
+    k_pattern = r'(\d{1,4})\s*k(?:\s|$|[^\w])'
+    
+    # Pattern 3: Around/about patterns (around 250k, about $250,000)
+    around_pattern = r'(?:around|about|approximately|roughly)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*|\d{1,4}k)'
+    
+    # Try standard pattern first
+    standard_matches = re.findall(standard_pattern, text)
+    if standard_matches:
+        price = standard_matches[0].replace(',', '').strip()
+        # Validate reasonable price range (25k to 10M)
+        try:
+            price_val = float(price)
+            if 25000 <= price_val <= 10000000:
+                return price
+        except ValueError:
+            pass
+    
+    # Try 'k' notation
+    k_matches = re.findall(k_pattern, text)
+    if k_matches:
+        try:
+            k_value = float(k_matches[0])
+            if 25 <= k_value <= 10000:  # 25k to 10Mk
+                return str(int(k_value * 1000))
+        except ValueError:
+            pass
+    
+    # Try around/about patterns
+    around_matches = re.findall(around_pattern, text)
+    if around_matches:
+        price_text = around_matches[0].replace('$', '').replace(',', '').strip()
+        if price_text.endswith('k'):
+            try:
+                k_value = float(price_text[:-1])
+                if 25 <= k_value <= 10000:
+                    return str(int(k_value * 1000))
+            except ValueError:
+                pass
+        else:
+            try:
+                price_val = float(price_text)
+                if 25000 <= price_val <= 10000000:
+                    return price_text
+            except ValueError:
+                pass
+    
+    # Fallback to original PRICE_REGEX
+    price_matches = PRICE_REGEX.findall(text)
+    if price_matches:
+        for match in price_matches:
+            if match[0]:  # Full price format
+                return match[0].replace(',', '').strip()
+            elif match[1] or match[2]:  # 'k' format
+                k_value = (match[1] or match[2]).replace('k', '').strip()
+                try:
+                    return str(int(float(k_value)) * 1000)
+                except ValueError:
+                    continue
+    
+    return None
+
+
+def _extract_condition_info(body: str) -> Optional[str]:
+    """Extract condition information from message text with enhanced analysis"""
+    if not body:
+        return None
+    
+    text = body.lower()
+    condition_indicators = []
+    
+    # Check for condition-related keywords with enhanced context
+    for word in ENHANCED_COND_WORDS:
+        if word in text:
+            # Extract surrounding context (up to 15 words around the keyword)
+            words = body.split()
+            for i, w in enumerate(words):
+                if word in w.lower():
+                    start = max(0, i - 7)
+                    end = min(len(words), i + 8)
+                    context = ' '.join(words[start:end])
+                    condition_indicators.append(context.strip())
+                    break
+    
+    # Look for specific condition patterns
+    # Pattern for "needs X" statements
+    needs_pattern = r'needs?\s+(?:a\s+)?(?:new\s+)?(\w+(?:\s+\w+){0,2})'
+    needs_matches = re.findall(needs_pattern, text)
+    for match in needs_matches:
+        condition_indicators.append(f"needs {match}")
+    
+    # Pattern for "X is/are Y" statements about condition
+    condition_statement_pattern = r'(roof|foundation|kitchen|bathroom|flooring|hvac|plumbing|electrical|windows)\s+(?:is|are)\s+(\w+(?:\s+\w+){0,2})'
+    condition_matches = re.findall(condition_statement_pattern, text)
+    for item, condition in condition_matches:
+        condition_indicators.append(f"{item} is {condition}")
+    
+    # Remove duplicates while preserving order
+    unique_indicators = []
+    for indicator in condition_indicators:
+        if indicator not in unique_indicators:
+            unique_indicators.append(indicator)
+    
+    return '; '.join(unique_indicators[:3]) if unique_indicators else None  # Limit to top 3 most relevant
+
+
+def _extract_timeline_motivation(body: str) -> Optional[str]:
+    """Extract timeline and motivation information from message text with enhanced patterns"""
+    if not body:
+        return None
+    
+    text = body.lower()
+    
+    # Enhanced timeline and motivation keywords
+    timeline_words = {
+        "urgent", "asap", "soon", "immediately", "quickly", "fast", "rush",
+        "month", "months", "week", "weeks", "year", "years", "day", "days",
+        "deadline", "date", "timeline", "schedule", "time frame",
+        "move", "moving", "relocate", "relocating", "relocation",
+        "divorce", "divorcing", "separated", "separation",
+        "financial", "finances", "money", "cash", "debt", "bills", "mortgage",
+        "foreclosure", "foreclosing", "behind", "payments",
+        "inheritance", "inherited", "estate", "probate",
+        "job", "work", "employment", "transfer", "promotion",
+        "health", "medical", "illness", "sick", "hospital",
+        "family", "children", "kids", "school", "education",
+        "retirement", "retiring", "downsize", "downsizing",
+        "upgrade", "upgrading", "bigger", "smaller", "expand"
+    }
+    
+    timeline_indicators = []
+    
+    # Check for timeline/motivation keywords with enhanced context
+    for word in timeline_words:
+        if word in text:
+            words = body.split()
+            for i, w in enumerate(words):
+                if word in w.lower():
+                    start = max(0, i - 6)
+                    end = min(len(words), i + 7)
+                    context = ' '.join(words[start:end])
+                    timeline_indicators.append(context.strip())
+                    break
+    
+    # Look for specific timeline patterns
+    # Pattern for "need to sell by/before X"
+    deadline_pattern = r'(?:need|have|must)\s+to\s+sell\s+(?:by|before|within)\s+(\w+(?:\s+\w+){0,3})'
+    deadline_matches = re.findall(deadline_pattern, text)
+    for match in deadline_matches:
+        timeline_indicators.append(f"deadline: {match}")
+    
+    # Pattern for "because of X" motivation
+    motivation_pattern = r'because\s+(?:of\s+)?(\w+(?:\s+\w+){0,4})'
+    motivation_matches = re.findall(motivation_pattern, text)
+    for match in motivation_matches:
+        timeline_indicators.append(f"motivation: {match}")
+    
+    # Pattern for "due to X" motivation
+    due_to_pattern = r'due\s+to\s+(\w+(?:\s+\w+){0,4})'
+    due_to_matches = re.findall(due_to_pattern, text)
+    for match in due_to_matches:
+        timeline_indicators.append(f"due to: {match}")
+    
+    # Pattern for time expressions (in X months, within X weeks)
+    time_expression_pattern = r'(?:in|within|by)\s+(\d+\s+(?:day|week|month|year)s?)'
+    time_matches = re.findall(time_expression_pattern, text)
+    for match in time_matches:
+        timeline_indicators.append(f"timeframe: {match}")
+    
+    # Remove duplicates while preserving order
+    unique_indicators = []
+    for indicator in timeline_indicators:
+        if indicator not in unique_indicators:
+            unique_indicators.append(indicator)
+    
+    return '; '.join(unique_indicators[:3]) if unique_indicators else None  # Limit to top 3 most relevant
+
+
+def _determine_active_phone_slot(prospect_record: Optional[Dict[str, Any]], used_phone: str) -> str:
+    """Determine which phone slot (1 or 2) is active based on the phone used"""
+    if not prospect_record:
+        return "1"  # Default to slot 1
+    
+    fields = prospect_record.get("fields", {}) or {}
+    phone1 = fields.get("Phone 1 (from Linked Owner)") or fields.get("Phone 1")
+    phone2 = fields.get("Phone 2 (from Linked Owner)") or fields.get("Phone 2") 
+    
+    digits_used = _last10(used_phone)
+    
+    if phone2 and _last10(phone2) == digits_used:
+        return "2"
+    return "1"
+
+
+def _assess_urgency_level(message: str, intent: str) -> int:
+    """Assess urgency level from 1-5 based on message content and intent"""
+    text = message.lower()
+    urgency = 1
+    
+    # Intent-based urgency
+    if intent.lower() == "positive":
+        urgency += 1
+    
+    # Keyword-based urgency
+    high_urgency_words = ['urgent', 'asap', 'quickly', 'soon', 'deadline', 'foreclosure', 'emergency']
+    medium_urgency_words = ['need to sell', 'moving', 'relocating', 'divorce', 'financial']
+    
+    if any(word in text for word in high_urgency_words):
+        urgency += 2
+    elif any(word in text for word in medium_urgency_words):
+        urgency += 1
+    
+    return min(urgency, 5)
+
+
+def _calculate_lead_quality_score(
+    intent: str, 
+    ai_intent: str, 
+    price: Optional[str], 
+    condition: Optional[str], 
+    timeline: Optional[str], 
+    urgency: int
+) -> int:
+    """Calculate overall lead quality score from 1-100"""
+    score = 20  # baseline
+    
+    # Intent scoring
+    if intent.lower() == "positive":
+        score += 25
+    if ai_intent in ["interest_detected", "ask_price", "offer_discussion"]:
+        score += 20
+    
+    # Data completeness scoring
+    if price:
+        score += 15
+    if condition:
+        score += 10
+    if timeline:
+        score += 10
+    
+    # Urgency scoring
+    score += urgency * 4
+    
+    return min(score, 100)
+
+
+# === COMPREHENSIVE PROSPECT UPDATES ===
+def update_prospect_comprehensive(
+    phone_number: str,
+    body: str,
+    intent: str,
+    ai_intent: str,
+    stage: str,
+    direction: str = "IN",
+    to_number: Optional[str] = None
+) -> None:
+    """Comprehensive prospect update with all required fields for inbound messages"""
+    if not prospects or not phone_number:
+        return
+    
+    try:
+        # Find the prospect record
+        prospect_record = _find_by_phone_last10(prospects, phone_number)
+        if not prospect_record:
+            print(f"⚠️ No prospect found for phone {phone_number}")
+            return
+        
+        prospect_id = prospect_record["id"]
+        prospect_fields = prospect_record.get("fields", {}) or {}
+        now_iso = iso_timestamp()
+        
+        # Build comprehensive update payload
+        update_payload = {}
+        
+        # Extract conversation data with enhanced analysis
+        extracted_price = _extract_price_from_message(body)
+        condition_info = _extract_condition_info(body)
+        timeline_motivation = _extract_timeline_motivation(body)
+        urgency_level = _assess_urgency_level(body, intent)
+        
+        # Seller Asking Price (if found in conversation)
+        if extracted_price and intent.lower() == "positive":
+            update_payload[PROSPECT_FIELD_MAP["SELLER_ASKING_PRICE"]] = extracted_price
+        
+        # Condition Notes (accumulate from conversations with enhanced analysis)
+        if condition_info:
+            existing_conditions = prospect_fields.get(PROSPECT_FIELD_MAP["CONDITION_NOTES"], "")
+            if existing_conditions:
+                # Avoid duplicating similar condition information
+                if condition_info.lower() not in existing_conditions.lower():
+                    update_payload[PROSPECT_FIELD_MAP["CONDITION_NOTES"]] = f"{existing_conditions}; {condition_info}"
+            else:
+                update_payload[PROSPECT_FIELD_MAP["CONDITION_NOTES"]] = condition_info
+        
+        # Timeline / Motivation (accumulate from conversations with priority)
+        if timeline_motivation:
+            existing_timeline = prospect_fields.get(PROSPECT_FIELD_MAP["TIMELINE_MOTIVATION"], "")
+            if existing_timeline:
+                # Prioritize more urgent or specific timeline information
+                if urgency_level > _assess_urgency_level(existing_timeline, "neutral"):
+                    update_payload[PROSPECT_FIELD_MAP["TIMELINE_MOTIVATION"]] = f"{timeline_motivation}; {existing_timeline}"
+                elif timeline_motivation.lower() not in existing_timeline.lower():
+                    update_payload[PROSPECT_FIELD_MAP["TIMELINE_MOTIVATION"]] = f"{existing_timeline}; {timeline_motivation}"
+            else:
+                update_payload[PROSPECT_FIELD_MAP["TIMELINE_MOTIVATION"]] = timeline_motivation
+        
+        # Activity timestamps with enhanced tracking
+        if direction.upper() in ("IN", "INBOUND"):
+            update_payload[PROSPECT_FIELD_MAP["LAST_INBOUND"]] = now_iso
+            # Increment reply count
+            current_replies = prospect_fields.get(PROSPECT_FIELD_MAP["REPLY_COUNT"], 0) or 0
+            update_payload[PROSPECT_FIELD_MAP["REPLY_COUNT"]] = current_replies + 1
+        else:
+            update_payload[PROSPECT_FIELD_MAP["LAST_OUTBOUND"]] = now_iso
+            # Increment send count
+            current_sends = prospect_fields.get(PROSPECT_FIELD_MAP["SEND_COUNT"], 0) or 0
+            update_payload[PROSPECT_FIELD_MAP["SEND_COUNT"]] = current_sends + 1
+        
+        update_payload[PROSPECT_FIELD_MAP["LAST_ACTIVITY"]] = now_iso
+        
+        # Ownership confirmation tracking with enhanced verification
+        if intent.lower() == "positive" and stage.upper().startswith("STAGE 1"):
+            update_payload[PROSPECT_FIELD_MAP["OWNERSHIP_CONFIRMED_DATE"]] = now_iso
+            # Mark the active phone as verified
+            active_slot = _determine_active_phone_slot(prospect_record, phone_number)
+            if active_slot == "1":
+                update_payload[PROSPECT_FIELD_MAP["PHONE_1_VERIFIED"]] = True
+                update_payload["Phone 1 Verification Date"] = now_iso
+            else:
+                update_payload[PROSPECT_FIELD_MAP["PHONE_2_VERIFIED"]] = True
+                update_payload["Phone 2 Verification Date"] = now_iso
+            update_payload[PROSPECT_FIELD_MAP["ACTIVE_PHONE_SLOT"]] = active_slot
+        
+        # Intent tracking with confidence scoring
+        update_payload[PROSPECT_FIELD_MAP["INTENT_LAST_DETECTED"]] = ai_intent
+        
+        # Direction tracking
+        update_payload[PROSPECT_FIELD_MAP["LAST_DIRECTION"]] = direction
+        
+        # Phone slot tracking with enhanced verification
+        active_slot = _determine_active_phone_slot(prospect_record, phone_number)
+        update_payload[PROSPECT_FIELD_MAP["LAST_TRIED_SLOT"]] = active_slot
+        
+        # TextGrid phone number tracking
+        if to_number:
+            update_payload[PROSPECT_FIELD_MAP["TEXTGRID_PHONE"]] = to_number
+        
+        # Last message with conversation context
+        update_payload[PROSPECT_FIELD_MAP["LAST_MESSAGE"]] = body[:500] if body else ""
+        
+        # Opt out tracking with reason
+        if _is_opt_out(body):
+            update_payload[PROSPECT_FIELD_MAP["OPT_OUT"]] = True
+            update_payload["Opt Out Date"] = now_iso
+        
+        # Enhanced stage mapping (convert conversation stages to prospect stages)
+        prospect_stage_map = {
+            "STAGE 1 - OWNERSHIP CONFIRMATION": "Stage #1 – Ownership Check",
+            "STAGE 2 - INTEREST FEELER": "Stage #2 – Offer Interest", 
+            "STAGE 3 - PRICE QUALIFICATION": "Stage #3 – Price/Condition",
+            "STAGE 4 - PROPERTY CONDITION": "Stage #3 – Price/Condition",
+            "STAGE 5 - MOTIVATION / TIMELINE": "Stage #4 – Timeline/Motivation",
+            "STAGE 6 - OFFER FOLLOW UP": "Stage #5 – Offer Follow-up",
+            "STAGE 7 - CONTRACT READY": "Stage #6 – Contract Ready",
+            "STAGE 8 - CONTRACT SENT": "Stage #7 – Contract Sent",
+            "STAGE 9 - CONTRACT FOLLOW UP": "Stage #8 – Contract Follow-up",
+            "OPT OUT": "Opt-Out"
+        }
+        if stage in prospect_stage_map:
+            update_payload[PROSPECT_FIELD_MAP["STAGE"]] = prospect_stage_map[stage]
+        
+        # Enhanced status mapping based on intent, stage, and conversation quality
+        status_map = {
+            "positive": "Interested" if urgency_level >= 3 else "Replied",
+            "neutral": "Replied",
+            "delay": "Follow-up Required",
+            "dnc": "Opt-Out"
+        }
+        
+        if _is_opt_out(body):
+            update_payload[PROSPECT_FIELD_MAP["STATUS"]] = "Opt-Out"
+        elif intent.lower() in status_map:
+            if intent.lower() == "positive":
+                # More nuanced status based on conversation quality and stage
+                if extracted_price or "offer" in body.lower():
+                    update_payload[PROSPECT_FIELD_MAP["STATUS"]] = "Hot Lead"
+                elif stage.upper().startswith("STAGE 1") and urgency_level >= 3:
+                    update_payload[PROSPECT_FIELD_MAP["STATUS"]] = "Owner Verified"
+                else:
+                    update_payload[PROSPECT_FIELD_MAP["STATUS"]] = status_map[intent.lower()]
+            else:
+                update_payload[PROSPECT_FIELD_MAP["STATUS"]] = status_map[intent.lower()]
+        elif direction.upper() in ("IN", "INBOUND"):
+            update_payload[PROSPECT_FIELD_MAP["STATUS"]] = "Replied"
+        
+        # Lead quality scoring
+        lead_quality_score = _calculate_lead_quality_score(
+            intent, ai_intent, extracted_price, condition_info, timeline_motivation, urgency_level
+        )
+        update_payload["Lead Quality Score"] = lead_quality_score
+        
+        # Update conversation count and progression tracking
+        total_conversations = prospect_fields.get("Total Conversations", 0) or 0
+        update_payload["Total Conversations"] = total_conversations + 1
+        
+        # Track engagement quality
+        engagement_score = 5  # baseline
+        if len(body) > 100:
+            engagement_score += 2
+        elif len(body) > 50:
+            engagement_score += 1
+        if intent.lower() == "positive":
+            engagement_score += 3
+        if '?' in body:
+            engagement_score += 1
+        update_payload["Engagement Score"] = min(engagement_score, 10)
+        
+        # Enhanced conversation tracking
+        conversation_summary = f"{ai_intent} intent detected"
+        if extracted_price:
+            conversation_summary += f" (mentioned price)"
+        if condition_info:
+            conversation_summary += f" (discussed condition)"
+        
+        existing_summary = prospect_fields.get("Conversation Summary", "")
+        if existing_summary:
+            update_payload["Conversation Summary"] = f"{existing_summary}\n{now_iso}: {conversation_summary}"
+        else:
+            update_payload["Conversation Summary"] = f"{now_iso}: {conversation_summary}"
+        
+        # Track stage progression history
+        current_stage_field = prospect_fields.get(PROSPECT_FIELD_MAP["STAGE"])
+        new_stage_field = update_payload.get(PROSPECT_FIELD_MAP["STAGE"])
+        if current_stage_field != new_stage_field and new_stage_field:
+            stage_history = prospect_fields.get("Stage History", "") or ""
+            stage_entry = f"{now_iso}: {current_stage_field} → {new_stage_field}"
+            if stage_history:
+                update_payload["Stage History"] = f"{stage_history}\n{stage_entry}"
+            else:
+                update_payload["Stage History"] = stage_entry
+        
+        # Apply the update
+        prospects.update(prospect_id, update_payload)
+        print(f"✅ Updated prospect {prospect_id} with comprehensive data: {len(update_payload)} fields")
+        
+    except Exception as exc:
+        print(f"⚠️ Failed to update prospect comprehensively for {phone_number}: {exc}")
+        traceback.print_exc()
+
+
 # === ACTIVITY UPDATES ===
 def update_lead_activity(lead_id: str, body: str, direction: str, reply_increment: bool = False):
     if not leads or not lead_id:
@@ -300,17 +816,51 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
     try:
         lead = leads.get(lead_id)
         reply_count = lead["fields"].get("Reply Count", 0)
+        send_count = lead["fields"].get("Send Count", 0) or 0
+        
         updates = {
             "Last Activity": iso_timestamp(),
             "Last Direction": direction,
             "Last Message": (body or "")[:500],
         }
+        
         if reply_increment:
             updates["Reply Count"] = reply_count + 1
             updates["Last Inbound"] = iso_timestamp()
+            
+            # Enhanced lead scoring based on reply quality
+            lead_quality_score = 50  # baseline
+            if len(body) > 100:
+                lead_quality_score += 20
+            elif len(body) > 50:
+                lead_quality_score += 10
+                
+            # Check for positive engagement indicators
+            positive_indicators = ["yes", "interested", "offer", "price", "when", "how much"]
+            if any(indicator in body.lower() for indicator in positive_indicators):
+                lead_quality_score += 30
+                
+            updates["Lead Quality Score"] = min(lead_quality_score, 100)
+            
         if direction == "OUT":
             updates["Last Outbound"] = iso_timestamp()
+            updates["Send Count"] = send_count + 1
+            
+        # Track conversation progression
+        total_messages = (reply_count + send_count + (1 if reply_increment else 0))
+        updates["Total Messages"] = total_messages
+        
+        # Update lead stage based on reply quality and engagement
+        if reply_increment and any(word in body.lower() for word in ["yes", "interested", "offer"]):
+            current_stage = lead["fields"].get("Lead Stage", "New")
+            if current_stage == "New":
+                updates["Lead Stage"] = "Engaged"
+            elif current_stage == "Engaged" and "price" in body.lower():
+                updates["Lead Stage"] = "Qualified"
+                
         leads.update(lead_id, updates)
+        print(f"✅ Updated lead {lead_id} activity comprehensively")
+        
     except Exception as e:
         print(f"⚠️ Failed to update lead activity: {e}")
 
@@ -400,6 +950,17 @@ def handle_inbound(payload: dict):
     if lead_id:
         update_lead_activity(lead_id, body, "IN", reply_increment=True)
 
+    # Comprehensive prospect update for ALL inbound messages
+    update_prospect_comprehensive(
+        phone_number=from_number,
+        body=body,
+        intent=intent,
+        ai_intent=ai_intent,
+        stage=stage,
+        direction="IN",
+        to_number=to_number
+    )
+
     return {"status": "ok", "stage": stage, "intent": intent, "promoted": promoted}
 
 
@@ -456,6 +1017,17 @@ def process_optout(payload: dict):
     log_conversation(record)
     if lead_id:
         update_lead_activity(lead_id, body, "IN")
+
+    # Comprehensive prospect update for opt-out
+    update_prospect_comprehensive(
+        phone_number=from_number,
+        body=body,
+        intent="DNC",
+        ai_intent="not_interested",
+        stage="OPT OUT",
+        direction="IN",
+        to_number=None
+    )
 
     return {"status": "optout"}
 

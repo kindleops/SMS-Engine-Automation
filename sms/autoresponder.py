@@ -36,6 +36,7 @@ from sms.airtable_schema import (
     ConversationDirection,
     ConversationProcessor,
     ConversationStage,
+    DripStatus,
     conversations_field_map,
     drip_field_map,
     leads_field_map,
@@ -349,6 +350,17 @@ class TableFacade:
 # Utils
 # ---------------------------------------------------------------------------
 
+def _ct_naive(dt_utc: datetime) -> str:
+    """
+    Convert UTC datetime to America/Chicago naive ISO (seconds precision).
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/Chicago")
+    except Exception:
+        tz = timezone.utc
+    return dt_utc.astimezone(tz).replace(tzinfo=None).isoformat(timespec="seconds")
+
 def _get_first(fields: Dict[str, Any], candidates: Iterable[Optional[str]]) -> Optional[Any]:
     for key in candidates:
         if not key:
@@ -578,6 +590,31 @@ class Autoresponder:
             if v
         ]
 
+        # Prospect field mappings for comprehensive updates
+        self.prospect_field_map = {
+            "SELLER_ASKING_PRICE": PROSPECT_FIELDS.get("SELLER_ASKING_PRICE", "Seller Asking Price"),
+            "CONDITION_NOTES": PROSPECT_FIELDS.get("CONDITION_NOTES", "Condition Notes"),
+            "TIMELINE_MOTIVATION": PROSPECT_FIELDS.get("TIMELINE_MOTIVATION", "Timeline / Motivation"),
+            "LAST_INBOUND": PROSPECT_FIELDS.get("LAST_INBOUND", "Last Inbound"),
+            "LAST_OUTBOUND": PROSPECT_FIELDS.get("LAST_OUTBOUND", "Last Outbound"),
+            "LAST_ACTIVITY": PROSPECT_FIELDS.get("LAST_ACTIVITY", "Last Activity"),
+            "OWNERSHIP_CONFIRMED_DATE": PROSPECT_FIELDS.get("OWNERSHIP_CONFIRMED_DATE", "Ownership Confirmation Timeline"),
+            "LEAD_PROMOTION_DATE": PROSPECT_FIELDS.get("LEAD_PROMOTION_DATE", "Lead Promotion Date"),
+            "PHONE_1_VERIFIED": PROSPECT_FIELDS.get("PHONE_PRIMARY_VERIFIED", "Phone 1 Ownership Verified"),
+            "PHONE_2_VERIFIED": PROSPECT_FIELDS.get("PHONE_SECONDARY_VERIFIED", "Phone 2 Ownership Verified"),
+            "INTENT_LAST_DETECTED": PROSPECT_FIELDS.get("INTENT_LAST_DETECTED", "Intent Last Detected"),
+            "LAST_DIRECTION": PROSPECT_FIELDS.get("LAST_DIRECTION", "Last Direction"),
+            "ACTIVE_PHONE_SLOT": PROSPECT_FIELDS.get("ACTIVE_PHONE_SLOT", "Active Phone Slot"),
+            "LAST_TRIED_SLOT": PROSPECT_FIELDS.get("LAST_TRIED_SLOT", "Last Tried Slot"),
+            "TEXTGRID_PHONE": PROSPECT_FIELDS.get("TEXTGRID_PHONE", "TextGrid Phone Number"),
+            "LAST_MESSAGE": PROSPECT_FIELDS.get("LAST_MESSAGE", "Last Message"),
+            "REPLY_COUNT": PROSPECT_FIELDS.get("REPLY_COUNT", "Reply Count"),
+            "OPT_OUT": PROSPECT_FIELDS.get("OPT_OUT", "Opt Out?"),
+            "SEND_COUNT": PROSPECT_FIELDS.get("SEND_COUNT", "Send Count"),
+            "STAGE": PROSPECT_FIELDS.get("STAGE", "Stage"),
+            "STATUS": PROSPECT_FIELDS.get("STATUS", "Status"),
+        }
+
     # -------------------------- Template indexing & selection
     def _index_templates(self) -> Dict[str, List[Dict[str, Any]]]:
         pools: Dict[str, List[Dict[str, Any]]] = {}
@@ -611,7 +648,8 @@ class Autoresponder:
                         raw = ""
                 try:
                     msg = raw.format(**personalization) if raw else ""
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Template format fallback (missing keys?): {e}; raw kept.")
                     msg = raw
                 return (msg or "Thanks for the reply.", chosen.get("id"), pool)
         return ("Thanks for the reply.", None, None)
@@ -699,6 +737,675 @@ class Autoresponder:
     def _find_prospect(self, phone: str) -> Optional[Dict[str, Any]]:
         return self._find_record_by_phone(self.prospects, self.prospect_phone_fields, phone)
 
+    # -------------------------- Prospect comprehensive updates
+    def _extract_price_from_message(self, body: str) -> Optional[str]:
+        """Extract price information from message text with enhanced pattern matching"""
+        if not body:
+            return None
+        
+        text = body.lower()
+        
+        # Enhanced price patterns including more variations
+        import re
+        
+        # Pattern 1: Standard price formats ($250,000 or $250000)
+        standard_pattern = r'\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)'
+        
+        # Pattern 2: 'k' notation (250k, 250K)
+        k_pattern = r'(\d{1,4})\s*k(?:\s|$|[^\w])'
+        
+        # Pattern 3: Written amounts (two hundred fifty thousand)
+        written_pattern = r'((?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million)\s*)+(?:dollars?)?'
+        
+        # Pattern 4: Around/about patterns (around 250k, about $250,000)
+        around_pattern = r'(?:around|about|approximately|roughly)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*|\d{1,4}k)'
+        
+        # Try standard pattern first
+        standard_matches = re.findall(standard_pattern, text)
+        if standard_matches:
+            price = standard_matches[0].replace(',', '').strip()
+            # Validate reasonable price range (25k to 10M)
+            try:
+                price_val = float(price)
+                if 25000 <= price_val <= 10000000:
+                    return price
+            except ValueError:
+                pass
+        
+        # Try 'k' notation
+        k_matches = re.findall(k_pattern, text)
+        if k_matches:
+            try:
+                k_value = float(k_matches[0])
+                if 25 <= k_value <= 10000:  # 25k to 10Mk
+                    return str(int(k_value * 1000))
+            except ValueError:
+                pass
+        
+        # Try around/about patterns
+        around_matches = re.findall(around_pattern, text)
+        if around_matches:
+            price_text = around_matches[0].replace('$', '').replace(',', '').strip()
+            if price_text.endswith('k'):
+                try:
+                    k_value = float(price_text[:-1])
+                    if 25 <= k_value <= 10000:
+                        return str(int(k_value * 1000))
+                except ValueError:
+                    pass
+            else:
+                try:
+                    price_val = float(price_text)
+                    if 25000 <= price_val <= 10000000:
+                        return price_text
+                except ValueError:
+                    pass
+        
+        # Fallback to original PRICE_REGEX
+        price_matches = PRICE_REGEX.findall(text)
+        if price_matches:
+            for match in price_matches:
+                if match[0]:  # Full price format
+                    return match[0].replace(',', '').strip()
+                elif match[1] or match[2]:  # 'k' format
+                    k_value = (match[1] or match[2]).replace('k', '').strip()
+                    try:
+                        return str(int(float(k_value)) * 1000)
+                    except ValueError:
+                        continue
+        
+        return None
+
+    def _extract_condition_info(self, body: str) -> Optional[str]:
+        """Extract condition information from message text with enhanced analysis"""
+        if not body:
+            return None
+        
+        text = body.lower()
+        condition_indicators = []
+        
+        # Enhanced condition keywords
+        enhanced_cond_words = list(COND_WORDS) + [
+            "renovated", "updated", "new", "old", "vintage", "remodeled", "restored",
+            "needs work", "fixer upper", "handyman special", "as-is", "move-in ready",
+            "turnkey", "cosmetic", "structural", "foundation", "electrical", "plumbing",
+            "hvac", "roof", "flooring", "kitchen", "bathroom", "paint", "carpet",
+            "appliances", "windows", "siding", "landscaping", "pool", "deck", "garage"
+        ]
+        
+        # Check for condition-related keywords with enhanced context
+        for word in enhanced_cond_words:
+            if word in text:
+                # Extract surrounding context (up to 15 words around the keyword)
+                words = body.split()
+                for i, w in enumerate(words):
+                    if word in w.lower():
+                        start = max(0, i - 7)
+                        end = min(len(words), i + 8)
+                        context = ' '.join(words[start:end])
+                        condition_indicators.append(context.strip())
+                        break
+        
+        # Look for specific condition patterns
+        import re
+        
+        # Pattern for "needs X" statements
+        needs_pattern = r'needs?\s+(?:a\s+)?(?:new\s+)?(\w+(?:\s+\w+){0,2})'
+        needs_matches = re.findall(needs_pattern, text)
+        for match in needs_matches:
+            condition_indicators.append(f"needs {match}")
+        
+        # Pattern for "X is/are Y" statements about condition
+        condition_statement_pattern = r'(roof|foundation|kitchen|bathroom|flooring|hvac|plumbing|electrical|windows)\s+(?:is|are)\s+(\w+(?:\s+\w+){0,2})'
+        condition_matches = re.findall(condition_statement_pattern, text)
+        for item, condition in condition_matches:
+            condition_indicators.append(f"{item} is {condition}")
+        
+        # Remove duplicates while preserving order
+        unique_indicators = []
+        for indicator in condition_indicators:
+            if indicator not in unique_indicators:
+                unique_indicators.append(indicator)
+        
+        return '; '.join(unique_indicators[:3]) if unique_indicators else None  # Limit to top 3 most relevant
+
+    def _extract_timeline_motivation(self, body: str) -> Optional[str]:
+        """Extract timeline and motivation information from message text with enhanced patterns"""
+        if not body:
+            return None
+        
+        text = body.lower()
+        
+        # Enhanced timeline and motivation keywords
+        timeline_words = {
+            "urgent", "asap", "soon", "immediately", "quickly", "fast", "rush",
+            "month", "months", "week", "weeks", "year", "years", "day", "days",
+            "deadline", "date", "timeline", "schedule", "time frame",
+            "move", "moving", "relocate", "relocating", "relocation",
+            "divorce", "divorcing", "separated", "separation",
+            "financial", "finances", "money", "cash", "debt", "bills", "mortgage",
+            "foreclosure", "foreclosing", "behind", "payments",
+            "inheritance", "inherited", "estate", "probate",
+            "job", "work", "employment", "transfer", "promotion",
+            "health", "medical", "illness", "sick", "hospital",
+            "family", "children", "kids", "school", "education",
+            "retirement", "retiring", "downsize", "downsizing",
+            "upgrade", "upgrading", "bigger", "smaller", "expand"
+        }
+        
+        timeline_indicators = []
+        
+        # Check for timeline/motivation keywords with enhanced context
+        for word in timeline_words:
+            if word in text:
+                words = body.split()
+                for i, w in enumerate(words):
+                    if word in w.lower():
+                        start = max(0, i - 6)
+                        end = min(len(words), i + 7)
+                        context = ' '.join(words[start:end])
+                        timeline_indicators.append(context.strip())
+                        break
+        
+        # Look for specific timeline patterns
+        import re
+        
+        # Pattern for "need to sell by/before X"
+        deadline_pattern = r'(?:need|have|must)\s+to\s+sell\s+(?:by|before|within)\s+(\w+(?:\s+\w+){0,3})'
+        deadline_matches = re.findall(deadline_pattern, text)
+        for match in deadline_matches:
+            timeline_indicators.append(f"deadline: {match}")
+        
+        # Pattern for "because of X" motivation
+        motivation_pattern = r'because\s+(?:of\s+)?(\w+(?:\s+\w+){0,4})'
+        motivation_matches = re.findall(motivation_pattern, text)
+        for match in motivation_matches:
+            timeline_indicators.append(f"motivation: {match}")
+        
+        # Pattern for "due to X" motivation
+        due_to_pattern = r'due\s+to\s+(\w+(?:\s+\w+){0,4})'
+        due_to_matches = re.findall(due_to_pattern, text)
+        for match in due_to_matches:
+            timeline_indicators.append(f"due to: {match}")
+        
+        # Pattern for time expressions (in X months, within X weeks)
+        time_expression_pattern = r'(?:in|within|by)\s+(\d+\s+(?:day|week|month|year)s?)'
+        time_matches = re.findall(time_expression_pattern, text)
+        for match in time_matches:
+            timeline_indicators.append(f"timeframe: {match}")
+        
+        # Remove duplicates while preserving order
+        unique_indicators = []
+        for indicator in timeline_indicators:
+            if indicator not in unique_indicators:
+                unique_indicators.append(indicator)
+        
+        return '; '.join(unique_indicators[:3]) if unique_indicators else None  # Limit to top 3 most relevant
+
+    def _determine_active_phone_slot(self, prospect_record: Optional[Dict[str, Any]], used_phone: str) -> str:
+        """Determine which phone slot (1 or 2) is active based on the phone used"""
+        if not prospect_record:
+            return "1"  # Default to slot 1
+        
+        fields = prospect_record.get("fields", {}) or {}
+        phone1 = fields.get(PROSPECT_FIELDS.get("PHONE_PRIMARY")) or fields.get(PROSPECT_FIELDS.get("PHONE_PRIMARY_LINKED"))
+        phone2 = fields.get(PROSPECT_FIELDS.get("PHONE_SECONDARY")) or fields.get(PROSPECT_FIELDS.get("PHONE_SECONDARY_LINKED"))
+        
+        digits_used = last_10_digits(used_phone)
+        
+        if phone2 and last_10_digits(phone2) == digits_used:
+            return "2"
+        return "1"
+
+    def _extract_property_details(self, message: str) -> Optional[str]:
+        """Extract property details like size, bedrooms, etc. from message"""
+        text = message.lower()
+        property_details = []
+        
+        # Look for bedroom/bathroom info
+        import re
+        bed_bath_pattern = r'(\d+)\s*(bed|bedroom|br|bath|bathroom|ba)'
+        matches = re.findall(bed_bath_pattern, text)
+        if matches:
+            property_details.extend([f"{count} {room_type}" for count, room_type in matches])
+        
+        # Look for square footage
+        sqft_pattern = r'(\d+,?\d*)\s*(sq\s*ft|square\s*feet|sqft)'
+        sqft_match = re.search(sqft_pattern, text)
+        if sqft_match:
+            property_details.append(f"{sqft_match.group(1)} sq ft")
+        
+        # Look for property type
+        property_types = ['house', 'condo', 'townhouse', 'duplex', 'apartment', 'mobile home', 'manufactured']
+        for prop_type in property_types:
+            if prop_type in text:
+                property_details.append(prop_type)
+                break
+        
+        return "; ".join(property_details) if property_details else None
+    
+    def _extract_contact_preferences(self, message: str) -> Optional[str]:
+        """Extract communication preferences from message"""
+        text = message.lower()
+        preferences = []
+        
+        if any(phrase in text for phrase in ['call me', 'phone me', 'give me a call']):
+            preferences.append("prefers calls")
+        if any(phrase in text for phrase in ['text me', 'send me a text', 'message me']):
+            preferences.append("prefers texts")
+        if any(phrase in text for phrase in ['email me', 'send me an email']):
+            preferences.append("prefers email")
+        if any(phrase in text for phrase in ['morning', 'before noon']):
+            preferences.append("morning contact")
+        if any(phrase in text for phrase in ['evening', 'after work', 'after 5']):
+            preferences.append("evening contact")
+        
+        return "; ".join(preferences) if preferences else None
+    
+    def _assess_urgency_level(self, message: str, event: str) -> int:
+        """Assess urgency level from 1-5 based on message content and event"""
+        text = message.lower()
+        urgency = 1
+        
+        # Event-based urgency
+        if event in ['ownership_yes', 'interest_yes']:
+            urgency += 1
+        if event in ['price_provided', 'ask_offer']:
+            urgency += 2
+        
+        # Keyword-based urgency
+        high_urgency_words = ['urgent', 'asap', 'quickly', 'soon', 'deadline', 'foreclosure', 'emergency']
+        medium_urgency_words = ['need to sell', 'moving', 'relocating', 'divorce', 'financial']
+        
+        if any(word in text for word in high_urgency_words):
+            urgency += 2
+        elif any(word in text for word in medium_urgency_words):
+            urgency += 1
+        
+        return min(urgency, 5)
+    
+    def _calculate_engagement_score(self, message: str, event: str) -> int:
+        """Calculate engagement score from 1-10 based on message quality"""
+        score = 5  # baseline
+        
+        # Message length indicates engagement
+        if len(message) > 100:
+            score += 2
+        elif len(message) > 50:
+            score += 1
+        
+        # Event quality
+        high_engagement_events = ['price_provided', 'ask_offer', 'condition_info']
+        medium_engagement_events = ['ownership_yes', 'interest_yes']
+        
+        if event in high_engagement_events:
+            score += 3
+        elif event in medium_engagement_events:
+            score += 2
+        
+        # Question asking indicates engagement
+        if '?' in message:
+            score += 1
+        
+        return min(score, 10)
+    
+    def _calculate_response_time(self, last_outbound: str, current_time: str) -> Optional[str]:
+        """Calculate response time between outbound and inbound messages"""
+        try:
+            from datetime import datetime
+            last_out = datetime.fromisoformat(last_outbound.replace('Z', '+00:00'))
+            current = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
+            diff = current - last_out
+            
+            if diff.days > 0:
+                return f"{diff.days} days"
+            elif diff.seconds > 3600:
+                return f"{diff.seconds // 3600} hours"
+            else:
+                return f"{diff.seconds // 60} minutes"
+        except:
+            return None
+    
+    def _calculate_ownership_timeline(self, conversation_fields: Dict[str, Any]) -> str:
+        """Calculate how long it took to confirm ownership"""
+        # This would analyze the conversation history to determine ownership confirmation timeline
+        # For now, return a placeholder
+        return "Confirmed in current conversation"
+    
+    def _calculate_intent_confidence(self, message: str, event: str, ai_intent: str) -> float:
+        """Calculate confidence score for intent detection"""
+        # Simple confidence scoring based on clarity of intent signals
+        confidence = 0.5  # baseline
+        
+        if event in ['ownership_yes', 'ownership_no', 'optout']:
+            confidence = 0.9
+        elif event in ['price_provided', 'interest_yes']:
+            confidence = 0.8
+        elif event in ['ask_offer', 'condition_info']:
+            confidence = 0.7
+        
+        # Adjust based on message clarity
+        if len(message.split()) >= 5:  # More detailed messages = higher confidence
+            confidence += 0.1
+        
+        return min(confidence, 1.0)
+    
+    def _generate_conversation_summary(self, message: str, event: str, ai_intent: str) -> Optional[str]:
+        """Generate a brief summary of the conversation interaction"""
+        summaries = {
+            'ownership_yes': 'Confirmed property ownership',
+            'ownership_no': 'Denied property ownership',
+            'interest_yes': 'Expressed interest in selling',
+            'interest_no': 'Not interested in selling',
+            'price_provided': f'Provided asking price information',
+            'ask_offer': 'Asked about our offer',
+            'condition_info': 'Discussed property condition',
+            'optout': 'Requested to opt out',
+        }
+        
+        base_summary = summaries.get(event, f'Responded with {ai_intent} intent')
+        
+        # Add key details if available
+        if self._extract_price_from_message(message):
+            base_summary += f' (mentioned price)'
+        if self._extract_condition_info(message):
+            base_summary += f' (discussed condition)'
+        
+        return base_summary
+    
+    def _extract_optout_reason(self, message: str) -> str:
+        """Extract reason for opting out"""
+        text = message.lower()
+        
+        if any(phrase in text for phrase in ['not interested', "don't want", 'no thanks']):
+            return "Not interested"
+        elif any(phrase in text for phrase in ['wrong number', 'not my property', 'not the owner']):
+            return "Wrong contact"
+        elif any(phrase in text for phrase in ['stop', 'unsubscribe', 'remove me']):
+            return "Explicit opt-out request"
+        else:
+            return "General opt-out"
+    
+    def _calculate_lead_quality_score(
+        self, 
+        event: str, 
+        ai_intent: str, 
+        price: Optional[str], 
+        condition: Optional[str], 
+        timeline: Optional[str], 
+        urgency: int
+    ) -> int:
+        """Calculate overall lead quality score from 1-100"""
+        score = 20  # baseline
+        
+        # Event scoring
+        event_scores = {
+            'ownership_yes': 25,
+            'interest_yes': 20,
+            'price_provided': 15,
+            'ask_offer': 15,
+            'condition_info': 10,
+        }
+        score += event_scores.get(event, 0)
+        
+        # Data completeness scoring
+        if price:
+            score += 15
+        if condition:
+            score += 10
+        if timeline:
+            score += 10
+        
+        # Urgency scoring
+        score += urgency * 4
+        
+        return min(score, 100)
+
+    def _update_prospect_comprehensive(
+        self,
+        prospect_record: Optional[Dict[str, Any]],
+        conversation_fields: Dict[str, Any],
+        body: str,
+        event: str,
+        direction: str,
+        from_number: str,
+        to_number: str,
+        stage: str,
+        ai_intent: str
+    ) -> None:
+        """Comprehensive prospect update with all required fields"""
+        if not prospect_record:
+            return
+        
+        prospect_id = prospect_record["id"]
+        now_iso = iso_now()
+        prospect_fields = prospect_record.get("fields", {}) or {}
+        
+        # Build comprehensive update payload
+        update_payload = {}
+        
+        # Extract conversation data with enhanced analysis
+        extracted_price = self._extract_price_from_message(body)
+        condition_info = self._extract_condition_info(body)
+        timeline_motivation = self._extract_timeline_motivation(body)
+        
+        # Additional extractions from conversation content
+        property_details = self._extract_property_details(body)
+        contact_preferences = self._extract_contact_preferences(body)
+        urgency_level = self._assess_urgency_level(body, event)
+        
+        # Seller Asking Price (if found in conversation)
+        if extracted_price and event in {"price_provided", "ask_offer", "ownership_yes", "interest_yes"}:
+            update_payload[self.prospect_field_map["SELLER_ASKING_PRICE"]] = extracted_price
+        
+        # Condition Notes (accumulate from conversations with enhanced analysis)
+        if condition_info:
+            existing_conditions = prospect_fields.get(self.prospect_field_map["CONDITION_NOTES"], "")
+            if existing_conditions:
+                # Avoid duplicating similar condition information
+                if condition_info.lower() not in existing_conditions.lower():
+                    update_payload[self.prospect_field_map["CONDITION_NOTES"]] = f"{existing_conditions}; {condition_info}"
+            else:
+                update_payload[self.prospect_field_map["CONDITION_NOTES"]] = condition_info
+        
+        # Timeline / Motivation (accumulate from conversations with priority)
+        if timeline_motivation:
+            existing_timeline = prospect_fields.get(self.prospect_field_map["TIMELINE_MOTIVATION"], "")
+            if existing_timeline:
+                # Prioritize more urgent or specific timeline information
+                if urgency_level > self._assess_urgency_level(existing_timeline, "neutral"):
+                    update_payload[self.prospect_field_map["TIMELINE_MOTIVATION"]] = f"{timeline_motivation}; {existing_timeline}"
+                elif timeline_motivation.lower() not in existing_timeline.lower():
+                    update_payload[self.prospect_field_map["TIMELINE_MOTIVATION"]] = f"{existing_timeline}; {timeline_motivation}"
+            else:
+                update_payload[self.prospect_field_map["TIMELINE_MOTIVATION"]] = timeline_motivation
+        
+        # Property details (size, type, etc.)
+        if property_details:
+            existing_property_details = prospect_fields.get("Property Details", "")
+            if existing_property_details:
+                if property_details.lower() not in existing_property_details.lower():
+                    update_payload["Property Details"] = f"{existing_property_details}; {property_details}"
+            else:
+                update_payload["Property Details"] = property_details
+        
+        # Activity timestamps with enhanced tracking
+        if direction.upper() in ("IN", "INBOUND"):
+            update_payload[self.prospect_field_map["LAST_INBOUND"]] = now_iso
+            # Increment reply count
+            current_replies = prospect_fields.get(self.prospect_field_map["REPLY_COUNT"], 0) or 0
+            update_payload[self.prospect_field_map["REPLY_COUNT"]] = current_replies + 1
+            
+            # Track conversation engagement quality
+            engagement_score = self._calculate_engagement_score(body, event)
+            update_payload["Engagement Score"] = engagement_score
+            
+            # Track response time if previous outbound exists
+            last_outbound = prospect_fields.get(self.prospect_field_map["LAST_OUTBOUND"])
+            if last_outbound:
+                response_time = self._calculate_response_time(last_outbound, now_iso)
+                if response_time:
+                    update_payload["Average Response Time"] = response_time
+        else:
+            update_payload[self.prospect_field_map["LAST_OUTBOUND"]] = now_iso
+            # Increment send count
+            current_sends = prospect_fields.get(self.prospect_field_map["SEND_COUNT"], 0) or 0
+            update_payload[self.prospect_field_map["SEND_COUNT"]] = current_sends + 1
+        
+        update_payload[self.prospect_field_map["LAST_ACTIVITY"]] = now_iso
+        
+        # Ownership confirmation tracking with enhanced verification
+        if event == "ownership_yes":
+            update_payload[self.prospect_field_map["OWNERSHIP_CONFIRMED_DATE"]] = now_iso
+            # Mark the active phone as verified
+            active_slot = self._determine_active_phone_slot(prospect_record, from_number)
+            if active_slot == "1":
+                update_payload[self.prospect_field_map["PHONE_1_VERIFIED"]] = True
+                update_payload["Phone 1 Verification Date"] = now_iso
+            else:
+                update_payload[self.prospect_field_map["PHONE_2_VERIFIED"]] = True
+                update_payload["Phone 2 Verification Date"] = now_iso
+            update_payload[self.prospect_field_map["ACTIVE_PHONE_SLOT"]] = active_slot
+            
+            # Mark ownership verification timeline
+            update_payload["Ownership Confirmation Timeline"] = self._calculate_ownership_timeline(conversation_fields)
+        
+        # Intent tracking with confidence scoring
+        update_payload[self.prospect_field_map["INTENT_LAST_DETECTED"]] = ai_intent
+        intent_confidence = self._calculate_intent_confidence(body, event, ai_intent)
+        update_payload["Intent Confidence Score"] = intent_confidence
+        
+        # Direction tracking
+        update_payload[self.prospect_field_map["LAST_DIRECTION"]] = direction
+        
+        # Phone slot tracking with enhanced verification
+        active_slot = self._determine_active_phone_slot(prospect_record, from_number)
+        update_payload[self.prospect_field_map["LAST_TRIED_SLOT"]] = active_slot
+        
+        # TextGrid phone number tracking
+        textgrid_phone = _get_first(conversation_fields, CONV_TO_CANDIDATES)
+        if textgrid_phone:
+            update_payload[self.prospect_field_map["TEXTGRID_PHONE"]] = textgrid_phone
+        
+        # Last message with conversation context
+        update_payload[self.prospect_field_map["LAST_MESSAGE"]] = body[:500] if body else ""
+        
+        # Enhanced conversation tracking
+        conversation_summary = self._generate_conversation_summary(body, event, ai_intent)
+        if conversation_summary:
+            existing_summary = prospect_fields.get("Conversation Summary", "")
+            if existing_summary:
+                update_payload["Conversation Summary"] = f"{existing_summary}\n{now_iso}: {conversation_summary}"
+            else:
+                update_payload["Conversation Summary"] = f"{now_iso}: {conversation_summary}"
+        
+        # Opt out tracking with reason
+        if event == "optout":
+            update_payload[self.prospect_field_map["OPT_OUT"]] = True
+            update_payload["Opt Out Date"] = now_iso
+            update_payload["Opt Out Reason"] = self._extract_optout_reason(body)
+        
+        # Communication preferences extraction
+        if contact_preferences:
+            update_payload["Communication Preferences"] = contact_preferences
+        
+        # Market and property information from conversation
+        market_info = conversation_fields.get("Market") or prospect_fields.get(PROSPECT_FIELDS.get("MARKET"))
+        if market_info:
+            update_payload["Market"] = market_info
+        
+        # Enhanced stage mapping (convert conversation stages to prospect stages)
+        prospect_stage_map = {
+            STAGE1: "Stage #1 – Ownership Check",
+            STAGE2: "Stage #2 – Offer Interest", 
+            STAGE3: "Stage #3 – Price/Condition",
+            STAGE4: "Stage #3 – Price/Condition",  # Stage 4 still maps to price/condition
+            STAGE_OPTOUT: "Opt-Out",
+            STAGE_DNC: "Opt-Out"
+        }
+        if stage in prospect_stage_map:
+            update_payload[self.prospect_field_map["STAGE"]] = prospect_stage_map[stage]
+        
+        # Enhanced status mapping based on events, stages, and conversation quality
+        status_map = {
+            "ownership_yes": "Owner Verified",
+            "interest_yes": "Interested", 
+            "price_provided": "Price Disclosed",
+            "ask_offer": "Awaiting Offer",
+            "condition_info": "Condition Discussed",
+            "optout": "Opt-Out",
+            "ownership_no": "Not Owner"
+        }
+        
+        if event in status_map:
+            update_payload[self.prospect_field_map["STATUS"]] = status_map[event]
+        elif direction.upper() in ("IN", "INBOUND"):
+            # More nuanced status based on conversation quality
+            if urgency_level >= 3:
+                update_payload[self.prospect_field_map["STATUS"]] = "Hot Lead"
+            elif event in {"affirm", "price_provided", "ask_offer"}:
+                update_payload[self.prospect_field_map["STATUS"]] = "Qualified Lead"
+            else:
+                update_payload[self.prospect_field_map["STATUS"]] = "Replied"
+        elif direction.upper() in ("OUT", "OUTBOUND"):
+            current_status = prospect_fields.get(self.prospect_field_map["STATUS"])
+            if current_status in ("Unmessaged", "Queued"):
+                update_payload[self.prospect_field_map["STATUS"]] = "Messaged"
+        
+        # Lead quality scoring
+        lead_quality_score = self._calculate_lead_quality_score(
+            event, ai_intent, extracted_price, condition_info, timeline_motivation, urgency_level
+        )
+        update_payload["Lead Quality Score"] = lead_quality_score
+        
+        # Update conversation count and progression tracking
+        total_conversations = prospect_fields.get("Total Conversations", 0) or 0
+        update_payload["Total Conversations"] = total_conversations + 1
+        
+        # Track stage progression history
+        current_stage_field = prospect_fields.get(self.prospect_field_map["STAGE"])
+        new_stage_field = update_payload.get(self.prospect_field_map["STAGE"])
+        if current_stage_field != new_stage_field and new_stage_field:
+            stage_history = prospect_fields.get("Stage History", "") or ""
+            stage_entry = f"{now_iso}: {current_stage_field} → {new_stage_field}"
+            if stage_history:
+                update_payload["Stage History"] = f"{stage_history}\n{stage_entry}"
+            else:
+                update_payload["Stage History"] = stage_entry
+        
+        # Apply the update
+        try:
+            self.prospects.update(prospect_id, update_payload)
+            logger.info(f"Updated prospect {prospect_id} with comprehensive data: {len(update_payload)} fields")
+        except Exception as exc:
+            logger.warning(f"Failed to update prospect {prospect_id}: {exc}")
+            self.summary["errors"].append({"prospect": prospect_id, "error": f"prospect update failed: {exc}"})
+
+    def _create_follow_up_campaign_if_needed(self, prospect_record: Optional[Dict[str, Any]], phone: str) -> None:
+        """Create a new campaign for prospects where phone verification failed"""
+        if not prospect_record:
+            return
+        
+        fields = prospect_record.get("fields", {}) or {}
+        
+        # Check if any phone is verified
+        phone1_verified = fields.get(self.prospect_field_map["PHONE_1_VERIFIED"], False)
+        phone2_verified = fields.get(self.prospect_field_map["PHONE_2_VERIFIED"], False)
+        
+        # If neither phone is verified, we may need to create a follow-up campaign
+        if not phone1_verified and not phone2_verified:
+            try:
+                # This would integrate with your campaign creation system
+                # For now, we'll just log it as a placeholder
+                logger.info(f"Prospect {prospect_record['id']} needs follow-up campaign - no verified phones")
+                
+                # TODO: Implement campaign creation logic here
+                # This could create a new campaign specifically targeting unverified prospects
+                # with alternative phone numbers or different messaging strategies
+                
+            except Exception as exc:
+                logger.warning(f"Failed to create follow-up campaign for prospect {prospect_record['id']}: {exc}")
+
     # -------------------------- Drip enqueue (canonical)
     def _enqueue_reply(
         self,
@@ -714,14 +1421,14 @@ class Autoresponder:
 
         campaign_link = _normalise_link(fields.get(CONV_CAMPAIGN_LINK_FIELD))
         payload = {
-            DRIP_STATUS_FIELD: "Queued",
+            DRIP_STATUS_FIELD: DripStatus.QUEUED.value,
             DRIP_PROCESSOR_FIELD: self.processed_by,
             DRIP_MARKET_FIELD: fields.get("Market"),
             DRIP_SELLER_PHONE_FIELD: _get_first(fields, CONV_FROM_CANDIDATES),
             DRIP_TEXTGRID_PHONE_FIELD: _get_first(fields, CONV_TO_CANDIDATES),
             DRIP_FROM_NUMBER_FIELD: _get_first(fields, CONV_TO_CANDIDATES),
             DRIP_MESSAGE_PREVIEW_FIELD: reply_text,
-            DRIP_NEXT_SEND_DATE_FIELD: queue_time.astimezone(timezone.utc).isoformat(),
+            DRIP_NEXT_SEND_DATE_FIELD: _ct_naive(queue_time),
             DRIP_PROPERTY_ID_FIELD: fields.get(CONV_PROPERTY_ID_FIELD),
             DRIP_UI_FIELD: STATUS_ICON.get("QUEUED", "⏳"),
         }
@@ -882,7 +1589,13 @@ class Autoresponder:
                 or fields_.get("Address")
                 or "your property"
             )
-            return {"First": first, "Address": address}
+            city = (
+                fields_.get(PROSPECT_FIELDS.get("PROPERTY_CITY"))
+                or fields_.get("Property City")
+                or fields_.get("City")
+                or ""
+            )
+            return {"First": first, "Address": address, "Property City": city}
 
         personalization = _personalize(prospect_fields)
         rand_key = f"{last_10_digits(from_number) or from_number}:{event}"
@@ -890,6 +1603,17 @@ class Autoresponder:
 
         # Hard-stop events
         if event == "optout":
+            self._update_prospect_comprehensive(
+                prospect_record=prospect_record,
+                conversation_fields=fields,
+                body=body,
+                event="optout",
+                direction="INBOUND",
+                from_number=from_number,
+                to_number=_get_first(fields, CONV_TO_CANDIDATES),
+                stage=STAGE_OPTOUT,
+                ai_intent=ai_intent
+            )
             self._update_conversation(
                 record["id"], status=_pick_status("OPT OUT"), stage=STAGE_OPTOUT, ai_intent=ai_intent,
                 lead_id=None, prospect_id=_normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)) or (prospect_record or {}).get("id")
@@ -897,6 +1621,17 @@ class Autoresponder:
             return
 
         if event == "ownership_no":
+            self._update_prospect_comprehensive(
+                prospect_record=prospect_record,
+                conversation_fields=fields,
+                body=body,
+                event="ownership_no",
+                direction="INBOUND",
+                from_number=from_number,
+                to_number=_get_first(fields, CONV_TO_CANDIDATES),
+                stage=STAGE_DNC,
+                ai_intent=ai_intent
+            )
             self._update_conversation(
                 record["id"], status=_pick_status("DELIVERED"), stage=STAGE_DNC, ai_intent=ai_intent,
                 lead_id=None, prospect_id=_normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)) or (prospect_record or {}).get("id")
@@ -926,6 +1661,17 @@ class Autoresponder:
                 )
             except Exception:
                 pass
+            self._update_prospect_comprehensive(
+                prospect_record=prospect_record,
+                conversation_fields=fields,
+                body=body,
+                event="interest_no_30d",
+                direction="INBOUND",
+                from_number=from_number,
+                to_number=_get_first(fields, CONV_TO_CANDIDATES),
+                stage=STAGE2,
+                ai_intent=ai_intent
+            )
             return
 
         # Stage-progress events
@@ -999,6 +1745,22 @@ class Autoresponder:
             template_id=template_id,
         )
 
+        # Update prospect with comprehensive data
+        self._update_prospect_comprehensive(
+            prospect_record=prospect_record,
+            conversation_fields=fields,
+            body=body,
+            event=event,
+            direction="INBOUND",
+            from_number=from_number,
+            to_number=_get_first(fields, CONV_TO_CANDIDATES),
+            stage=next_stage,
+            ai_intent=ai_intent
+        )
+
+        # Check if follow-up campaign is needed for unverified phones
+        self._create_follow_up_campaign_if_needed(prospect_record, from_number)
+
         # Update lead trail (best-effort)
         if lead_id:
             try:
@@ -1009,6 +1771,16 @@ class Autoresponder:
                         LEAD_LAST_DIRECTION: ConversationDirection.INBOUND.value,
                         LEAD_LAST_ACTIVITY: iso_now(),
                     },
+                )
+            except Exception:
+                pass
+
+        # Update lead promotion date in prospect if lead was created
+        if lead_id and event in {"ownership_yes", "interest_yes", "price_provided", "ask_offer", "condition_info"}:
+            try:
+                self.prospects.update(
+                    prospect_id,
+                    {self.prospect_field_map["LEAD_PROMOTION_DATE"]: iso_now()}
                 )
             except Exception:
                 pass

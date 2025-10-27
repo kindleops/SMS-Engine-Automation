@@ -1626,6 +1626,74 @@ PROSPECTS_TABLE = TableDefinition(
             env_vars=("PROSPECT_RECORD_ID_FIELD",),
             fallbacks=("record_id",),
         ),
+        # Enhanced prospect fields for comprehensive tracking
+        "SELLER_ASKING_PRICE": FieldDefinition(
+            default="Seller Asking Price",
+            env_vars=("PROSPECT_SELLER_ASKING_PRICE_FIELD",),
+            fallbacks=("seller_asking_price",),
+        ),
+        "CONDITION_NOTES": FieldDefinition(
+            default="Condition Notes",
+            env_vars=("PROSPECT_CONDITION_NOTES_FIELD",),
+            fallbacks=("condition_notes",),
+        ),
+        "TIMELINE_MOTIVATION": FieldDefinition(
+            default="Timeline / Motivation",
+            env_vars=("PROSPECT_TIMELINE_MOTIVATION_FIELD",),
+            fallbacks=("timeline_motivation",),
+        ),
+        "OWNERSHIP_CONFIRMED_DATE": FieldDefinition(
+            default="Ownership Confirmation Timeline",
+            env_vars=("PROSPECT_OWNERSHIP_CONFIRMED_DATE_FIELD",),
+            fallbacks=("ownership_confirmation_timeline",),
+        ),
+        "LEAD_PROMOTION_DATE": FieldDefinition(
+            default="Lead Promotion Date",
+            env_vars=("PROSPECT_LEAD_PROMOTION_DATE_FIELD",),
+            fallbacks=("lead_promotion_date",),
+        ),
+        "ACTIVE_PHONE_SLOT": FieldDefinition(
+            default="Active Phone Slot",
+            env_vars=("PROSPECT_ACTIVE_PHONE_SLOT_FIELD",),
+            options=("1", "2"),
+            fallbacks=("active_phone_slot",),
+        ),
+        "LAST_TRIED_SLOT": FieldDefinition(
+            default="Last Tried Slot",
+            env_vars=("PROSPECT_LAST_TRIED_SLOT_FIELD",),
+            options=("1", "2"),
+            fallbacks=("last_tried_slot",),
+        ),
+        "TEXTGRID_PHONE": FieldDefinition(
+            default="TextGrid Phone Number",
+            env_vars=("PROSPECT_TEXTGRID_PHONE_FIELD",),
+            fallbacks=("textgrid_phone_number",),
+        ),
+        "REPLY_COUNT": FieldDefinition(
+            default="Reply Count",
+            env_vars=("PROSPECT_REPLY_COUNT_FIELD",),
+            fallbacks=("reply_count",),
+        ),
+        "OPT_OUT": FieldDefinition(
+            default="Opt Out?",
+            env_vars=("PROSPECT_OPT_OUT_FIELD",),
+            fallbacks=("opt_out",),
+        ),
+        "SEND_COUNT": FieldDefinition(
+            default="Send Count",
+            env_vars=("PROSPECT_SEND_COUNT_FIELD",),
+            fallbacks=("send_count",),
+        ),
+        "NOTIFICATIONS_LINK": FieldDefinition(
+            default="Notifications",
+            env_vars=("PROSPECT_NOTIFICATIONS_LINK_FIELD",),
+            fallbacks=("Notifications",),
+        ),
+        "DEALS_LINK": FieldDefinition(
+            default="Deal",
+            env_vars=("PROSPECT_DEALS_LINK_FIELD",),
+            fallbacks=("Deal",),
+        ),
     },
 )
 
