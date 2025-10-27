@@ -1009,23 +1009,34 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
 
 
 def log_conversation(payload: dict):
+    print(f"🔍 Attempting to log conversation: {payload.get('phone', 'unknown phone')}")
+    
     if not convos:
+        print(f"⚠️ Conversations table not initialized. AIRTABLE_API_KEY: {'SET' if AIRTABLE_API_KEY else 'NOT SET'}, BASE_ID: {'SET' if BASE_ID else 'NOT SET'}")
         return
+    
     try:
-        convos.create(payload)
+        print(f"📝 Creating conversation record with {len(payload)} fields")
+        result = convos.create(payload)
+        print(f"✅ Successfully logged conversation to Airtable: {result.get('id', 'unknown ID')}")
     except Exception as e:
         print(f"⚠️ Failed to log to Conversations: {e}")
+        print(f"🔍 Payload keys: {list(payload.keys())}")
+        traceback.print_exc()
 
 
 # === TESTABLE HANDLER (used by CI) ===
 def handle_inbound(payload: dict):
     """Non-async inbound handler used by tests."""
+    print(f"🔄 Processing inbound message from {payload.get('From', 'unknown')}: {payload.get('Body', '')[:50]}...")
+    
     from_number = payload.get("From")
     to_number = payload.get("To")
     body = payload.get("Body")
     msg_id = payload.get("MessageSid") or payload.get("TextGridId")
 
     if not from_number or not body:
+        print(f"❌ Missing required fields - From: {bool(from_number)}, Body: {bool(body)}")
         raise HTTPException(status_code=422, detail="Missing From or Body")
 
     if _is_opt_out(body):
@@ -1087,6 +1098,7 @@ def handle_inbound(payload: dict):
     if property_id:
         record["Property ID"] = property_id
 
+    print(f"📊 About to log conversation record: {record}")
     log_conversation(record)
     if lead_id:
         update_lead_activity(lead_id, body, "IN", reply_increment=True)
