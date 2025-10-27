@@ -389,11 +389,11 @@ def _fetch_template_messages(templates_tbl, ids: List[str]) -> List[Tuple[str, s
     return pairs
 
 # ---------- Duplicate guards ----------
-def _already_in_drip_campaign_phone(drip_tbl, campaign_id: str, phone: str) -> bool:
+def _already_in_drip_campaign_phone(drip_tbl, campaign_name: str, phone: str) -> bool:
     """Airtable dedupe for (Campaign + Seller Phone) with non-Failed status; robust for linked field."""
     formula = (
         "AND("
-        f"SEARCH('{_escape_quotes(campaign_id)}',ARRAYJOIN({{{DRIP_CAMPAIGN_LINK_F}}}))>0,"
+        f"SEARCH('{_escape_quotes(campaign_name)}',ARRAYJOIN({{{DRIP_CAMPAIGN_LINK_F}}}))>0,"
         f"{{{DRIP_SELLER_PHONE_F}}}='{_escape_quotes(phone)}',"
         f"NOT({{{DRIP_STATUS_F}}}='Failed')"
         ")"
@@ -420,12 +420,15 @@ def _any_active_for_phone(drip_tbl, phone: str) -> bool:
     except Exception:
         return False
 
-def _campaign_has_queued_rows(drip_tbl, campaign_id: str) -> bool:
+def _campaign_has_queued_rows(drip_tbl, campaign_name: str) -> bool:
     """Loop guard: if campaign already has QUEUED/Retry/Sending… rows, skip run."""
+    # broaden pending statuses; avoid the ellipsis glyph
+    pending = ["QUEUED", "Retry", "Sending", "Sending...", "Pending"]
+    or_status = ",".join([f"{{{DRIP_STATUS_F}}}='{s}'" for s in pending])
     formula = (
         "AND("
-        f"SEARCH('{_escape_quotes(campaign_id)}',ARRAYJOIN({{{DRIP_CAMPAIGN_LINK_F}}}))>0,"
-        f"OR({{{DRIP_STATUS_F}}}='QUEUED',{{{DRIP_STATUS_F}}}='Retry',{{{DRIP_STATUS_F}}}='Sending…')"
+        f"SEARCH('{_escape_quotes(campaign_name)}',ARRAYJOIN({{{DRIP_CAMPAIGN_LINK_F}}}))>0,"
+        f"OR({or_status})"
         ")"
     )
     try:
@@ -464,9 +467,9 @@ def _queue_one_campaign(
         log.info(f"⏭️ Campaign {cname} is {cstatus}; skipped.")
         return {"campaign": cname, "queued": 0, "skipped": "status"}
 
-    # Loop guard: don’t requeue if this campaign already has pending rows
+    # Loop guard: don't requeue if this campaign already has pending rows
     drip_tbl = CONNECTOR.drip_queue().table
-    if cid and _campaign_has_queued_rows(drip_tbl, cid):
+    if cname and _campaign_has_queued_rows(drip_tbl, cname):
         log.warning(f"⚠️ Campaign {cname} already has pending drips — skipping duplicate run.")
         return {"campaign": cname, "queued": 0, "skipped": "already_pending"}
 
@@ -530,7 +533,7 @@ def _queue_one_campaign(
         seen_phones.add(phone)
 
         # Airtable dedupe (Campaign + Seller Phone)
-        if cid and _already_in_drip_campaign_phone(drip_tbl, cid, phone):
+        if cname and _already_in_drip_campaign_phone(drip_tbl, cname, phone):
             reasons["dup_in_airtable"] += 1
             continue
 
@@ -546,9 +549,32 @@ def _queue_one_campaign(
             tmpl_id, body = None, ""
         rendered = _render_message(body, pf)
 
+        # Don't queue empty messages
+        if not rendered.strip():
+            reasons["empty_message"] += 1
+            continue
+
         # Choose From-number by campaign market (fallback: prospect market), persisted round-robin
         drip_market = pf.get(PROSPECT_MARKET_F) or ""
         from_number = _choose_from_number(numbers_tbl, cmarket or drip_market, tg_state)
+
+        # Handle missing From number with fallback to any active number
+        if not from_number:
+            # fallback: any active number
+            pool_any = _get_numbers_for_market(numbers_tbl, cmarket or drip_market)
+            if not pool_any:
+                all_numbers = numbers_tbl.all(page_size=100) or []
+                from_number = next((
+                    _extract_number(r.get("fields", {})) 
+                    for r in all_numbers 
+                    if _is_active_number(r.get("fields", {}))
+                ), None)
+            else:
+                from_number = pool_any[0] if pool_any else None
+        
+        if not from_number:
+            reasons["no_from_number"] += 1
+            continue
 
         # Property ID from prospect
         prop_id = _prospect_property_id(pf)

@@ -28,7 +28,6 @@ import os
 import random
 import re
 from datetime import datetime, timedelta, timezone
-from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # ---- Schema & config (stable entry points) -----------------------------------
@@ -179,7 +178,8 @@ CONV_TEXTGRID_ID_FIELD = CONV_FIELDS.get("TEXTGRID_ID", "TextGrid ID")
 
 # --- Candidates for robust extraction ---
 CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "Seller Phone Number", "From", "phone"]
-CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Phone Number", "TextGrid Number", "From Number", "to_number", "To"]
+# Note: "From Number" in TO candidates may be connector-specific - review if it causes confusion
+CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Phone Number", "TextGrid Number", "to_number", "To"]
 CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Message", "Body", "message"]
 CONV_DIRECTION_CANDIDATES = [CONV_DIRECTION_FIELD, "Direction", "direction"]
 CONV_PROCESSED_BY_CANDIDATES = [CONV_PROCESSED_BY_FIELD, "Processed By", "processed_by"]
@@ -212,7 +212,7 @@ LEAD_LAST_DIRECTION = LEAD_FIELDS.get("LAST_DIRECTION", "Last Direction")
 LEAD_LAST_ACTIVITY = LEAD_FIELDS.get("LAST_ACTIVITY", "Last Activity")
 
 # Conversation delivery statuses (schema-safe)
-SAFE_CONVERSATION_STATUS = {"QUEUED", "SENT", "DELIVERED", "FAILED", "UNDELIVERED", "OPT OUT"}
+SAFE_CONVERSATION_STATUS = {"QUEUED", "SENT", "DELIVERED", "FAILED", "UNDELIVERED", "OPT OUT", "DNC"}
 
 STATUS_ICON = {
     "QUEUED": "⏳",
@@ -242,12 +242,22 @@ EVENT_TEMPLATE_POOLS: Dict[str, Tuple[str, ...]] = {
     "condition_info": ("handoff_ack",),
 }
 
+# Hard fallback templates to prevent generic "Thanks for the reply." in critical stages
+FALLBACK_TEMPLATES: Dict[str, str] = {
+    "stage2_interest_prompt": "Thanks {First}! Are you open to an offer on {Address} in {Property_City}?",
+    "stage3_ask_price": "Got it — what price were you hoping to get for {Address}?",
+    "stage4_condition_prompt": "Thanks! I'll run numbers. Quick one: what's the condition of {Address} (repairs/updates/tenant/vacant)?",
+    "stage4_condition_ack_prompt": "Appreciate it. And how's the condition (roof/HVAC/kitchen/bath)? Any repairs needed?",
+    "handoff_ack": "Perfect — I've got what I need. Our team will follow up shortly.",
+    "followup_30d_queue": "Just checking back — still open to an offer on {Address}?",
+}
+
 # ---------------------------------------------------------------------------
 # Intent lexicon
 # ---------------------------------------------------------------------------
 
-STOP_WORDS = {"stop", "unsubscribe", "remove", "quit", "cancel", "end"}
-WRONG_NUM_WORDS = {"wrong number", "not mine", "new number"}
+OPTOUT_RE = re.compile(r"\b(stop(all)?|unsubscribe|quit|cancel|end|opt\s*out|remove\s*me)\b", re.I)
+WRONG_NUM_WORDS = {"wrong number", "not mine"}
 NOT_OWNER_PHRASES = {"not the owner", "i sold", "no longer own", "dont own", "do not own", "sold this", "wrong person"}
 INTEREST_NO_PHRASES = {
     "not interested",
@@ -262,10 +272,19 @@ INTEREST_NO_PHRASES = {
 }
 ASK_OFFER_PHRASES = {"your offer", "what's your offer", "whats your offer", "what is your offer", "what can you offer"}
 COND_WORDS = {"condition", "repairs", "needs work", "renovated", "updated", "tenant", "vacant", "occupied", "as-is", "roof", "hvac"}
-YES_WORDS = {"yes", "yeah", "yep", "sure", "affirmative", "correct", "that's me", "that is me", "i am"}
-NO_WORDS = {"no", "nope", "nah"}
+YES_RE = re.compile(r"\b(yes|yep|yeah|sure|affirmative|correct|that's me|that is me|i am)\b", re.I)
+NO_RE = re.compile(r"\b(no|nope|nah)\b", re.I)
 
 PRICE_REGEX = re.compile(r"(\$?\s?\d{2,3}(?:,\d{3})*(?:\.\d{1,2})?\b)|(\b\d+\s?k\b)|(\b\d{2,3}k\b)", re.IGNORECASE)
+
+def _looks_like_price(text: str) -> bool:
+    """Enhanced price detection that avoids false-triggers on phone numbers"""
+    t = text.lower()
+    if re.search(r'\$\s*\d', t) or re.search(r'\b\d+\s*k\b', t):
+        return True
+    if any(w in t for w in ("ask", "price", "offer", "how much")):
+        return bool(re.search(r'\b(?:\d{1,3}(?:,\d{3})+|\d{4,6})(?:\.\d{1,2})?\b', t))
+    return False
 
 # ---------------------------------------------------------------------------
 # Local schema helpers for resilient create() if datastore safe_create is absent
@@ -361,6 +380,9 @@ def _ct_naive(dt_utc: datetime) -> str:
         tz = timezone.utc
     return dt_utc.astimezone(tz).replace(tzinfo=None).isoformat(timespec="seconds")
 
+def _squish(s: str) -> str:
+    return re.sub(r"\s{2,}", " ", s).strip()
+
 def _get_first(fields: Dict[str, Any], candidates: Iterable[Optional[str]]) -> Optional[Any]:
     for key in candidates:
         if not key:
@@ -402,10 +424,7 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
         return None
 
 def _recently_responded(fields: Dict[str, Any], processed_by: str) -> bool:
-    last_by = str(fields.get(CONV_PROCESSED_BY_FIELD) or "").strip()
-    allowed_labels = {processed_by, ConversationProcessor.AUTORESPONDER.value}
-    if last_by and last_by not in allowed_labels:
-        return False
+    # respect quiet window regardless of who replied last
     candidates = [
         fields.get(CONV_PROCESSED_AT_FIELD),
         fields.get("Processed Time"),
@@ -480,19 +499,19 @@ def _base_intent(body: str) -> str:
     if any(p in text for p in ["who is this", "how did you get", "why are you", "what is this about"]):
         return "inquiry"
 
-    if any(w in text for w in STOP_WORDS):
+    if OPTOUT_RE.search(text):
         return "optout"
     if any(w in text for w in WRONG_NUM_WORDS) or any(w in text for w in NOT_OWNER_PHRASES):
         return "ownership_no"
     if any(w in text for w in INTEREST_NO_PHRASES):
         return "interest_no"
 
-    if any(w in text for w in YES_WORDS):
+    if YES_RE.search(text):
         return "affirm"
-    if any(w in text for w in NO_WORDS):
+    if NO_RE.search(text):
         return "deny"
 
-    if PRICE_REGEX.search(text):
+    if _looks_like_price(text):
         return "price_provided"
     if any(w in text for w in ASK_OFFER_PHRASES):
         return "ask_offer"
@@ -538,6 +557,9 @@ def _event_for_stage(stage_label: str, base_intent: str) -> str:
         if base_intent == "condition_info":
             return "condition_info"
         return "noop"
+    
+    # Final safety default
+    return "noop"
 
 # ---------------------------------------------------------------------------
 # AI intent mapping (for analytics)
@@ -598,7 +620,7 @@ class Autoresponder:
             "LAST_INBOUND": PROSPECT_FIELDS.get("LAST_INBOUND", "Last Inbound"),
             "LAST_OUTBOUND": PROSPECT_FIELDS.get("LAST_OUTBOUND", "Last Outbound"),
             "LAST_ACTIVITY": PROSPECT_FIELDS.get("LAST_ACTIVITY", "Last Activity"),
-            "OWNERSHIP_CONFIRMED_DATE": PROSPECT_FIELDS.get("OWNERSHIP_CONFIRMED_DATE", "Ownership Confirmation Timeline"),
+            "OWNERSHIP_CONFIRMED_DATE": PROSPECT_FIELDS.get("OWNERSHIP_CONFIRMED_DATE", "Ownership Confirmation Date"),
             "LEAD_PROMOTION_DATE": PROSPECT_FIELDS.get("LEAD_PROMOTION_DATE", "Lead Promotion Date"),
             "PHONE_1_VERIFIED": PROSPECT_FIELDS.get("PHONE_PRIMARY_VERIFIED", "Phone 1 Ownership Verified"),
             "PHONE_2_VERIFIED": PROSPECT_FIELDS.get("PHONE_SECONDARY_VERIFIED", "Phone 2 Ownership Verified"),
@@ -646,12 +668,33 @@ class Autoresponder:
                         raw = local_templates.get_template(pool, personalization)
                     except Exception:
                         raw = ""
+                
+                # Normalize common spaced placeholders to underscore variants for str.format()
+                raw = raw.replace("{Property City}", "{Property_City}")
+                raw = raw.replace("{Owner First Name}", "{First}")  # safety: legacy alias
+                
                 try:
                     msg = raw.format(**personalization) if raw else ""
+                    msg = _squish(msg)
                 except Exception as e:
                     logger.debug(f"Template format fallback (missing keys?): {e}; raw kept.")
                     msg = raw
+                    msg = _squish(msg)
                 return (msg or "Thanks for the reply.", chosen.get("id"), pool)
+        
+        # If no Airtable/local template found, use hard fallback for critical stages
+        for pool in pool_keys:
+            fallback_raw = FALLBACK_TEMPLATES.get(pool)
+            if fallback_raw:
+                try:
+                    fallback_msg = fallback_raw.format(**personalization)
+                    fallback_msg = _squish(fallback_msg)
+                    if fallback_msg:
+                        return (fallback_msg, None, pool)
+                except Exception as e:
+                    logger.debug(f"Fallback template format error for {pool}: {e}")
+                    continue
+        
         return ("Thanks for the reply.", None, None)
 
     # -------------------------- Fetch inbound
@@ -746,7 +789,6 @@ class Autoresponder:
         text = body.lower()
         
         # Enhanced price patterns including more variations
-        import re
         
         # Pattern 1: Standard price formats ($250,000 or $250000)
         standard_pattern = r'\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)'
@@ -754,10 +796,7 @@ class Autoresponder:
         # Pattern 2: 'k' notation (250k, 250K)
         k_pattern = r'(\d{1,4})\s*k(?:\s|$|[^\w])'
         
-        # Pattern 3: Written amounts (two hundred fifty thousand)
-        written_pattern = r'((?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million)\s*)+(?:dollars?)?'
-        
-        # Pattern 4: Around/about patterns (around 250k, about $250,000)
+        # Pattern 3: Around/about patterns (around 250k, about $250,000)
         around_pattern = r'(?:around|about|approximately|roughly)\s*[\$]?\s*(\d{1,3}(?:,\d{3})*|\d{1,4}k)'
         
         # Try standard pattern first
@@ -806,7 +845,9 @@ class Autoresponder:
         if price_matches:
             for match in price_matches:
                 if match[0]:  # Full price format
-                    return match[0].replace(',', '').strip()
+                    raw = match[0]
+                    price = re.sub(r'[^\d.]', '', raw)  # strip $ and commas
+                    return price
                 elif match[1] or match[2]:  # 'k' format
                     k_value = (match[1] or match[2]).replace('k', '').strip()
                     try:
@@ -847,7 +888,6 @@ class Autoresponder:
                         break
         
         # Look for specific condition patterns
-        import re
         
         # Pattern for "needs X" statements
         needs_pattern = r'needs?\s+(?:a\s+)?(?:new\s+)?(\w+(?:\s+\w+){0,2})'
@@ -908,7 +948,6 @@ class Autoresponder:
                         break
         
         # Look for specific timeline patterns
-        import re
         
         # Pattern for "need to sell by/before X"
         deadline_pattern = r'(?:need|have|must)\s+to\s+sell\s+(?:by|before|within)\s+(\w+(?:\s+\w+){0,3})'
@@ -963,7 +1002,6 @@ class Autoresponder:
         property_details = []
         
         # Look for bedroom/bathroom info
-        import re
         bed_bath_pattern = r'(\d+)\s*(bed|bedroom|br|bath|bathroom|ba)'
         matches = re.findall(bed_bath_pattern, text)
         if matches:
@@ -1097,6 +1135,7 @@ class Autoresponder:
             'ownership_no': 'Denied property ownership',
             'interest_yes': 'Expressed interest in selling',
             'interest_no': 'Not interested in selling',
+            'interest_no_30d': 'Not interested right now (queued 30-day follow-up)',
             'price_provided': f'Provided asking price information',
             'ask_offer': 'Asked about our offer',
             'condition_info': 'Discussed property condition',
@@ -1169,7 +1208,7 @@ class Autoresponder:
         event: str,
         direction: str,
         from_number: str,
-        to_number: str,
+        to_number: Optional[str],
         stage: str,
         ai_intent: str
     ) -> None:
@@ -1488,6 +1527,11 @@ class Autoresponder:
         *,
         is_quiet: bool,
     ) -> None:
+        # If we're inside quiet hours, don't send (enqueue already attempted earlier)
+        if is_quiet:
+            safe_log_message("OUTBOUND", to_number or "", from_number, body, status="Throttled")
+            return
+
         # Log AR-initiated outbound trail regardless of transport result
         try:
             safe_log_message(
@@ -1495,7 +1539,7 @@ class Autoresponder:
                 to_number or "",
                 from_number,
                 body,
-                status="QUEUED" if is_quiet else "SENT",
+                status="SENT",
             )
         except Exception:
             pass
@@ -1547,14 +1591,21 @@ class Autoresponder:
         if direction not in ("IN", "INBOUND"):
             return
 
+        # Early claim to reduce double-processing race conditions
+        try:
+            self.convos.update(record["id"], {
+                CONV_PROCESSED_BY_FIELD: self.processed_by,
+                CONV_PROCESSED_AT_FIELD: iso_now(),
+            })
+        except Exception:
+            pass
+
         from_number = str(from_value)
         body = str(body_value)
         current_stage = str(fields.get(CONV_STAGE_FIELD) or "").strip() or STAGE1
 
         prospect_record = self._find_prospect(from_number)
         prospect_fields = (prospect_record or {}).get("fields", {}) or {}
-        # Mark phone verified opportunistically (used especially for 30-day follow-up case)
-        self._mark_phone_verified(prospect_record, from_number)
 
         base = _base_intent(body)
         event = _event_for_stage(current_stage, base)
@@ -1568,7 +1619,6 @@ class Autoresponder:
         next_stage = current_stage
         reply_text: Optional[str] = None
         template_id: Optional[str] = None
-        template_pool_used: Optional[str] = None
         queue_reply = False
 
         # Personalization & deterministic pick
@@ -1595,7 +1645,14 @@ class Autoresponder:
                 or fields_.get("City")
                 or ""
             )
-            return {"First": first, "Address": address, "Property City": city}
+            return {
+                "First": first,
+                "Address": address,
+                # City aliases so any template style works:
+                "Property City": city,
+                "Property_City": city,
+                "PropertyCity": city,
+            }
 
         personalization = _personalize(prospect_fields)
         rand_key = f"{last_10_digits(from_number) or from_number}:{event}"
@@ -1633,13 +1690,15 @@ class Autoresponder:
                 ai_intent=ai_intent
             )
             self._update_conversation(
-                record["id"], status=_pick_status("DELIVERED"), stage=STAGE_DNC, ai_intent=ai_intent,
+                record["id"], status=_pick_status("DNC"), stage=STAGE_DNC, ai_intent=ai_intent,
                 lead_id=None, prospect_id=_normalise_link(fields.get(CONV_PROSPECT_RECORD_FIELD)) or (prospect_record or {}).get("id")
             )
             return
 
         # 30-day follow-up path
         if event == "interest_no_30d":
+            # If "not interested" is coming from this number, treat it as verified owner contact
+            self._mark_phone_verified(prospect_record, from_number)
             pool = EVENT_TEMPLATE_POOLS.get("interest_no_30d", tuple())
             preview, tpl_id, pool_used = self._pick_message(pool, personalization, rand_key)
             drip_when = datetime.now(timezone.utc) + timedelta(days=30)
@@ -1676,26 +1735,28 @@ class Autoresponder:
 
         # Stage-progress events
         if event == "ownership_yes":
+            # Mark phone verified only on confirmed ownership
+            self._mark_phone_verified(prospect_record, from_number)
             next_stage = STAGE2
             pool = EVENT_TEMPLATE_POOLS.get("ownership_yes", tuple())
-            reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
+            reply_text, template_id, _ = self._pick_message(pool, personalization, rand_key)
             queue_reply = True
         elif event == "interest_yes":
             next_stage = STAGE3
             pool = EVENT_TEMPLATE_POOLS.get("interest_yes", tuple())
-            reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
+            reply_text, template_id, _ = self._pick_message(pool, personalization, rand_key)
             queue_reply = True
         elif event in {"ask_offer", "price_provided"}:
             next_stage = STAGE4
             pool_key = "price_provided" if event == "price_provided" else "ask_offer"
             pool = EVENT_TEMPLATE_POOLS.get(pool_key, tuple())
-            reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
+            reply_text, template_id, _ = self._pick_message(pool, personalization, rand_key)
             queue_reply = True
         elif event == "condition_info":
             next_stage = STAGE4
             pool = EVENT_TEMPLATE_POOLS.get("condition_info", tuple())
             if pool:
-                reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
+                reply_text, template_id, _ = self._pick_message(pool, personalization, rand_key)
                 queue_reply = bool(reply_text)
         else:  # "noop"
             if _recently_responded(fields, self.processed_by) or current_stage == STAGE4:
@@ -1718,7 +1779,7 @@ class Autoresponder:
             else:
                 pool = tuple()
             if pool:
-                reply_text, template_id, template_pool_used = self._pick_message(pool, personalization, rand_key)
+                reply_text, template_id, _ = self._pick_message(pool, personalization, rand_key)
                 queue_reply = bool(reply_text)
 
         # Create/attach lead ONLY for interested events (Stage 2+ confirmations)
@@ -1850,7 +1911,7 @@ class Autoresponder:
         prospect_record: Optional[Dict[str, Any]],
     ) -> Tuple[Optional[str], Optional[str]]:
         """Create/attach a Lead only when the intent shows interest (Stage 2+)."""
-        interested = {"ownership_yes", "interest_yes", "price_provided", "ask_offer", "condition_info"}
+        interested = {"interest_yes", "price_provided", "ask_offer", "condition_info"}  # Stage 2+ only
         property_id = conv_fields.get(CONV_PROPERTY_ID_FIELD)
         if event not in interested:
             return None, property_id
@@ -1874,7 +1935,7 @@ class Autoresponder:
                 return existing["id"], property_id
 
             created = self.leads.create({
-                LEAD_PHONE_FIELD: from_number,
+                (LEAD_PHONE_FIELD or "Phone"): from_number,
                 (LEAD_STATUS_FIELD or "Lead Status"): "Contacted",
                 (LEAD_SOURCE_FIELD or "Source"): self.processed_by,
             })

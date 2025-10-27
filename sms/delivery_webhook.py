@@ -176,7 +176,7 @@ def _bump_numbers(did: str, delivered: bool):
                 patch["Failed Today"] = int(f.get("Failed Today") or 0) + 1
                 patch["Failed Total"] = int(f.get("Failed Total") or 0) + 1
             try:
-                update_record(handle, r["id"], patch)
+                update_record(handle, r["id"], _filter_known(handle, patch))
             except Exception:
                 traceback.print_exc()
             break
@@ -206,16 +206,17 @@ def _filter_known(handle, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _find_by_sid(handle, sid: str) -> Optional[Dict[str, Any]]:
     """Find the record by trying multiple SID field names."""
+    sid_esc = sid.replace("'", "\\'")
     for col in SID_SEARCH_CANDIDATES:
         try:
-            recs = list_records(handle, formula=f"{{{col}}}='{sid}'", max_records=1)
+            recs = list_records(handle, formula=f"{{{col}}}='{sid_esc}'", max_records=1)
             if recs:
                 return recs[0]
         except Exception:
             continue
     return None
 
-async def _update_airtable_status(sid: str, status: str, error: Optional[str], from_did: str, to_phone: str):
+async def _update_airtable_status(sid: str, status: str, error: Optional[str], from_did: str, to_phone: str, raw_status: Optional[str] = None, provider: Optional[str] = None):
     """Update Drip Queue + Conversations via datastore with schema-safe patches."""
     dq_handle = CONNECTOR.drip_queue()
     conv_handle = CONNECTOR.conversations()
@@ -238,6 +239,14 @@ async def _update_airtable_status(sid: str, status: str, error: Optional[str], f
     else:  # "sent" or unknown → mark sent
         conv_patch = {CONV_STATUS: "SENT", CONV_SENT_AT: now, CONV_UI: "✅"}
         dq_patch = {DRIP_STATUS: "SENT", DRIP_SENT_AT: now, DRIP_UI: "✅"}
+
+    # Add optional telemetry fields (will be filtered by _filter_known)
+    if raw_status:
+        conv_patch["Delivery Raw Status"] = raw_status
+        dq_patch["Delivery Raw Status"] = raw_status
+    if provider:
+        conv_patch["Provider"] = provider
+        dq_patch["Provider"] = provider
 
     # Conversations
     try:
@@ -307,7 +316,7 @@ def _extract_payload(req_body: Any, headers: Dict[str, str]) -> Dict[str, Any]:
         norm = "sent"
 
     provider = headers.get("x-provider") or headers.get("user-agent") or "unknown"
-    return {"sid": sid, "status": norm, "from": from_n, "to": to_n, "error": error, "provider": provider}
+    return {"sid": sid, "status": norm, "raw_status": status_raw, "from": from_n, "to": to_n, "error": error, "provider": provider}
 
 # ---------------------------------------------------------------------------
 # ROUTES
@@ -334,6 +343,7 @@ async def _handle_delivery(request: Request, header_token: Optional[str], conten
 
     parsed = _extract_payload(body, dict(request.headers))
     sid, status, from_d, to_p, err = parsed["sid"], parsed["status"], parsed["from"], parsed["to"], parsed["error"]
+    raw_status, provider = parsed["raw_status"], parsed["provider"]
 
     if not all([sid, status, from_d, to_p]):
         raise HTTPException(status_code=422, detail="Missing required fields")
@@ -356,7 +366,7 @@ async def _handle_delivery(request: Request, header_token: Optional[str], conten
         traceback.print_exc()
 
     # Async Airtable updates (so we ack 200 immediately)
-    asyncio.create_task(_update_airtable_status(sid, status, err, from_norm, to_norm))
+    asyncio.create_task(_update_airtable_status(sid, status, err, from_norm, to_norm, raw_status, provider))
 
     return {"status": "ok", "sid": sid, "normalized": status}
 

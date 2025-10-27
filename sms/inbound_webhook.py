@@ -4,7 +4,7 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Header, Query
 from pyairtable import Table
 
 from sms.number_pools import increment_delivered, increment_failed, increment_opt_out
@@ -16,9 +16,36 @@ router = APIRouter()
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 BASE_ID = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
 
+# === WEBHOOK AUTHENTICATION ===
+WEBHOOK_TOKEN = (
+    os.getenv("WEBHOOK_TOKEN")
+    or os.getenv("CRON_TOKEN")
+    or os.getenv("TEXTGRID_AUTH_TOKEN")
+    or os.getenv("INBOUND_WEBHOOK_TOKEN")
+)
+
+# === REDIS/UPSTASH CONFIG ===
+REDIS_URL = os.getenv("REDIS_URL") or os.getenv("redis_url")
+REDIS_TLS = str(os.getenv("REDIS_TLS", "true")).lower() in ("true", "1", "yes")
+UPSTASH_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL") or os.getenv("upstash_redis_rest_url")
+UPSTASH_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN") or os.getenv("upstash_redis_rest_token")
+
+# Optional Redis / Upstash
+try:
+    import redis as _redis  # type: ignore
+except Exception:
+    _redis = None
+try:
+    import requests  # type: ignore
+except Exception:
+    requests = None
+
 CONVERSATIONS_TABLE = os.getenv("CONVERSATIONS_TABLE", "Conversations")
 LEADS_TABLE = os.getenv("LEADS_TABLE", "Leads")
 PROSPECTS_TABLE = os.getenv("PROSPECTS_TABLE", "Prospects")
+
+# === CONFIGURABLE LEAD PHONE FIELD ===
+LEAD_PHONE_FIELD = os.getenv("LEAD_PHONE_FIELD", "phone")
 
 # === FIELD MAPPINGS ===
 FROM_FIELD = os.getenv("CONV_FROM_FIELD", "phone")
@@ -40,6 +67,101 @@ AI_INTENT_FIELD = os.getenv("CONV_AI_INTENT_FIELD", "AI Intent")
 convos = Table(AIRTABLE_API_KEY, BASE_ID, CONVERSATIONS_TABLE) if AIRTABLE_API_KEY else None
 leads = Table(AIRTABLE_API_KEY, BASE_ID, LEADS_TABLE) if AIRTABLE_API_KEY else None
 prospects = Table(AIRTABLE_API_KEY, BASE_ID, PROSPECTS_TABLE) if AIRTABLE_API_KEY else None
+
+# === AUTHENTICATION ===
+def _is_authorized(header_token: Optional[str], query_token: Optional[str]) -> bool:
+    """Check if request is authorized via header or query token."""
+    if not WEBHOOK_TOKEN:
+        return True  # auth disabled
+    return (header_token == WEBHOOK_TOKEN) or (query_token == WEBHOOK_TOKEN)
+
+
+# === ENHANCED IDEMPOTENCY STORE ===
+class IdempotencyStore:
+    """Redis / Upstash idempotency with local fallback for message deduplication."""
+    def __init__(self):
+        self.r = None
+        self.rest = bool(UPSTASH_REST_URL and UPSTASH_REST_TOKEN and requests)
+        if REDIS_URL and _redis:
+            try:
+                self.r = _redis.from_url(REDIS_URL, ssl=REDIS_TLS, decode_responses=True)
+            except Exception:
+                traceback.print_exc()
+        self._mem = set()
+        self._max_mem_size = 10000  # Bounded memory set
+
+    def seen(self, msg_id: Optional[str]) -> bool:
+        """Check if message ID has been seen before, mark as seen if not."""
+        if not msg_id:
+            return False
+        
+        key = f"inbound:msg:{msg_id}"
+        
+        # Redis TCP
+        if self.r:
+            try:
+                # Use SET with NX (not exists) and EX (expiry in seconds, 24 hours)
+                ok = self.r.set(key, "1", nx=True, ex=24 * 60 * 60)
+                return not bool(ok)  # True if key already existed
+            except Exception:
+                traceback.print_exc()
+        
+        # Upstash REST
+        if self.rest:
+            try:
+                resp = requests.post(
+                    UPSTASH_REST_URL,
+                    headers={"Authorization": f"Bearer {UPSTASH_REST_TOKEN}"},
+                    json={"command": ["SET", key, "1", "EX", "86400", "NX"]},  # 24 hours
+                    timeout=5,
+                )
+                data = resp.json() if resp.ok else {}
+                return data.get("result") != "OK"  # True if key already existed
+            except Exception:
+                traceback.print_exc()
+        
+        # Local fallback with bounded memory
+        if key in self._mem:
+            return True
+        
+        # Prevent memory from growing unbounded
+        if len(self._mem) >= self._max_mem_size:
+            # Remove oldest 20% of entries (simple FIFO approximation)
+            to_remove = list(self._mem)[:self._max_mem_size // 5]
+            for old_key in to_remove:
+                self._mem.discard(old_key)
+        
+        self._mem.add(key)
+        return False
+
+IDEM = IdempotencyStore()
+
+
+# === BODY PARSING ===
+async def _parse_body(request: Request) -> Dict[str, Any]:
+    """Parse request body supporting both JSON and form data."""
+    content_type = request.headers.get("content-type", "").lower()
+    
+    try:
+        if "application/json" in content_type:
+            # Try JSON first
+            body = await request.json()
+            return dict(body) if isinstance(body, dict) else {}
+        elif "application/x-www-form-urlencoded" in content_type:
+            # Form data
+            form = await request.form()
+            return {k: (v if isinstance(v, str) else str(v)) for k, v in dict(form).items()}
+        else:
+            # Auto-detect: try JSON first, fall back to form
+            try:
+                body = await request.json()
+                return dict(body) if isinstance(body, dict) else {}
+            except Exception:
+                form = await request.form()
+                return {k: (v if isinstance(v, str) else str(v)) for k, v in dict(form).items()}
+    except Exception as e:
+        print(f"⚠️ Failed to parse request body: {e}")
+        raise HTTPException(status_code=422, detail="Invalid payload")
 
 # === HELPERS ===
 PHONE_CANDIDATES = [
@@ -91,8 +213,6 @@ CONTRACT_KEYWORDS = {"contract", "paperwork", "agreement"}
 TIMELINE_KEYWORDS = {"timeline", "move", "closing", "close"}
 
 STOP_WORDS = {"stop", "unsubscribe", "remove", "opt out", "quit"}
-
-_SEEN_MESSAGE_IDS: set[str] = set()
 
 # === PROSPECT FIELD MAPPING ===
 PROSPECT_FIELD_MAP = {
@@ -231,7 +351,7 @@ def promote_prospect_to_lead(phone_number: str, source: str = "Inbound"):
         if prospect:
             p_fields = prospect["fields"]
             for p_col, l_col in {
-                "phone": "phone",
+                "phone": LEAD_PHONE_FIELD,
                 "Property ID": "Property ID",
                 "Owner Name": "Owner Name",
                 "Address": "Address",
@@ -246,7 +366,7 @@ def promote_prospect_to_lead(phone_number: str, source: str = "Inbound"):
 
         new_lead = leads.create({
             **fields,
-            "phone": phone_number,
+            LEAD_PHONE_FIELD: phone_number,
             "Lead Status": "New",
             "Source": source,
             "Reply Count": 0,
@@ -888,8 +1008,9 @@ def handle_inbound(payload: dict):
     if _is_opt_out(body):
         return process_optout(payload)
 
-    if msg_id and msg_id in _SEEN_MESSAGE_IDS:
-        return {"status": "duplicate"}
+    # Enhanced idempotency check
+    if msg_id and IDEM.seen(msg_id):
+        return {"status": "duplicate", "msg_id": msg_id}
 
     overrides: Dict[str, str] = {}
     for key in ("Intent", "Intent Detected", "intent"):
@@ -919,9 +1040,6 @@ def handle_inbound(payload: dict):
     prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
     if not property_id and prospect_property_id:
         property_id = prospect_property_id
-
-    if msg_id:
-        _SEEN_MESSAGE_IDS.add(msg_id)
 
     record = {
         FROM_FIELD: from_number,
@@ -978,10 +1096,9 @@ def process_optout(payload: dict):
     if not _is_opt_out(body):
         return {"status": "ignored"}
 
-    if msg_id and msg_id in _SEEN_MESSAGE_IDS:
-        return {"status": "duplicate"}
-    if msg_id:
-        _SEEN_MESSAGE_IDS.add(msg_id)
+    # Enhanced idempotency check
+    if msg_id and IDEM.seen(msg_id):
+        return {"status": "duplicate", "msg_id": msg_id}
 
     print(f"🚫 [TEST] Opt-out from {from_number}")
     increment_opt_out(from_number)
@@ -1055,10 +1172,18 @@ def process_status(payload: dict):
 
 # === FASTAPI ROUTES ===
 @router.post("/inbound")
-async def inbound_handler(request: Request):
+async def inbound_handler(
+    request: Request,
+    x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
+    token: Optional[str] = Query(None),
+):
+    """Handle inbound SMS messages with authentication and flexible body parsing."""
+    if not _is_authorized(x_webhook_token, token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
     try:
-        data = await request.form()
-        return handle_inbound(dict(data))
+        data = await _parse_body(request)
+        return handle_inbound(data)
     except HTTPException:
         raise
     except Exception as e:
@@ -1068,10 +1193,18 @@ async def inbound_handler(request: Request):
 
 
 @router.post("/optout")
-async def optout_handler(request: Request):
+async def optout_handler(
+    request: Request,
+    x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
+    token: Optional[str] = Query(None),
+):
+    """Handle opt-out SMS messages with authentication and flexible body parsing."""
+    if not _is_authorized(x_webhook_token, token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
     try:
-        data = await request.form()
-        return process_optout(dict(data))
+        data = await _parse_body(request)
+        return process_optout(data)
     except HTTPException:
         raise
     except Exception as e:
@@ -1081,10 +1214,18 @@ async def optout_handler(request: Request):
 
 
 @router.post("/status")
-async def status_handler(request: Request):
+async def status_handler(
+    request: Request,
+    x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
+    token: Optional[str] = Query(None),
+):
+    """Handle delivery status messages with authentication and flexible body parsing."""
+    if not _is_authorized(x_webhook_token, token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
     try:
-        data = await request.form()
-        return process_status(dict(data))
+        data = await _parse_body(request)
+        return process_status(data)
     except HTTPException:
         raise
     except Exception as e:
