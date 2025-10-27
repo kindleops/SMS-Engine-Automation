@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional, Dict, Any
@@ -17,6 +18,7 @@ from sms.airtable_schema import (
     PROSPECTS_TABLE,
     DEALS_TABLE,
     CAMPAIGN_MANAGER_TABLE,
+    MESSAGES_TABLE_DEF,
     NUMBERS_TABLE_DEF,
     OPTOUTS_TABLE,
     MARKETS_TABLE,
@@ -35,6 +37,7 @@ from sms.airtable_schema import (
     prospects_field_map,
     deals_field_map,
     campaign_manager_field_map,
+    messages_field_map,
     numbers_field_map,
     optouts_field_map,
     markets_field_map,
@@ -99,10 +102,31 @@ def env_str(key: str, default: Optional[str] = None) -> Optional[str]:
 
 
 # -----------------------------
+# SMS / TextGrid settings
+# -----------------------------
+E164_RE = re.compile(r"^\+[1-9]\d{9,14}$")
+
+TEXTGRID_ACCOUNT_SID = env_str("TEXTGRID_ACCOUNT_SID") or env_str("ACCOUNT_SID")
+TEXTGRID_AUTH_TOKEN = env_str("TEXTGRID_AUTH_TOKEN") or env_str("AUTH_TOKEN")
+DEFAULT_FROM_NUMBER = (
+    env_str("TEXTGRID_DEFAULT_FROM_NUMBER")
+    or env_str("TEXTGRID_DEFAULT_FROM")
+    or env_str("DEFAULT_FROM_NUMBER")
+)
+MESSAGING_SERVICE_SID = env_str("TEXTGRID_MESSAGING_SERVICE_SID") or env_str("MESSAGING_SERVICE_SID")
+
+
+# -----------------------------
 # Static Field Maps
 # -----------------------------
 CONVERSATIONS_FIELDS = CONVERSATIONS_TABLE.field_names()
 CONV_FIELDS = conversations_field_map()
+
+CONV_STATUS_FIELD = CONVERSATIONS_TABLE.field_name("STATUS")
+CONV_STAGE_FIELD = CONVERSATIONS_TABLE.field_name("STAGE")
+CONV_AI_INTENT_FIELD = CONVERSATIONS_TABLE.field_name("AI_INTENT")
+CONV_LEAD_FIELD = CONVERSATIONS_TABLE.field_name("LEAD_LINK")
+CONV_PROSPECT_FIELD = CONVERSATIONS_TABLE.field_name("PROSPECT_LINK")
 
 LEADS_FIELDS = LEADS_TABLE.field_names()
 LEAD_FIELDS = leads_field_map()
@@ -121,6 +145,9 @@ DEALS_FIELD_MAP = deals_field_map()
 
 CAMPAIGN_MANAGER_FIELDS = CAMPAIGN_MANAGER_TABLE.field_names()
 CAMPAIGN_MANAGER_FIELD_MAP = campaign_manager_field_map()
+
+MESSAGES_FIELDS = MESSAGES_TABLE_DEF.field_names()
+MESSAGES_FIELD_MAP = messages_field_map()
 
 NUMBERS_FIELDS = NUMBERS_TABLE_DEF.field_names()
 NUMBERS_FIELD_MAP = numbers_field_map()
@@ -197,6 +224,10 @@ PHONE_FIELDS = [
 ]
 
 
+MSG_TABLE_NAME = env_str("MSG_TABLE_NAME")
+RUNS_TABLE_NAME = env_str("RUNS_TABLE_NAME", "Logs")
+
+
 # -----------------------------
 # Settings Object
 # -----------------------------
@@ -210,6 +241,7 @@ class Settings:
     PROSPECTS_TABLE: str
     LEADS_TABLE: str
     CONVERSATIONS_TABLE: str
+    MESSAGES_TABLE: str
     TEMPLATES_TABLE: str
     DRIP_QUEUE_TABLE: str
     CAMPAIGNS_TABLE: str
@@ -256,6 +288,7 @@ def settings() -> Settings:
         PROSPECTS_TABLE="Prospects",
         LEADS_TABLE="Leads",
         CONVERSATIONS_TABLE="Conversations",
+        MESSAGES_TABLE="Messages",
         TEMPLATES_TABLE="Templates",
         DRIP_QUEUE_TABLE="Drip Queue",
         CAMPAIGNS_TABLE="Campaigns",

@@ -43,7 +43,7 @@ from sms.airtable_schema import (
     template_field_map,
 )
 from sms.config import settings
-from sms.datastore import CONNECTOR
+from sms.datastore import CONNECTOR, log_message
 from sms.dispatcher import get_policy
 from sms.runtime import get_logger, iso_now, last_10_digits
 
@@ -539,6 +539,7 @@ class Autoresponder:
                 "Phone",
                 "phone",
             ]
+        self.connector = CONNECTOR
             if v
         ]
 
@@ -800,6 +801,21 @@ class Autoresponder:
         self.summary["breakdown"][event] = self.summary["breakdown"].get(event, 0) + 1
 
         # Quiet hours scheduling
+        to_value = _get_first(fields, CONV_TO_CANDIDATES)
+        to_number = str(to_value) if to_value is not None else None
+        try:
+            log_message(
+                conversation_id=record.get("id"),
+                direction="INBOUND",
+                to_phone=to_number,
+                from_phone=from_number,
+                body=body,
+                status="RECEIVED",
+                provider_sid=None,
+                provider_error=None,
+            )
+        except Exception:
+            pass
         send_time = next_allowed if is_quiet else datetime.now(timezone.utc)
 
         # Stage resolution & reply planning
@@ -810,6 +826,23 @@ class Autoresponder:
         queue_reply = False
 
         # Personalization & deterministic pick
+        to_value = _get_first(fields, CONV_TO_CANDIDATES)
+        to_number = str(to_value) if to_value else None
+        try:
+            log_message(
+                self.connector,
+                conversation_id=record.get("id"),
+                direction="INBOUND",
+                to_phone=to_number,
+                from_phone=from_number,
+                body=body,
+                status="RECEIVED",
+                provider_sid=None,
+                provider_error=None,
+            )
+        except Exception:
+            logger.warning("Inbound message logging failed", exc_info=True)
+
         def _personalize(fields: Dict[str, Any]) -> Dict[str, str]:
             first = ""
             owner_name = fields.get(PROSPECT_FIELDS.get("OWNER_NAME"))

@@ -16,6 +16,7 @@ Upgrades in v3.2:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import traceback
@@ -32,6 +33,7 @@ except Exception:
 # Transport + retry
 from sms.textgrid_sender import send_message
 from sms.retry_handler import handle_retry
+from sms.datastore import log_message
 
 # Schema maps
 from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS, LEAD_FIELDS
@@ -203,6 +205,12 @@ class MessageProcessor:
         except Exception as e:
             err = str(e)
             logger.error(f"Transport error sending to {phone}: {err}", exc_info=True)
+            failure_meta = MessageProcessor._conversation_metadata(
+                {**meta, "error": err},
+                status=ConversationDeliveryStatus.FAILED.value,
+                lead_id=lead_id,
+                prospect_id=meta.get("prospect_id"),
+            )
             convo_id = MessageProcessor._log_conversation(
                 status="FAILED", phone=phone, body=body, from_number=from_number,
                 direction=direction, sid=None, campaign_id=campaign_id,
@@ -223,6 +231,12 @@ class MessageProcessor:
 
         # --- 3) Log Conversations
         convo_status = ConversationDeliveryStatus.SENT.value if ok else ConversationDeliveryStatus.FAILED.value
+        convo_meta = MessageProcessor._conversation_metadata(
+            {**meta, "provider_status": provider_status},
+            status=convo_status,
+            lead_id=lead_id,
+            prospect_id=meta.get("prospect_id"),
+        )
         convo_id = MessageProcessor._log_conversation(
             status=convo_status, phone=phone, body=body,
             from_number=from_number, direction=direction,
@@ -251,6 +265,58 @@ class MessageProcessor:
         }
         logger.info(f"📤 Outbound → {phone} | {result['status'].upper()} | sid={sid} | provider={provider_status}")
         return result
+
+    @staticmethod
+    def _conversation_metadata(
+        meta: Dict[str, Any],
+        *,
+        status: Optional[str] = None,
+        lead_id: Optional[str] = None,
+        prospect_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        alias_map = {
+            "status": CONV_FIELDS.get("STATUS", "status"),
+            "stage": CONV_FIELDS.get("STAGE", "stage"),
+            "aiintent": CONV_FIELDS.get("AI_INTENT", "ai_intent"),
+            "ai_intent": CONV_FIELDS.get("AI_INTENT", "ai_intent"),
+            "leadid": CONV_FIELDS.get("LEAD_RECORD_ID", "lead_id"),
+            "leadrecordid": CONV_FIELDS.get("LEAD_RECORD_ID", "lead_id"),
+            "lead": CONV_FIELDS.get("LEAD_RECORD_ID", "lead_id"),
+            "prospectid": CONV_FIELDS.get("PROSPECT_RECORD_ID", "prospect_id"),
+            "prospectrecordid": CONV_FIELDS.get("PROSPECT_RECORD_ID", "prospect_id"),
+            "prospect": CONV_FIELDS.get("PROSPECT_RECORD_ID", "prospect_id"),
+        }
+
+        passthrough: Dict[str, Any] = {}
+        normalized: Dict[str, Any] = {}
+        for key, value in (meta or {}).items():
+            norm_key = _norm(key)
+            target = alias_map.get(norm_key)
+            if target:
+                normalized[target] = value
+            else:
+                passthrough[key] = value
+
+        status_field = CONV_FIELDS.get("STATUS", "status")
+        if status:
+            normalized[status_field] = status
+        if lead_id:
+            normalized[CONV_FIELDS.get("LEAD_RECORD_ID", "lead_id")] = lead_id
+        if prospect_id:
+            normalized[CONV_FIELDS.get("PROSPECT_RECORD_ID", "prospect_id")] = prospect_id
+
+        return _compact({**passthrough, **normalized})
+
+    @staticmethod
+    def _stringify_provider_error(error: Any) -> Optional[str]:
+        if error in (None, "", [], {}, ()):  # type: ignore[arg-type]
+            return None
+        if isinstance(error, str):
+            return error
+        try:
+            return json.dumps(error)
+        except Exception:
+            return str(error)
 
     # -----------------------------------------------------------
     @staticmethod

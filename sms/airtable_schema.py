@@ -176,6 +176,86 @@ class ConversationAIIntent(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Conversation messages table schema (Leads & Conversations base)
+# ---------------------------------------------------------------------------
+
+
+class MessageStatus(str, Enum):
+    RECEIVED = "RECEIVED"
+    SENT = "SENT"
+    FAILED = "FAILED"
+
+
+MESSAGES_TABLE = TableDefinition(
+    default="Conversation Messages",
+    env_vars=("MESSAGES_TABLE", "CONVERSATION_MESSAGES_TABLE"),
+    fields={
+        "CONVERSATION": FieldDefinition(
+            default="Conversation",
+            env_vars=("MSG_CONVERSATION_FIELD",),
+        ),
+        "DIRECTION": FieldDefinition(
+            default="Direction",
+            env_vars=("MSG_DIRECTION_FIELD",),
+            options=tuple(direction.value for direction in ConversationDirection),
+        ),
+        "TO": FieldDefinition(
+            default="To",
+            env_vars=("MSG_TO_FIELD",),
+        ),
+        "FROM": FieldDefinition(
+            default="From",
+            env_vars=("MSG_FROM_FIELD",),
+        ),
+        "BODY": FieldDefinition(
+            default="Body",
+            env_vars=("MSG_BODY_FIELD",),
+        ),
+        "STATUS": FieldDefinition(
+            default="Message Status",
+            env_vars=("MSG_STATUS_FIELD",),
+            options=tuple(status.value for status in MessageStatus),
+        ),
+        "PROVIDER_SID": FieldDefinition(
+            default="Provider SID",
+            env_vars=("MSG_PROVIDER_SID_FIELD",),
+        ),
+        "PROVIDER_ERROR": FieldDefinition(
+            default="Provider Error",
+            env_vars=("MSG_PROVIDER_ERROR_FIELD",),
+        ),
+        "TIMESTAMP": FieldDefinition(
+            default="Timestamp",
+            env_vars=("MSG_TIMESTAMP_FIELD",),
+        ),
+    },
+)
+
+
+def messages_field_map() -> Dict[str, str]:
+    fields = MESSAGES_TABLE.fields
+    return {
+        "CONVERSATION": fields["CONVERSATION"].resolve(),
+        "DIRECTION": fields["DIRECTION"].resolve(),
+        "TO": fields["TO"].resolve(),
+        "FROM": fields["FROM"].resolve(),
+        "BODY": fields["BODY"].resolve(),
+        "STATUS": fields["STATUS"].resolve(),
+        "PROVIDER_SID": fields["PROVIDER_SID"].resolve(),
+        "PROVIDER_ERROR": fields["PROVIDER_ERROR"].resolve(),
+        "TIMESTAMP": fields["TIMESTAMP"].resolve(),
+    }
+
+
+def messages_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = MESSAGES_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Conversations table schema (Leads & Conversations base)
 # ---------------------------------------------------------------------------
 
@@ -420,6 +500,117 @@ def conversations_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, 
     results: Dict[str, Tuple[str, ...]] = {}
     for key in keys:
         definition = CONVERSATIONS_TABLE.fields[key]
+        results[key] = definition.candidates()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Messages table schema (Leads & Conversations base)
+# ---------------------------------------------------------------------------
+
+
+MESSAGES_TABLE_DEF = TableDefinition(
+    default="Messages",
+    env_vars=("MESSAGES_TABLE",),
+    fields={
+        "PRIMARY": FieldDefinition(
+            default="Message ID",
+            env_vars=("MESSAGES_PRIMARY_FIELD",),
+            fallbacks=("Record ID", "Message ID"),
+        ),
+        "SELLER_PHONE": FieldDefinition(
+            default="Seller Phone Number",
+            env_vars=("MESSAGES_SELLER_PHONE_FIELD", "CONV_SELLER_PHONE_FIELD"),
+            fallbacks=("Seller Phone Number", "Phone"),
+        ),
+        "TEXTGRID_PHONE": FieldDefinition(
+            default="TextGrid Phone Number",
+            env_vars=("MESSAGES_TEXTGRID_PHONE_FIELD", "CONV_TEXTGRID_PHONE_FIELD"),
+            fallbacks=("TextGrid Phone Number", "From Number"),
+        ),
+        "DIRECTION": FieldDefinition(
+            default="Direction",
+            env_vars=("MESSAGES_DIRECTION_FIELD", "CONV_DIRECTION_FIELD"),
+            fallbacks=("Direction",),
+        ),
+        "STATUS": FieldDefinition(
+            default="Delivery Status",
+            env_vars=("MESSAGES_STATUS_FIELD", "CONV_STATUS_FIELD"),
+            fallbacks=("Delivery Status", "Status"),
+        ),
+        "MESSAGE": FieldDefinition(
+            default="Message",
+            env_vars=("MESSAGES_MESSAGE_FIELD", "CONV_MESSAGE_FIELD"),
+            fallbacks=("Message", "Body", "Message Long text"),
+        ),
+        "TEXTGRID_ID": FieldDefinition(
+            default="TextGrid ID",
+            env_vars=("MESSAGES_TEXTGRID_ID_FIELD", "CONV_TEXTGRID_ID_FIELD"),
+            fallbacks=("TextGrid ID", "SID"),
+        ),
+        "PROVIDER_STATUS": FieldDefinition(
+            default="Provider Status",
+            env_vars=("MESSAGES_PROVIDER_STATUS_FIELD",),
+            fallbacks=("Provider Status",),
+        ),
+        "ERROR": FieldDefinition(
+            default="Error",
+            env_vars=("MESSAGES_ERROR_FIELD", "CONV_LAST_ERROR_FIELD"),
+            fallbacks=("Last Error", "Error"),
+        ),
+        "SENT_AT": FieldDefinition(
+            default="Sent At",
+            env_vars=("MESSAGES_SENT_AT_FIELD", "CONV_SENT_AT_FIELD"),
+            fallbacks=("Sent At", "Created Time"),
+        ),
+        "CREATED_TIME": FieldDefinition(
+            default="Created Time",
+            env_vars=("MESSAGES_CREATED_TIME_FIELD",),
+            fallbacks=("Created Time",),
+        ),
+        "CONVERSATION_LINK": FieldDefinition(
+            default="Conversation",
+            env_vars=("MESSAGES_CONVERSATION_LINK_FIELD",),
+            fallbacks=("Conversation",),
+        ),
+        "LEAD_LINK": FieldDefinition(
+            default="Lead",
+            env_vars=("MESSAGES_LEAD_LINK_FIELD",),
+            fallbacks=("Lead",),
+        ),
+        "PROSPECT_LINK": FieldDefinition(
+            default="Prospect",
+            env_vars=("MESSAGES_PROSPECT_LINK_FIELD",),
+            fallbacks=("Prospect",),
+        ),
+        "CAMPAIGN_LINK": FieldDefinition(
+            default="Campaign",
+            env_vars=("MESSAGES_CAMPAIGN_LINK_FIELD",),
+            fallbacks=("Campaign",),
+        ),
+        "TEMPLATE_LINK": FieldDefinition(
+            default="Template",
+            env_vars=("MESSAGES_TEMPLATE_LINK_FIELD",),
+            fallbacks=("Template",),
+        ),
+        "DRIP_QUEUE_LINK": FieldDefinition(
+            default="Drip Queue",
+            env_vars=("MESSAGES_DRIP_QUEUE_LINK_FIELD",),
+            fallbacks=("Drip Queue",),
+        ),
+    },
+)
+
+
+def messages_field_map() -> Dict[str, str]:
+    fields = MESSAGES_TABLE_DEF.fields
+    return {key: field.resolve() for key, field in fields.items()}
+
+
+def messages_field_candidates(keys: Iterable[str]) -> Dict[str, Tuple[str, ...]]:
+    results: Dict[str, Tuple[str, ...]] = {}
+    for key in keys:
+        definition = MESSAGES_TABLE_DEF.fields[key]
         results[key] = definition.candidates()
     return results
 

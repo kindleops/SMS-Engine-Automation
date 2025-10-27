@@ -25,6 +25,17 @@ try:
 except Exception:
     requests = None
 
+from .config import (
+    TEXTGRID_ACCOUNT_SID,
+    TEXTGRID_AUTH_TOKEN,
+    DEFAULT_FROM_NUMBER,
+    MESSAGING_SERVICE_SID,
+    E164_RE,
+)
+from .runtime import get_logger
+
+logger = get_logger("textgrid_sender")
+
 # --- Airtable (direct; no project wrappers) ---
 try:
     from pyairtable import Table  # type: ignore
@@ -34,8 +45,8 @@ except Exception:
 # =========================
 # ENV / CONFIG
 # =========================
-ACCOUNT_SID = os.getenv("TEXTGRID_ACCOUNT_SID")
-AUTH_TOKEN = os.getenv("TEXTGRID_AUTH_TOKEN")
+ACCOUNT_SID = TEXTGRID_ACCOUNT_SID
+AUTH_TOKEN = TEXTGRID_AUTH_TOKEN
 API_URL = (
     f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
     if ACCOUNT_SID
@@ -64,6 +75,42 @@ CAMPAIGN_LINK_FIELD = os.getenv("CONV_CAMPAIGN_LINK_FIELD", "Campaign")
 
 DEFAULT_SENDER_LABEL = os.getenv("SENDER_LABEL", "TextGrid Sender")
 DRY_RUN = os.getenv("TEXTGRID_DRY_RUN", "0").lower() in ("1", "true", "yes")
+
+# =========================
+# Errors
+# =========================
+
+
+class TextGridError(RuntimeError):
+    """Custom error that carries HTTP metadata and response body."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        body: Any = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+        self.payload = payload
+
+    def __str__(self) -> str:  # pragma: no cover - string formatting helper
+        base = super().__str__()
+        if self.body in (None, "", b""):
+            return base
+        if isinstance(self.body, (dict, list)):
+            body_repr = str(self.body)
+        else:
+            body_repr = str(self.body).strip()
+        if not body_repr:
+            return base
+        if body_repr in base:
+            return base
+        return f"{base} | body={body_repr}"
+
 
 # =========================
 # Small helpers
@@ -98,6 +145,71 @@ def _safe_create(tbl: Any, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+
+def _has_value(value: Any) -> bool:
+    return value is not None and str(value).strip() != ""
+
+
+def _validate_textgrid_payload(payload: Dict[str, Any]) -> None:
+    """Ensure required TextGrid transport fields are present and sane."""
+
+    problems: List[str] = []
+
+    for field in ("To", "From"):
+        if not _has_value(payload.get(field)):
+            problems.append(f"{field} is required")
+
+    body = payload.get("Body")
+    media_url = payload.get("MediaUrl")
+
+    if not _has_value(body) and not _has_value(media_url):
+        problems.append("Body or MediaUrl is required")
+
+    if _has_value(body) and len(str(body)) > 1600:
+        problems.append("Body exceeds 1600 characters (TextGrid limit)")
+
+    if problems:
+        raise TextGridError(
+            "Invalid TextGrid payload: " + "; ".join(problems),
+            payload=dict(payload),
+        )
+
+
+def _extract_error_body(resp: Any) -> Any:
+    """Parse JSON body if available; fallback to plain text."""
+
+    if resp is None:
+        return None
+
+    try:
+        data = resp.json()
+    except Exception:
+        text = getattr(resp, "text", None)
+        if text:
+            return text.strip()
+        content = getattr(resp, "content", b"")
+        if isinstance(content, bytes):
+            try:
+                return content.decode("utf-8", "replace").strip()
+            except Exception:
+                return content
+        return content
+    else:
+        return data
+
+
+def _summarize_error_body(body: Any) -> str:
+    if body is None:
+        return ""
+    if isinstance(body, dict):
+        for key in ("message", "error", "detail", "errors", "error_message"):
+            value = body.get(key)
+            if _has_value(value):
+                return str(value)
+        return str(body)
+    return str(body)
+
+
 def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: int = 15) -> Dict[str, Any]:
     if DRY_RUN:
         print(f"[DRY RUN] POST {url} data={data}")
@@ -109,9 +221,22 @@ def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: i
 
     if httpx:
         resp = httpx.post(url, data=data, auth=auth, timeout=timeout)
+        if resp.status_code >= 400:
+            logger.error("TextGrid %s error body: %s", resp.status_code, resp.text)
         if resp.status_code == 429:
-            raise RuntimeError(f"429 rate limited; retry_after={resp.headers.get('Retry-After')}")
-        resp.raise_for_status()
+            raise TextGridError(
+                f"429 rate limited; retry_after={resp.headers.get('Retry-After')}",
+                status_code=429,
+                body=resp.headers.get("Retry-After"),
+                payload=data,
+            )
+        if resp.is_error:
+            body = _extract_error_body(resp)
+            summary = _summarize_error_body(body)
+            message = f"TextGrid HTTP {resp.status_code}"
+            if summary:
+                message = f"{message}: {summary}"
+            raise TextGridError(message, status_code=resp.status_code, body=body, payload=data)
         try:
             return resp.json()
         except Exception:
@@ -119,9 +244,22 @@ def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: i
 
     # requests fallback
     resp = requests.post(url, data=data, auth=auth, timeout=timeout)
+    if resp.status_code >= 400:
+        logger.error("TextGrid %s error body: %s", resp.status_code, resp.text)
     if resp.status_code == 429:
-        raise RuntimeError(f"429 rate limited; retry_after={resp.headers.get('Retry-After')}")
-    resp.raise_for_status()
+        raise TextGridError(
+            f"429 rate limited; retry_after={resp.headers.get('Retry-After')}",
+            status_code=429,
+            body=resp.headers.get("Retry-After"),
+            payload=data,
+        )
+    if resp.status_code >= 400:
+        body = _extract_error_body(resp)
+        summary = _summarize_error_body(body)
+        message = f"TextGrid HTTP {resp.status_code}"
+        if summary:
+            message = f"{message}: {summary}"
+        raise TextGridError(message, status_code=resp.status_code, body=body, payload=data)
     try:
         return resp.json()
     except Exception:
@@ -132,7 +270,7 @@ def _http_post(url: str, data: Dict[str, Any], auth: Tuple[str, str], timeout: i
 # =========================
 def send_message(
     *,
-    from_number: str,
+    from_number: Optional[str],
     to: str,
     message: str,
     media_url: Optional[str] = None,
@@ -156,18 +294,55 @@ def send_message(
 
     # --- Transport ---
     print(f"📤 Sending SMS → {to}: {message[:60]}...")
-    data: Dict[str, Any] = {"To": to, "From": from_number, "Body": message}
+    body = (message or "").strip()
+    data: Dict[str, Any] = {"To": to, "Body": body}
+
+    use_msid = bool(MESSAGING_SERVICE_SID and not from_number)
+    chosen_from = (from_number or DEFAULT_FROM_NUMBER or "").strip()
+    if use_msid:
+        data["MessagingServiceSid"] = MESSAGING_SERVICE_SID
+    else:
+        if not chosen_from:
+            raise ValueError("No From number and no MessagingServiceSid configured.")
+        data["From"] = chosen_from
+
+    if "From" in data and not E164_RE.fullmatch(str(data["From"])):
+        raise ValueError(f'From must be E.164; got "{data["From"]}"')
+    if not E164_RE.fullmatch(str(data["To"])):
+        raise ValueError(f'To must be E.164; got "{data["To"]}"')
+    if not body:
+        raise ValueError("Body is empty")
     if media_url:
         data["MediaUrl"] = media_url
 
+    from_number_log = data.get("From", chosen_from) or from_number
+
     try:
+        _validate_textgrid_payload(data)
         resp = _http_post(API_URL, data=data, auth=(ACCOUNT_SID, AUTH_TOKEN), timeout=timeout)
+    except TextGridError as e:
+        meta: Dict[str, Any] = {"error": str(e)}
+        if e.body not in (None, "", {}):
+            meta["error_body"] = e.body
+        _log_conversation(
+            status="FAILED",
+            phone=to,
+            from_number=from_number,
+            body=message,
+            sid=None,
+            campaign=campaign or campaign_id,
+            template_id=template_id,
+            lead_id=lead_id,
+            property_id=property_id,
+            meta=meta,
+        )
+        raise
     except Exception as e:
         # Log FAILED conversation (best-effort), then bubble up
         _log_conversation(
             status="FAILED",
             phone=to,
-            from_number=from_number,
+            from_number=from_number_log,
             body=message,
             sid=None,
             campaign=campaign or campaign_id,
@@ -187,7 +362,7 @@ def send_message(
     _log_conversation(
         status="SENT" if ok else "FAILED",
         phone=to,
-        from_number=from_number,
+        from_number=from_number_log,
         body=message,
         sid=sid,
         campaign=campaign or campaign_id,
