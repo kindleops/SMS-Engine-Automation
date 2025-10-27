@@ -362,6 +362,8 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
     message_preview_key = F.get("MESSAGE_PREVIEW", "Message")
     property_id_key = F.get("PROPERTY_ID", "Property ID")
     campaign_link_key = F.get("CAMPAIGN_LINK", "Campaign")
+    template_link_key = F.get("TEMPLATE_LINK", "Template")
+    prospect_link_key = F.get("PROSPECT_LINK", "Prospect")
 
     # Filter for due rows
     due: List[Dict[str, Any]] = []
@@ -432,6 +434,21 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
         market = f.get(market_key)
         body = (f.get(message_preview_key) or "").strip()
         property_id = f.get(property_id_key)
+
+        # Extract linking data for proper conversation logging
+        campaign_links = f.get(campaign_link_key) or []
+        campaign_id = str(campaign_links[0]) if isinstance(campaign_links, list) and campaign_links else (str(campaign_links) if campaign_links else None)
+        
+        template_links = f.get(template_link_key) or []
+        template_id = str(template_links[0]) if isinstance(template_links, list) and template_links else (str(template_links) if template_links else None)
+        
+        prospect_links = f.get(prospect_link_key) or []
+        prospect_id = str(prospect_links[0]) if isinstance(prospect_links, list) and prospect_links else (str(prospect_links) if prospect_links else None)
+
+        # Infer stage and intent for outbound messages
+        # For campaign outreach, typically Stage 1 (initial contact)
+        stage = "Stage 1"
+        ai_intent = "campaign_outreach" if campaign_id else "outbound_follow_up"
 
         # Validate phone
         if not phone:
@@ -523,12 +540,25 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
         try:
             if MessageProcessor is None:
                 raise RuntimeError("no_sender_available")
+            
+            # Build metadata with stage, intent, and prospect_id
+            metadata = {
+                "stage": stage,
+                "ai_intent": ai_intent,
+            }
+            if prospect_id:
+                metadata["prospect_id"] = prospect_id
+                
             res = MessageProcessor.send(  # type: ignore[attr-defined]
                 phone=phone,
                 body=body,
                 from_number=did,
+                campaign_id=campaign_id,
+                template_id=template_id,
+                drip_queue_id=rid,
                 property_id=property_id,
                 direction="OUT",
+                metadata=metadata,
             )
             delivered = bool(res and str(res.get("status", "")).lower() in {"sent", "delivered"})
         except Exception as e:  # pragma: no cover

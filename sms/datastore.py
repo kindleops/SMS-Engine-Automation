@@ -257,6 +257,10 @@ class DataConnector:
     def campaigns(self):
         return self.table_handle(TABLES["campaigns"])
 
+    def campaign_control_campaigns(self):
+        """Campaign Control Base campaigns table"""
+        return self._table(_first_non_empty("CAMPAIGN_CONTROL_BASE"), "Campaigns")
+
     def performance(self):
         handle = self.table_handle(TABLES["performance"])
         if getattr(handle, "_performance_verified", False):
@@ -532,9 +536,8 @@ def _safe_update(handle: TableHandle, record_id: str, fields: Dict[str, Any]) ->
 # REPOSITORY
 # ============================================================
 
-
-    body = _compact(_normalize_fields(fields))
-    body = _compact(_normalize_fields(fields))
+class Repository:
+    """In-memory caching layer for faster lookups."""
 
     def __init__(self) -> None:
         self._conversation_index: Dict[str, str] = {}

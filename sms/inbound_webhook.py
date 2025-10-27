@@ -30,6 +30,7 @@ RECEIVED_AT = os.getenv("CONV_RECEIVED_AT_FIELD", "received_at")
 SENT_AT = os.getenv("CONV_SENT_AT_FIELD", "sent_at")
 PROCESSED_BY = os.getenv("CONV_PROCESSED_BY_FIELD", "processed_by")
 LEAD_LINK_FIELD = os.getenv("CONV_LEAD_LINK_FIELD", "lead_id")
+PROSPECT_LINK_FIELD = os.getenv("CONV_PROSPECT_LINK_FIELD", "Prospect")
 STAGE_FIELD = os.getenv("CONV_STAGE_FIELD", "Stage")
 INTENT_FIELD = os.getenv("CONV_INTENT_FIELD", "Intent Detected")
 AI_INTENT_FIELD = os.getenv("CONV_AI_INTENT_FIELD", "AI Intent")
@@ -156,6 +157,21 @@ def _lookup_prospect_property(phone_number: str) -> Optional[str]:
     except Exception:
         traceback.print_exc()
     return None
+
+
+def _lookup_prospect_info(phone_number: str) -> tuple[Optional[str], Optional[str]]:
+    """Return (prospect_id, property_id) for the given phone number."""
+    if not phone_number or not prospects:
+        return None, None
+    try:
+        prospect = _find_by_phone_last10(prospects, phone_number)
+        if prospect:
+            prospect_id = prospect.get("id")
+            property_id = prospect.get("fields", {}).get("Property ID")
+            return prospect_id, property_id
+    except Exception:
+        traceback.print_exc()
+    return None, None
 
 
 # === PROMOTE PROSPECT → LEAD ===
@@ -349,6 +365,11 @@ def handle_inbound(payload: dict):
     elif lead_id:
         promoted = _should_promote(intent, ai_intent, stage)
 
+    # Lookup prospect information for linking
+    prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
+    if not property_id and prospect_property_id:
+        property_id = prospect_property_id
+
     if msg_id:
         _SEEN_MESSAGE_IDS.add(msg_id)
 
@@ -367,8 +388,10 @@ def handle_inbound(payload: dict):
 
     if lead_id and LEAD_LINK_FIELD:
         record[LEAD_LINK_FIELD] = [lead_id]
-    else:
-        property_id = property_id or _lookup_prospect_property(from_number)
+    
+    # Link to prospect if found
+    if prospect_id and PROSPECT_LINK_FIELD:
+        record[PROSPECT_LINK_FIELD] = [prospect_id]
 
     if property_id:
         record["Property ID"] = property_id
@@ -403,8 +426,9 @@ def process_optout(payload: dict):
     increment_opt_out(from_number)
 
     lead_id, property_id = _lookup_existing_lead(from_number)
-    if not lead_id:
-        property_id = property_id or _lookup_prospect_property(from_number)
+    prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
+    if not property_id and prospect_property_id:
+        property_id = prospect_property_id
 
     record = {
         FROM_FIELD: from_number,
@@ -421,6 +445,11 @@ def process_optout(payload: dict):
 
     if lead_id and LEAD_LINK_FIELD:
         record[LEAD_LINK_FIELD] = [lead_id]
+    
+    # Link to prospect if found
+    if prospect_id and PROSPECT_LINK_FIELD:
+        record[PROSPECT_LINK_FIELD] = [prospect_id]
+        
     if property_id:
         record["Property ID"] = property_id
 

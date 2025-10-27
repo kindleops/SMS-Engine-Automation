@@ -43,7 +43,6 @@ from sms.airtable_schema import (
     template_field_map,
 )
 from sms.config import settings
-from sms.datastore import CONNECTOR, log_message
 from sms.dispatcher import get_policy
 from sms.runtime import get_logger, iso_now, last_10_digits
 
@@ -75,83 +74,54 @@ except Exception:  # pragma: no cover
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Airtable facades (CONNECTOR-compatible)
+# Airtable/datastore facades (CONNECTOR-compatible, with safe fallbacks)
 # ---------------------------------------------------------------------------
-
 from sms.datastore import CONNECTOR, list_records, update_record
-try:
-    # Optional in some builds
-    from sms.datastore import create_record as _create_record  # type: ignore
-except Exception:  # not exported in your current build
-    _create_record = None  # type: ignore
 
+# Hardening: bring in guaranteed logging fallbacks
 try:
-    # Conversations upsert helper (preferred for convos)
-    from sms.datastore import create_conversation  # type: ignore
+    from sms.datastore import create_conversation  # idempotent upsert by TextGrid ID (if provided)
 except Exception:
     create_conversation = None  # type: ignore
 
-
-def _safe_create(handle, payload, *, kind: str | None = None):
-    """
-    Create a record in a schema-safe way across datastore variants.
-    - For Conversations: prefer create_conversation(sid, fields) if available.
-    - Else: use module-level create_record(handle, payload) if exported.
-    - Else: try CONNECTOR.create_record(handle, payload) if present.
-    - Else: no-op (return None) but DO NOT crash.
-    """
-    # Conversations often want idempotency via TextGrid ID
-    if kind == "conversations" and create_conversation:
-        # Try to pull a unique SID-ish key from common fields
-        sid = (
-            payload.get("TextGrid ID")
-            or payload.get("TextGridId")
-            or payload.get("sid")
-            or payload.get("MessageSid")
-            or None
-        )
+try:
+    from sms.datastore import safe_create_conversation, safe_log_message  # unconditional logging fallbacks
+except Exception:
+    # If these are truly unavailable, define no-op stubs to avoid NameError
+    def safe_create_conversation(fields: dict) -> Optional[dict]:  # type: ignore
         try:
-            return create_conversation(sid, payload)
+            # Very last-resort write (only if handle/table is present)
+            h = CONNECTOR.conversations()
+            tbl = getattr(h, "table", None)
+            if not tbl:
+                return None
+            fixed = {k.title() if " " not in k else k: v for k, v in (fields or {}).items()}
+            return tbl.create({"fields": fixed})
         except Exception:
-            pass
+            logger.warning("safe_create_conversation not available; skipping.", exc_info=True)
+            return None
 
-    if _create_record:
+    def safe_log_message(direction: str, to: str, from_: str, body: str, status: str = "SENT", sid=None, error=None):  # type: ignore
         try:
-            return _create_record(handle, payload)
+            h = CONNECTOR.conversations()
+            tbl = getattr(h, "table", None)
+            if not tbl:
+                return None
+            return tbl.create({
+                "fields": {
+                    "Direction": direction,
+                    "TextGrid Phone Number": to,
+                    "Seller Phone Number": from_,
+                    "Message": body or "",
+                    "Status": status,
+                    "TextGrid ID": sid or "",
+                    "Error": error or "",
+                    "Timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            })
         except Exception:
-            pass
-
-    # Some datastore variants hang functions off CONNECTOR
-    for attr in ("create_record", "create"):
-        if hasattr(CONNECTOR, attr):
-            try:
-                return getattr(CONNECTOR, attr)(handle, payload)
-            except Exception:
-                pass
-
-    # Last resort: no create path available
-    return None
-
-
-class TableFacade:
-    def __init__(self, handle, kind: str | None = None):
-        self.handle = handle
-        self.kind = kind  # 'conversations' | 'leads' | 'prospects' | 'templates' | 'drip' | None
-
-    def all(self, view: str | None = None, max_records: Optional[int] = None, **kwargs):
-        params: Dict[str, Any] = {}
-        if view:
-            params["view"] = view
-        if max_records is not None:
-            params["max_records"] = max_records
-        params.update(kwargs)
-        return list_records(self.handle, **params)
-
-    def create(self, payload: Dict[str, Any]):
-        return _safe_create(self.handle, payload, kind=self.kind)
-
-    def update(self, record_id: str, payload: Dict[str, Any]):
-        return update_record(self.handle, record_id, payload)
+            logger.warning("safe_log_message not available; skipping.", exc_info=True)
+            return None
 
 
 def conversations():
@@ -172,6 +142,7 @@ def drip_tbl():
     except Exception:
         return None
 
+
 # ---------------------------------------------------------------------------
 # Field maps (schema-driven with safe fallbacks)
 # ---------------------------------------------------------------------------
@@ -184,8 +155,8 @@ TEMPLATE_FIELDS = template_field_map()
 
 # --- Conversations fields ---
 CONV_FROM_FIELD = CONV_FIELDS.get("FROM", "Seller Phone Number")
-CONV_TO_FIELD = CONV_FIELDS.get("TO", "TextGrid Number")
-CONV_BODY_FIELD = CONV_FIELDS.get("BODY", "Body")
+CONV_TO_FIELD = CONV_FIELDS.get("TO", "TextGrid Phone Number")  # normalized fallback
+CONV_BODY_FIELD = CONV_FIELDS.get("BODY", "Message")            # normalized fallback
 CONV_STATUS_FIELD = CONV_FIELDS.get("STATUS", "Status")
 CONV_DIRECTION_FIELD = CONV_FIELDS.get("DIRECTION", "Direction")
 CONV_RECEIVED_AT_FIELD = CONV_FIELDS.get("RECEIVED_AT", "Received At")
@@ -203,11 +174,12 @@ CONV_PROPERTY_ID_FIELD = CONV_FIELDS.get("PROPERTY_ID", "Property ID")
 CONV_CAMPAIGN_LINK_FIELD = CONV_FIELDS.get("CAMPAIGN_LINK", "Campaign")
 CONV_DRIP_LINK_FIELD = CONV_FIELDS.get("DRIP_QUEUE_LINK", "Drip Queue Link")
 CONV_AI_INTENT_FIELD = CONV_FIELDS.get("AI_INTENT", "AI Intent")
+CONV_TEXTGRID_ID_FIELD = CONV_FIELDS.get("TEXTGRID_ID", "TextGrid ID")
 
 # --- Candidates for robust extraction ---
 CONV_FROM_CANDIDATES = [CONV_FROM_FIELD, "Seller Phone Number", "From", "phone"]
-CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Number", "TextGrid Phone Number", "From Number", "to_number", "To"]
-CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Body", "Message", "message"]
+CONV_TO_CANDIDATES = [CONV_TO_FIELD, "TextGrid Phone Number", "TextGrid Number", "From Number", "to_number", "To"]
+CONV_BODY_CANDIDATES = [CONV_BODY_FIELD, "Message", "Body", "message"]
 CONV_DIRECTION_CANDIDATES = [CONV_DIRECTION_FIELD, "Direction", "direction"]
 CONV_PROCESSED_BY_CANDIDATES = [CONV_PROCESSED_BY_FIELD, "Processed By", "processed_by"]
 
@@ -223,7 +195,7 @@ DRIP_TEMPLATE_LINK_FIELD = DRIP_FIELDS.get("TEMPLATE_LINK", "Template")
 DRIP_PROSPECT_LINK_FIELD = DRIP_FIELDS.get("PROSPECT_LINK", "Prospect")
 DRIP_CAMPAIGN_LINK_FIELD = DRIP_FIELDS.get("CAMPAIGN_LINK", "Campaign")
 DRIP_SELLER_PHONE_FIELD = DRIP_FIELDS.get("SELLER_PHONE", "Seller Phone Number")
-DRIP_TEXTGRID_PHONE_FIELD = DRIP_FIELDS.get("TEXTGRID_PHONE", "TextGrid Number")
+DRIP_TEXTGRID_PHONE_FIELD = DRIP_FIELDS.get("TEXTGRID_PHONE", "TextGrid Phone Number")
 DRIP_FROM_NUMBER_FIELD = DRIP_FIELDS.get("FROM_NUMBER", "From Number")
 DRIP_MESSAGE_PREVIEW_FIELD = DRIP_FIELDS.get("MESSAGE_PREVIEW", "Message")
 DRIP_NEXT_SEND_DATE_FIELD = DRIP_FIELDS.get("NEXT_SEND_DATE", "Next Send Date")
@@ -295,9 +267,87 @@ NO_WORDS = {"no", "nope", "nah"}
 PRICE_REGEX = re.compile(r"(\$?\s?\d{2,3}(?:,\d{3})*(?:\.\d{1,2})?\b)|(\b\d+\s?k\b)|(\b\d{2,3}k\b)", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
-# Utils
+# Local schema helpers for resilient create() if datastore safe_create is absent
 # ---------------------------------------------------------------------------
 
+def _norm_key(s: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(s or "").strip().lower())
+
+def _auto_field_map_tbl(tbl: Any) -> Dict[str, str]:
+    try:
+        probe = tbl.all(max_records=1)
+        keys = list(probe[0].get("fields", {}).keys()) if probe else []
+    except Exception:
+        keys = []
+    return {_norm_key(k): k for k in keys}
+
+def _remap_existing_only_tbl(tbl: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    amap = _auto_field_map_tbl(tbl)
+    if not amap:
+        return dict(payload or {})
+    out: Dict[str, Any] = {}
+    for k, v in (payload or {}).items():
+        mk = amap.get(_norm_key(k))
+        if mk:
+            out[mk] = v
+    return out
+
+# ---------------------------------------------------------------------------
+# Airtable TableFacade with hardened create()
+# ---------------------------------------------------------------------------
+
+class TableFacade:
+    def __init__(self, handle, kind: str | None = None):
+        self.handle = handle
+        self.kind = kind  # 'conversations' | 'leads' | 'prospects' | 'templates' | 'drip' | None
+
+    def all(self, view: str | None = None, max_records: Optional[int] = None, **kwargs):
+        params: Dict[str, Any] = {}
+        if view:
+            params["view"] = view
+        if max_records is not None:
+            params["max_records"] = max_records
+        params.update(kwargs)
+        return list_records(self.handle, **params)
+
+    def create(self, payload: Dict[str, Any]):
+        # Conversations: enforce guaranteed logging
+        if self.kind == "conversations":
+            sid = (
+                payload.get(CONV_TEXTGRID_ID_FIELD)
+                or payload.get("TextGridId")
+                or payload.get("sid")
+                or payload.get("MessageSid")
+                or None
+            )
+            try:
+                if create_conversation:
+                    return create_conversation(sid, payload)
+                # Fallback (schema-agnostic)
+                return safe_create_conversation(payload)
+            except Exception:
+                logger.warning("create_conversation failed; using safe_create_conversation", exc_info=True)
+                return safe_create_conversation(payload)
+
+        # Non-conversations: try datastore safe path first (if provided)
+        try:
+            # Access underlying pyairtable Table if available
+            tbl = getattr(self.handle, "table", None)
+            if tbl and hasattr(tbl, "create"):
+                return tbl.create(_remap_existing_only_tbl(tbl, payload))
+        except Exception as e:
+            logger.warning(f"Fallback create via underlying table failed: {e}", exc_info=True)
+
+        # No valid path
+        logger.warning("No create path available for kind=%s; payload skipped.", self.kind)
+        return None
+
+    def update(self, record_id: str, payload: Dict[str, Any]):
+        return update_record(self.handle, record_id, payload)
+
+# ---------------------------------------------------------------------------
+# Utils
+# ---------------------------------------------------------------------------
 
 def _get_first(fields: Dict[str, Any], candidates: Iterable[Optional[str]]) -> Optional[Any]:
     for key in candidates:
@@ -308,7 +358,6 @@ def _get_first(fields: Dict[str, Any], candidates: Iterable[Optional[str]]) -> O
             return value
     return None
 
-
 def _normalise_link(value: Any) -> Optional[str]:
     if isinstance(value, list) and value:
         return value[0]
@@ -316,20 +365,16 @@ def _normalise_link(value: Any) -> Optional[str]:
         return value
     return None
 
-
 def _pick_status(preferred: str) -> str:
     up = preferred.upper()
     return up if up in SAFE_CONVERSATION_STATUS else "DELIVERED"
 
-
-def _det_rand_choice(key: string, items: List[Any]) -> Any:  # type: ignore[name-defined]
-    # Python typing quirk: use 'str' at runtime; 'string' only appeases some editors.
+def _det_rand_choice(key: str, items: List[Any]) -> Any:
     if not items:
         return None
     h = hashlib.md5(key.encode("utf-8")).hexdigest()
     rnd = random.Random(int(h, 16))
     return rnd.choice(items)
-
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
     if not value:
@@ -343,7 +388,6 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
         return datetime.fromisoformat(text)
     except Exception:
         return None
-
 
 def _recently_responded(fields: Dict[str, Any], processed_by: str) -> bool:
     last_by = str(fields.get(CONV_PROCESSED_BY_FIELD) or "").strip()
@@ -365,14 +409,12 @@ def _recently_responded(fields: Dict[str, Any], processed_by: str) -> bool:
         return False
     return datetime.now(timezone.utc) - timestamp < timedelta(minutes=30)
 
-
 def _resolve_timezone(policy) -> timezone:
     tz_name = settings().QUIET_TZ or getattr(policy, "quiet_tz_name", None)
     tz = None
     if tz_name:
         try:
             from zoneinfo import ZoneInfo
-
             tz = ZoneInfo(tz_name)
         except Exception:
             tz = None
@@ -381,7 +423,6 @@ def _resolve_timezone(policy) -> timezone:
     if tz is None:
         tz = timezone.utc
     return tz
-
 
 def _quiet_window(now_utc: datetime, policy) -> Tuple[bool, Optional[datetime]]:
     enabled = settings().QUIET_HOURS_ENFORCED or bool(getattr(policy, "quiet_enforced", False))
@@ -404,7 +445,6 @@ def _quiet_window(now_utc: datetime, policy) -> Tuple[bool, Optional[datetime]]:
 
     return in_quiet, next_allowed.astimezone(timezone.utc) if next_allowed else None
 
-
 # ---------------------------------------------------------------------------
 # Stage helpers (canonical write targets)
 # ---------------------------------------------------------------------------
@@ -419,7 +459,6 @@ STAGE_OPTOUT = ConversationStage.OPT_OUT.value
 # ---------------------------------------------------------------------------
 # Intent classification → event mapping
 # ---------------------------------------------------------------------------
-
 
 def _base_intent(body: str) -> str:
     text = (body or "").lower().strip()
@@ -449,7 +488,6 @@ def _base_intent(body: str) -> str:
         return "condition_info"
 
     return "neutral"
-
 
 def _event_for_stage(stage_label: str, base_intent: str) -> str:
     # Stage-agnostic hard stops
@@ -489,7 +527,6 @@ def _event_for_stage(stage_label: str, base_intent: str) -> str:
             return "condition_info"
         return "noop"
 
-
 # ---------------------------------------------------------------------------
 # AI intent mapping (for analytics)
 # ---------------------------------------------------------------------------
@@ -509,7 +546,6 @@ AI_INTENT_MAP = {
 # ---------------------------------------------------------------------------
 # Autoresponder service
 # ---------------------------------------------------------------------------
-
 
 class Autoresponder:
     def __init__(self) -> None:
@@ -539,7 +575,6 @@ class Autoresponder:
                 "Phone",
                 "phone",
             ]
-        self.connector = CONNECTOR
             if v
         ]
 
@@ -737,8 +772,27 @@ class Autoresponder:
 
     # -------------------------- Immediate send (fallback if no drip engine)
     def _send_immediate(
-        self, from_number: str, body: str, to_number: Optional[str], lead_id: Optional[str], property_id: Optional[str]
+        self,
+        from_number: str,
+        body: str,
+        to_number: Optional[str],
+        lead_id: Optional[str],
+        property_id: Optional[str],
+        *,
+        is_quiet: bool,
     ) -> None:
+        # Log AR-initiated outbound trail regardless of transport result
+        try:
+            safe_log_message(
+                "OUTBOUND",
+                to_number or "",
+                from_number,
+                body,
+                status="QUEUED" if is_quiet else "SENT",
+            )
+        except Exception:
+            pass
+
         if not MessageProcessor or not to_number:
             return
         try:
@@ -801,21 +855,6 @@ class Autoresponder:
         self.summary["breakdown"][event] = self.summary["breakdown"].get(event, 0) + 1
 
         # Quiet hours scheduling
-        to_value = _get_first(fields, CONV_TO_CANDIDATES)
-        to_number = str(to_value) if to_value is not None else None
-        try:
-            log_message(
-                conversation_id=record.get("id"),
-                direction="INBOUND",
-                to_phone=to_number,
-                from_phone=from_number,
-                body=body,
-                status="RECEIVED",
-                provider_sid=None,
-                provider_error=None,
-            )
-        except Exception:
-            pass
         send_time = next_allowed if is_quiet else datetime.now(timezone.utc)
 
         # Stage resolution & reply planning
@@ -826,38 +865,21 @@ class Autoresponder:
         queue_reply = False
 
         # Personalization & deterministic pick
-        to_value = _get_first(fields, CONV_TO_CANDIDATES)
-        to_number = str(to_value) if to_value else None
-        try:
-            log_message(
-                self.connector,
-                conversation_id=record.get("id"),
-                direction="INBOUND",
-                to_phone=to_number,
-                from_phone=from_number,
-                body=body,
-                status="RECEIVED",
-                provider_sid=None,
-                provider_error=None,
-            )
-        except Exception:
-            logger.warning("Inbound message logging failed", exc_info=True)
-
-        def _personalize(fields: Dict[str, Any]) -> Dict[str, str]:
+        def _personalize(fields_: Dict[str, Any]) -> Dict[str, str]:
             first = ""
-            owner_name = fields.get(PROSPECT_FIELDS.get("OWNER_NAME"))
+            owner_name = fields_.get(PROSPECT_FIELDS.get("OWNER_NAME"))
             if isinstance(owner_name, str) and owner_name.strip():
                 first = owner_name.split()[0]
             else:
-                owner_first = fields.get(PROSPECT_FIELDS.get("OWNER_FIRST_NAME"))
+                owner_first = fields_.get(PROSPECT_FIELDS.get("OWNER_FIRST_NAME"))
                 if isinstance(owner_first, str):
                     first = owner_first.strip()
             if not first:
                 first = "there"
             address = (
-                fields.get(PROSPECT_FIELDS.get("PROPERTY_ADDRESS"))
-                or fields.get("Property Address")
-                or fields.get("Address")
+                fields_.get(PROSPECT_FIELDS.get("PROPERTY_ADDRESS"))
+                or fields_.get("Property Address")
+                or fields_.get("Address")
                 or "your property"
             )
             return {"First": first, "Address": address}
@@ -964,7 +986,7 @@ class Autoresponder:
                 queued = bool(self._enqueue_drip(record, fields, reply_text, send_time, template_id, prospect_id))
             if not queued:
                 to_number = _get_first(fields, CONV_TO_CANDIDATES)
-                self._send_immediate(from_number, reply_text, to_number, lead_id, property_id)
+                self._send_immediate(from_number, reply_text, to_number, lead_id, property_id, is_quiet=is_quiet)
 
         # Update conversation row
         self._update_conversation(
@@ -1036,6 +1058,18 @@ class Autoresponder:
         except Exception as exc:
             self.summary["errors"].append({"conversation": conv_id, "error": f"conversation update failed: {exc}"})
 
+        # System trail entry (best-effort; does not fail pipeline)
+        try:
+            safe_log_message(
+                "SYSTEM",
+                "",
+                "",
+                f"Autoresponder processed {conv_id} → Stage {stage}",
+                status=status,
+            )
+        except Exception:
+            pass
+
     def _ensure_lead_if_interested(
         self,
         event: str,
@@ -1077,7 +1111,6 @@ class Autoresponder:
 
         return None, property_id
 
-
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
@@ -1086,11 +1119,9 @@ def run_autoresponder(limit: int = 50) -> Dict[str, Any]:
     service = Autoresponder()
     return service.process(limit)
 
-
 if __name__ == "__main__":
     limit = int(os.getenv("AR_LIMIT", "50"))
     out = run_autoresponder(limit=limit)
     print("\n=== Autoresponder Summary ===")
     import pprint
-
     pprint.pprint(out)

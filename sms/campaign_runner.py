@@ -119,6 +119,89 @@ def is_quiet_hours() -> bool:
 def _escape_quotes(s: str) -> str:
     return str(s).replace("'", "\\'")
 
+# ---------- Campaign metrics and status management ----------
+def _update_campaign_progress(camp_tbl, campaign_id: str, queued_count: int, campaign_name: str = "Unknown"):
+    """Update campaign metrics in real-time during execution"""
+    try:
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        
+        updates = {
+            "Total Sent": queued_count,
+            "Last Run At": now_iso,
+            "Last Run Result": f"Queued {queued_count} messages"
+        }
+        
+        camp_tbl.update(campaign_id, updates)
+        log.info(f"📊 Updated campaign '{campaign_name}' metrics: {queued_count} queued")
+        
+    except Exception as e:
+        log.warning(f"⚠️ Campaign progress update failed for '{campaign_name}': {e}")
+
+def _check_campaign_status(camp_tbl, campaign_id: str) -> str:
+    """Check current campaign status (for pause detection during execution)"""
+    try:
+        current = camp_tbl.get(campaign_id)
+        status = current.get("fields", {}).get(CAMPAIGN_STATUS_F, "").strip().lower()
+        return status
+    except Exception as e:
+        log.warning(f"⚠️ Failed to check campaign status: {e}")
+        return "unknown"
+
+def _mark_campaign_completed(camp_tbl, campaign_id: str, campaign_name: str, total_processed: int):
+    """Mark campaign as Completed when all prospects have been processed"""
+    try:
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        
+        updates = {
+            CAMPAIGN_STATUS_F: "Completed",
+            "Completed At": now_iso,
+            "Last Run Result": f"Completed - processed {total_processed} prospects"
+        }
+        
+        camp_tbl.update(campaign_id, updates)
+        log.info(f"✅ Campaign '{campaign_name}' marked as Completed ({total_processed} prospects processed)")
+        
+    except Exception as e:
+        log.warning(f"⚠️ Failed to mark campaign '{campaign_name}' as completed: {e}")
+
+def _sync_to_campaign_control_base(campaign_data: Dict[str, Any]):
+    """Sync campaign metrics to Campaign Control Base"""
+    try:
+        # Use the datastore connector for Campaign Control Base
+        control_handle = CONNECTOR.campaign_control_campaigns()
+        
+        if control_handle.in_memory:
+            log.debug("Campaign Control Base not configured - using in-memory fallback")
+            return
+            
+        control_campaigns = control_handle.table
+        campaign_name = campaign_data.get("name", "")
+        if not campaign_name:
+            return
+            
+        # Search for existing campaign in control base
+        formula = f"{{Campaign Name}}='{_escape_quotes(campaign_name)}'"
+        existing = control_campaigns.all(formula=formula, max_records=1)
+        
+        metrics_update = {
+            "Total Sent": campaign_data.get("total_sent", 0),
+            "Total Replies": campaign_data.get("total_replies", 0),
+            "Total Opt Outs": campaign_data.get("total_opt_outs", 0),
+            "Last Sync": datetime.now(timezone.utc).isoformat()
+        }
+        
+        if existing:
+            # Update existing campaign
+            control_campaigns.update(existing[0]["id"], metrics_update)
+            log.debug(f"📊 Synced metrics to Campaign Control Base for '{campaign_name}'")
+        else:
+            log.debug(f"⚠️ Campaign '{campaign_name}' not found in Campaign Control Base")
+            
+    except Exception as e:
+        log.warning(f"⚠️ Campaign Control Base sync failed: {e}")
+
 def _first_link(v: Any) -> Optional[str]:
     if isinstance(v, list) and v:
         return v[0]
@@ -422,8 +505,16 @@ def _queue_one_campaign(
     previews: List[Dict[str, Any]] = []
     reasons = defaultdict(int)
     seen_phones: set[str] = set()  # per-run dedupe
+    total_prospects = len(prospects[:take])
 
-    for pr in prospects[:take]:
+    for i, pr in enumerate(prospects[:take]):
+        # Check for pause during execution (every 10 prospects for efficiency)
+        if i % 10 == 0:
+            current_status = _check_campaign_status(camp_tbl, cid)
+            if current_status == "paused":
+                log.info(f"🛑 Campaign '{cname}' was paused during execution - stopping at prospect {i+1}/{total_prospects}")
+                break
+        
         pf = (pr or {}).get("fields", {}) or {}
 
         # pick a deliverable phone for the seller
@@ -512,6 +603,29 @@ def _queue_one_campaign(
             else:
                 reasons["create_failed"] += 1
                 log.error(f"Airtable create failed [Drip Queue]: {e}")
+
+        # Update campaign progress every 25 prospects (for real-time tracking)
+        if not dryrun and (i + 1) % 25 == 0:
+            _update_campaign_progress(camp_tbl, cid, queued, cname)
+
+    # Final progress update and completion check
+    if not dryrun:
+        # Update final progress
+        _update_campaign_progress(camp_tbl, cid, queued, cname)
+        
+        # Check if campaign should be marked as completed
+        # (all linked prospects have been processed)
+        if queued > 0 and queued >= total_prospects:
+            _mark_campaign_completed(camp_tbl, cid, cname, total_prospects)
+        
+        # Sync to Campaign Control Base
+        campaign_data = {
+            "name": cname,
+            "total_sent": queued,
+            "total_replies": 0,  # Will be updated by metrics_tracker
+            "total_opt_outs": 0  # Will be updated by metrics_tracker
+        }
+        _sync_to_campaign_control_base(campaign_data)
 
     # Persist round-robin pointer(s)
     if not dryrun:

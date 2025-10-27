@@ -33,7 +33,7 @@ except Exception:
 # Transport + retry
 from sms.textgrid_sender import send_message
 from sms.retry_handler import handle_retry
-from sms.datastore import log_message
+from sms.datastore import safe_log_message
 
 # Schema maps
 from sms.config import CONV_FIELDS, CONVERSATIONS_FIELDS, LEAD_FIELDS

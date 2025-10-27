@@ -25,6 +25,48 @@ from sms.runtime import get_logger
 
 logger = get_logger("metrics_tracker")
 
+def _sync_to_campaign_control_base(campaign_name: str, metrics_data: Dict[str, Any]):
+    """Sync campaign metrics to Campaign Control Base"""
+    try:
+        # Check if sync is enabled
+        if not os.getenv("CAMPAIGN_CONTROL_SYNC_ENABLED", "true").lower() in ("1", "true", "yes"):
+            return
+            
+        from sms.datastore import CONNECTOR
+        control_handle = CONNECTOR.campaign_control_campaigns()
+        
+        if control_handle.in_memory:
+            logger.debug("Campaign Control Base not configured - using in-memory fallback")
+            return
+            
+        control_campaigns = control_handle.table
+        
+        # Search for existing campaign in control base
+        formula = f"{{Campaign Name}}='{campaign_name.replace("'", "\\'")}'"
+        existing = control_campaigns.all(formula=formula, max_records=1)
+        
+        # Map metrics to control base fields
+        control_metrics = {
+            "Total Sent": metrics_data.get("total_sent", 0),
+            "Total Delivered": metrics_data.get("total_delivered", 0),
+            "Total Failed": metrics_data.get("total_failed", 0),
+            "Total Replies": metrics_data.get("total_replies", 0),
+            "Total Opt Outs": metrics_data.get("total_opt_outs", 0),
+            "Delivery Rate": metrics_data.get("delivery_rate", 0),
+            "Opt Out Rate": metrics_data.get("opt_out_rate", 0),
+            "Last Metrics Update": datetime.now(timezone.utc).isoformat()
+        }
+        
+        if existing:
+            # Update existing campaign
+            control_campaigns.update(existing[0]["id"], control_metrics)
+            logger.debug(f"📊 Synced metrics to Campaign Control Base for '{campaign_name}'")
+        else:
+            logger.debug(f"⚠️ Campaign '{campaign_name}' not found in Campaign Control Base")
+            
+    except Exception as e:
+        logger.warning(f"⚠️ Campaign Control Base metrics sync failed for '{campaign_name}': {e}")
+
 # ─────────────────────────── Optional imports ───────────────────────────
 try:
     from pyairtable import Api as _ATApi
@@ -244,6 +286,10 @@ def update_metrics() -> dict:
             }
             try:
                 campaigns.update(camp_id, patch)
+                
+                # Sync to Campaign Control Base
+                _sync_to_campaign_control_base(camp_name, patch)
+                
             except Exception as e:
                 logger.warning(f"⚠️ Campaign update failed: {e}")
 
