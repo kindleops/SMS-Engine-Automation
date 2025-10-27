@@ -8,7 +8,6 @@ from fastapi import APIRouter, HTTPException, Request, Header, Query
 from pyairtable import Table
 
 from sms.number_pools import increment_delivered, increment_failed, increment_opt_out
-from sms.airtable_schema import PROSPECT_FIELDS
 
 router = APIRouter()
 
