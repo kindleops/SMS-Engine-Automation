@@ -266,6 +266,79 @@ def iso_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _generate_message_summary(body: str, intent: str, ai_intent: str) -> dict:
+    """Generate a structured AI summary of the message matching Airtable format"""
+    if not body:
+        return {
+            "state": "error",
+            "errorType": "emptyDependency", 
+            "value": None,
+            "isStale": False
+        }
+    
+    # Create a concise summary
+    summary_parts = []
+    
+    # Add intent classification
+    if intent and intent != "Neutral":
+        summary_parts.append(f"Intent: {intent}")
+    
+    if ai_intent and ai_intent != "neutral":
+        summary_parts.append(f"AI: {ai_intent.replace('_', ' ').title()}")
+    
+    # Add content indicators
+    if any(word in body.lower() for word in ["yes", "interested", "ready"]):
+        summary_parts.append("Positive response")
+    elif any(word in body.lower() for word in ["stop", "unsubscribe", "remove"]):
+        summary_parts.append("Opt-out request")
+    elif "?" in body:
+        summary_parts.append("Question asked")
+    
+    summary_text = "; ".join(summary_parts) if summary_parts else "Standard message"
+    
+    return {
+        "state": "complete",
+        "errorType": None,
+        "value": summary_text,
+        "isStale": False
+    }
+
+
+def _get_response_time_value(is_inbound: bool = True) -> int:
+    """Get appropriate response time value for conversation record"""
+    # For inbound messages, response time is 0 since we're receiving not responding
+    return 0
+
+
+def _determine_ai_trigger(intent: str, ai_intent: str, stage: str) -> str:
+    """Determine appropriate AI response trigger based on conversation context"""
+    if intent.lower() == "positive":
+        if "price" in ai_intent or "offer" in ai_intent:
+            return "PRICE_DISCUSSION"
+        elif "interest" in ai_intent:
+            return "INTEREST_DETECTED" 
+        else:
+            return "POSITIVE_RESPONSE"
+    elif intent.lower() == "delay":
+        return "FOLLOW_UP_NEEDED"
+    elif any(word in intent.lower() for word in ["dnc", "stop", "opt"]):
+        return "OPT_OUT"
+    else:
+        return "STANDARD_RESPONSE"
+
+
+def _generate_conversation_id(phone: str, timestamp: str) -> int:
+    """Generate a unique conversation ID based on phone and timestamp"""
+    import hashlib
+    
+    # Create a hash from phone and timestamp
+    hash_input = f"{phone}_{timestamp}".encode()
+    hash_digest = hashlib.md5(hash_input).hexdigest()
+    
+    # Convert first 8 characters to integer
+    return int(hash_digest[:8], 16) % 100000  # Keep it under 100k for readability
+
+
 def _digits(value: Any) -> str:
     return "".join(re.findall(r"\d+", value or "")) if isinstance(value, str) else ""
 
@@ -990,7 +1063,8 @@ def update_lead_activity(lead_id: str, body: str, direction: str, reply_incremen
             if any(indicator in body.lower() for indicator in positive_indicators):
                 lead_quality_score += 30
                 
-            updates["Lead Quality Score"] = min(lead_quality_score, 100)
+            # Skip Lead Quality Score field - not in table schema
+            # updates["Lead Quality Score"] = min(lead_quality_score, 100)
             
         if direction == "OUT":
             updates["Last Outbound"] = iso_timestamp()
@@ -1023,19 +1097,24 @@ def log_conversation(payload: dict):
         return
     
     # Filter payload to only include fields that exist in the table
-    # Based on our field check, these are the available fields:
+    # Based on our complete schema check, these are the available fields:
     valid_fields = {
-        "AI Response Trigger",
-        "Conversation ID", 
+        # "AI Response Trigger",  # Skipping - computed field
+        # "Conversation ID",  # Let Airtable auto-generate for now
+        "Delivery Status", 
         "Direction",
+        "Intent Detected",
         "Lead Record ID",
         "Message",
-        "Message Summary (AI)",
+        # "Message Summary (AI)",  # Skipping - complex field format
         "Processed By",
-        "Processed Time", 
+        "Processed Time",
+        "Prospect",
+        "Prospect Record ID", 
+        "Prospects copy",
         "Received Time",
         "Record ID",
-        "Response Time (Minutes)",
+        # "Response Time (Minutes)",  # Skipping - computed field
         "Seller Phone Number",
         "TextGrid ID",
         "TextGrid Phone Number"
@@ -1109,28 +1188,34 @@ def handle_inbound(payload: dict):
     if not property_id and prospect_property_id:
         property_id = prospect_property_id
 
-    record = {
-        FROM_FIELD: from_number,
-        TO_FIELD: to_number,
-        MSG_FIELD: body,
-        STATUS_FIELD: "UNPROCESSED",
-        DIR_FIELD: "INBOUND",  # Use "INBOUND" instead of "IN"
-        TG_ID_FIELD: msg_id,
-        RECEIVED_AT: iso_timestamp(),
-    }
-    record[STAGE_FIELD] = stage
-    record[INTENT_FIELD] = intent
-    record[AI_INTENT_FIELD] = ai_intent
-
-    if lead_id and LEAD_LINK_FIELD:
-        record[LEAD_LINK_FIELD] = [lead_id]
+    # Create comprehensive conversation record with all available fields
+    now_timestamp = iso_timestamp()
     
-    # Link to prospect if found
-    if prospect_id and PROSPECT_LINK_FIELD:
-        record[PROSPECT_LINK_FIELD] = [prospect_id]
+    record = {
+        # Core message data (always populated)
+        FROM_FIELD: from_number,  # "Seller Phone Number"
+        TO_FIELD: to_number,  # "TextGrid Phone Number" 
+        MSG_FIELD: body,  # "Message"
+        DIR_FIELD: "INBOUND",  # "Direction"
+        TG_ID_FIELD: msg_id,  # "TextGrid ID"
+        RECEIVED_AT: now_timestamp,  # "Received Time"
+        
+        # Processing metadata
+        "Delivery Status": "DELIVERED",  # Mark as delivered since we received it
+        "Processed Time": now_timestamp,
+        "Processed By": "Campaign Runner",  # Use existing allowed value
+        "Intent Detected": intent,
+    }
 
-    if property_id:
-        record["Property ID"] = property_id
+    # Add linking fields if we have the data
+    if lead_id:
+        record["Lead Record ID"] = lead_id
+    
+    if prospect_id:
+        record["Prospect Record ID"] = prospect_id
+        record["Prospect"] = [prospect_id]  # Linked field format
+
+    # Let Airtable auto-generate Conversation ID (computed field)
 
     print(f"📊 About to log conversation record: {record}")
     log_conversation(record)
@@ -1177,28 +1262,31 @@ def process_optout(payload: dict):
     if not property_id and prospect_property_id:
         property_id = prospect_property_id
 
+    # Create comprehensive opt-out conversation record
+    now_timestamp = iso_timestamp()
+    
     record = {
-        FROM_FIELD: from_number,
-        MSG_FIELD: body,
-        STATUS_FIELD: "OPT OUT",
-        DIR_FIELD: "INBOUND",  # Use "INBOUND" instead of "IN"
-        TG_ID_FIELD: msg_id,
-        RECEIVED_AT: iso_timestamp(),
-        PROCESSED_BY: "OptOut Handler",
-        STAGE_FIELD: "OPT OUT",
-        INTENT_FIELD: "DNC",
-        AI_INTENT_FIELD: "not_interested",
+        # Core message data
+        FROM_FIELD: from_number,  # "Seller Phone Number"
+        MSG_FIELD: body,  # "Message"
+        DIR_FIELD: "INBOUND",  # "Direction"
+        TG_ID_FIELD: msg_id,  # "TextGrid ID"
+        RECEIVED_AT: now_timestamp,  # "Received Time"
+        
+        # Processing metadata for opt-out
+        "Delivery Status": "DELIVERED",
+        "Processed Time": now_timestamp,
+        "Processed By": "Campaign Runner",  # Use existing allowed value
+        "Intent Detected": "DNC",
     }
 
-    if lead_id and LEAD_LINK_FIELD:
-        record[LEAD_LINK_FIELD] = [lead_id]
+    # Add linking fields if we have the data
+    if lead_id:
+        record["Lead Record ID"] = lead_id
     
-    # Link to prospect if found
-    if prospect_id and PROSPECT_LINK_FIELD:
-        record[PROSPECT_LINK_FIELD] = [prospect_id]
-        
-    if property_id:
-        record["Property ID"] = property_id
+    if prospect_id:
+        record["Prospect Record ID"] = prospect_id
+        record["Prospect"] = [prospect_id]  # Linked field format
 
     log_conversation(record)
     if lead_id:
