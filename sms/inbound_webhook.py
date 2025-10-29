@@ -1,6 +1,8 @@
 import os
 import re
 import traceback
+import signal
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -1138,6 +1140,91 @@ def log_conversation(payload: dict):
         traceback.print_exc()
 
 
+@contextmanager
+def timeout_context(seconds):
+    """Context manager for timing out operations."""
+    def timeout_handler(signum, frame):
+        raise TimeoutError(f"Operation timed out after {seconds} seconds")
+    
+    # Set the signal handler
+    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(seconds)
+    
+    try:
+        yield
+    finally:
+        # Clean up
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+def safe_log_conversation(payload: dict, timeout_seconds: int = 3):
+    """
+    Safely log conversation to Airtable with timeout protection.
+    
+    Args:
+        payload: Conversation data to log
+        timeout_seconds: Maximum time to wait for Airtable operation
+    
+    Returns:
+        bool: True if successfully logged, False otherwise
+    """
+    if not convos:
+        print(f"⚠️ Conversations table not initialized. AIRTABLE_API_KEY: {'SET' if AIRTABLE_API_KEY else 'NOT SET'}, BASE_ID: {'SET' if BASE_ID else 'NOT SET'}")
+        return False
+
+    # Define valid Airtable fields
+    valid_fields = {
+        "AI Intent",
+        "AI Summary", 
+        "Bulk Campaign",
+        # "Conversation ID",  # Let Airtable auto-generate for now
+        "Date Received",
+        "Delivery Status",
+        "Direction",
+        "Intent Detected",
+        "Lead Record ID",
+        "Message",
+        "Processed By",
+        "Processed Time",
+        "Prospect",
+        "Prospect Record ID", 
+        "Prospects copy",
+        "Received Time",
+        "Record ID",
+        # "Response Time (Minutes)",  # Skipping - computed field
+        "Seller Phone Number",
+        "TextGrid ID",
+        "TextGrid Phone Number"
+    }
+    
+    # Create a filtered payload with only valid fields
+    filtered_payload = {}
+    for key, value in payload.items():
+        if key in valid_fields:
+            filtered_payload[key] = value
+        else:
+            print(f"⚠️ Skipping field '{key}' - not in Airtable schema")
+
+    try:
+        print(f"📝 Creating conversation record with {len(filtered_payload)} valid fields: {list(filtered_payload.keys())}")
+        
+        # Use timeout context to prevent hanging
+        with timeout_context(timeout_seconds):
+            result = convos.create(filtered_payload)
+            print(f"✅ Successfully logged conversation to Airtable: {result.get('id', 'unknown ID')}")
+            return True
+            
+    except TimeoutError:
+        print(f"⏱️ Airtable operation timed out after {timeout_seconds} seconds - continuing without logging")
+        return False
+    except Exception as e:
+        print(f"⚠️ Failed to log to Conversations: {e}")
+        print(f"🔍 Filtered payload keys: {list(filtered_payload.keys())}")
+        traceback.print_exc()
+        return False
+
+
 # === TESTABLE HANDLER (used by CI) ===
 def handle_inbound(payload: dict):
     """Non-async inbound handler used by tests."""
@@ -1236,9 +1323,15 @@ def handle_inbound(payload: dict):
     # Let Airtable auto-generate Conversation ID (computed field)
 
     print(f"📊 About to log conversation record: {record}")
-    print("⚠️ TEMPORARILY DISABLED: Airtable operations causing timeouts")
     
-    # TODO: Re-enable once Airtable connectivity issues resolved:
+    # Use safe logging with timeout protection
+    logging_success = safe_log_conversation(record)
+    if logging_success:
+        print("✅ Conversation logged successfully")
+    else:
+        print("⚠️ Conversation logging failed or timed out - continuing processing")
+    
+    # TODO: Re-enable once other Airtable performance issues resolved:
     # log_conversation(record)
     # if lead_id:
     #     update_lead_activity(lead_id, body, "IN", reply_increment=True)
@@ -1412,6 +1505,42 @@ async def optout_handler(
         print("❌ Opt-out webhook error:")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/debug")
+async def debug_handler(
+    request: Request,
+    x_webhook_token: Optional[str] = Header(None, convert_underscores=False),
+    token: Optional[str] = Query(None),
+):
+    """Debug endpoint to check Airtable connection and environment."""
+    if not _is_authorized(x_webhook_token, token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    debug_info = {
+        "airtable_api_key": "SET" if AIRTABLE_API_KEY else "NOT SET",
+        "base_id": "SET" if BASE_ID else "NOT SET",
+        "conversations_table": "INITIALIZED" if convos else "NOT INITIALIZED",
+        "leads_table": "INITIALIZED" if leads else "NOT INITIALIZED",
+        "prospects_table": "INITIALIZED" if prospects else "NOT INITIALIZED",
+        "tables": {
+            "conversations": CONVERSATIONS_TABLE,
+            "leads": LEADS_TABLE,
+            "prospects": PROSPECTS_TABLE
+        }
+    }
+    
+    # Test a simple Airtable connection
+    if convos:
+        try:
+            # Try to get table info without actually querying records
+            debug_info["airtable_test"] = "Connection available"
+        except Exception as e:
+            debug_info["airtable_test"] = f"Connection failed: {str(e)}"
+    else:
+        debug_info["airtable_test"] = "No conversations table initialized"
+    
+    return debug_info
 
 
 @router.post("/status")
