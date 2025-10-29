@@ -1177,32 +1177,22 @@ def handle_inbound(payload: dict):
             overrides["stage"] = str(payload[key])
             break
 
-    # TEMPORARILY DISABLED: Simplify classification to avoid any hanging
-    print("⚠️ EMERGENCY MODE: Using simplified message classification")
-    stage, intent, ai_intent = "Contact Attempt", "Neutral", "neutral"
-    
-    # TODO: Re-enable once issue resolved:
-    # stage, intent, ai_intent = _classify_message(body, overrides)
+    stage, intent, ai_intent = _classify_message(body, overrides)
 
-    # TEMPORARILY DISABLED: All Airtable lookups disabled due to hanging
-    print("⚠️ EMERGENCY MODE: Skipping all Airtable lookups")
-    lead_id, property_id = None, None
+    stage, intent, ai_intent = _classify_message(body, overrides)
+
+    lead_id, property_id = _lookup_existing_lead(from_number)
     promoted = False
-    prospect_id, prospect_property_id = None, None
-    
-    # TODO: Re-enable once hanging issue resolved:
-    # lead_id, property_id = _lookup_existing_lead(from_number)
-    # promoted = False
-    # if not lead_id and _should_promote(intent, ai_intent, stage):
-    #     lead_id, property_id = promote_prospect_to_lead(from_number)
-    #     promoted = bool(lead_id)
-    # elif lead_id:
-    #     promoted = _should_promote(intent, ai_intent, stage)
+    if not lead_id and _should_promote(intent, ai_intent, stage):
+        lead_id, property_id = promote_prospect_to_lead(from_number)
+        promoted = bool(lead_id)
+    elif lead_id:
+        promoted = _should_promote(intent, ai_intent, stage)
 
-    # # Lookup prospect information for linking
-    # prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
-    # if not property_id and prospect_property_id:
-    #     property_id = prospect_property_id
+    # Lookup prospect information for linking
+    prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
+    if not property_id and prospect_property_id:
+        property_id = prospect_property_id
 
     # Create comprehensive conversation record with all available fields
     now_timestamp = iso_timestamp()
@@ -1234,22 +1224,20 @@ def handle_inbound(payload: dict):
     # Let Airtable auto-generate Conversation ID (computed field)
 
     print(f"📊 About to log conversation record: {record}")
-    print(f"⚠️ TEMPORARILY DISABLED: Skipping Airtable operations due to service hanging")
-    # TODO: Re-enable these operations once hanging issue is resolved
-    # log_conversation(record)
-    # if lead_id:
-    #     update_lead_activity(lead_id, body, "IN", reply_increment=True)
+    log_conversation(record)
+    if lead_id:
+        update_lead_activity(lead_id, body, "IN", reply_increment=True)
 
-    # # Comprehensive prospect update for ALL inbound messages
-    # update_prospect_comprehensive(
-    #     phone_number=from_number,
-    #     body=body,
-    #     intent=intent,
-    #     ai_intent=ai_intent,
-    #     stage=stage,
-    #     direction="IN",
-    #     to_number=to_number
-    # )
+    # Comprehensive prospect update for ALL inbound messages
+    update_prospect_comprehensive(
+        phone_number=from_number,
+        body=body,
+        intent=intent,
+        ai_intent=ai_intent,
+        stage=stage,
+        direction="IN",
+        to_number=to_number
+    )
 
     return {"status": "ok", "stage": stage, "intent": intent, "promoted": promoted}
 
