@@ -1177,7 +1177,12 @@ def handle_inbound(payload: dict):
             overrides["stage"] = str(payload[key])
             break
 
-    stage, intent, ai_intent = _classify_message(body, overrides)
+    # TEMPORARILY DISABLED: Simplify everything to minimal processing
+    print("⚠️ EMERGENCY MODE: Using absolute minimal processing")
+    stage, intent, ai_intent = "Contact Attempt", "Neutral", "neutral"
+    
+    # TODO: Re-enable once stability restored:
+    # stage, intent, ai_intent = _classify_message(body, overrides)
 
     stage, intent, ai_intent = _classify_message(body, overrides)
 
