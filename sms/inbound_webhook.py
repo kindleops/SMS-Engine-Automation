@@ -118,7 +118,7 @@ class IdempotencyStore:
                 resp = requests.post(
                     UPSTASH_REST_URL,
                     headers={"Authorization": f"Bearer {UPSTASH_REST_TOKEN}"},
-                    json={"command": ["SET", key, "1", "EX", "86400", "NX"]},  # 24 hours
+                    json=["SET", key, "1", "EX", "86400", "NX"],  # Fixed: direct array format
                     timeout=5,
                 )
                 data = resp.json() if resp.ok else {}
