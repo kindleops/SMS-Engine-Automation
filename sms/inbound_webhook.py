@@ -1265,7 +1265,10 @@ def process_optout(payload: dict):
     #     return {"status": "duplicate", "msg_id": msg_id}
 
     print(f"🚫 [TEST] Opt-out from {from_number}")
-    increment_opt_out(from_number)
+    # TEMPORARILY DISABLED: Skip number pool updates due to potential Airtable hanging
+    print("⚠️ EMERGENCY MODE: Skipping increment_opt_out due to potential Airtable delays")
+    # TODO: Re-enable once stable:
+    # increment_opt_out(from_number)
 
     lead_id, property_id = _lookup_existing_lead(from_number)
     prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
