@@ -1313,19 +1313,24 @@ def process_optout(payload: dict):
     
     # TODO: Re-enable:
     # log_conversation(record)
-    if lead_id:
-        update_lead_activity(lead_id, body, "IN")
+    
+    # TEMPORARILY DISABLED: Skip all Airtable updates in optout to avoid hanging
+    print("⚠️ EMERGENCY MODE: Skipping update_lead_activity and update_prospect_comprehensive in optout")
+    
+    # TODO: Re-enable:
+    # if lead_id:
+    #     update_lead_activity(lead_id, body, "IN")
 
-    # Comprehensive prospect update for opt-out
-    update_prospect_comprehensive(
-        phone_number=from_number,
-        body=body,
-        intent="DNC",
-        ai_intent="not_interested",
-        stage="OPT OUT",
-        direction="IN",
-        to_number=None
-    )
+    # # Comprehensive prospect update for opt-out
+    # update_prospect_comprehensive(
+    #     phone_number=from_number,
+    #     body=body,
+    #     intent="DNC",
+    #     ai_intent="not_interested",
+    #     stage="OPT OUT",
+    #     direction="IN",
+    #     to_number=None
+    # )
 
     return {"status": "optout"}
 
