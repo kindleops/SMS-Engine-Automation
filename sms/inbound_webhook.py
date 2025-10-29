@@ -1256,9 +1256,13 @@ def process_optout(payload: dict):
     if not _is_opt_out(body):
         return {"status": "ignored"}
 
+    # TEMPORARILY DISABLED: Skip idempotency check due to Redis hanging issues
+    print("⚠️ EMERGENCY MODE: Skipping idempotency check in optout")
+    
+    # TODO: Re-enable once Redis/Upstash hanging issue resolved:
     # Enhanced idempotency check
-    if msg_id and IDEM.seen(msg_id):
-        return {"status": "duplicate", "msg_id": msg_id}
+    # if msg_id and IDEM.seen(msg_id):
+    #     return {"status": "duplicate", "msg_id": msg_id}
 
     print(f"🚫 [TEST] Opt-out from {from_number}")
     increment_opt_out(from_number)
