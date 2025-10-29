@@ -1155,9 +1155,13 @@ def handle_inbound(payload: dict):
     if _is_opt_out(body):
         return process_optout(payload)
 
+    # TEMPORARILY DISABLED: Skip idempotency check due to Redis hanging issues
+    print("⚠️ EMERGENCY MODE: Skipping idempotency check")
+    
+    # TODO: Re-enable once Redis/Upstash hanging issue resolved:
     # Enhanced idempotency check
-    if msg_id and IDEM.seen(msg_id):
-        return {"status": "duplicate", "msg_id": msg_id}
+    # if msg_id and IDEM.seen(msg_id):
+    #     return {"status": "duplicate", "msg_id": msg_id}
 
     overrides: Dict[str, str] = {}
     for key in ("Intent", "Intent Detected", "intent"):
