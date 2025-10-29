@@ -137,6 +137,7 @@ def _reset_numbers_daily_counters() -> Dict[str, Any]:
 
 
 # ─────────────────────────── FastAPI app ────────────────────────────
+# Force redeploy after revert
 app = FastAPI(title="REI SMS Engine", version="3.0.0")
 if _inbound_router:
     app.include_router(inbound_router)       # → /inbound
