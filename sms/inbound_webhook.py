@@ -1270,10 +1270,16 @@ def process_optout(payload: dict):
     # TODO: Re-enable once stable:
     # increment_opt_out(from_number)
 
-    lead_id, property_id = _lookup_existing_lead(from_number)
-    prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
-    if not property_id and prospect_property_id:
-        property_id = prospect_property_id
+    # TEMPORARILY DISABLED: Skip lookups in optout to avoid hanging
+    print("⚠️ EMERGENCY MODE: Skipping lead/prospect lookups in optout")
+    lead_id, property_id = None, None
+    prospect_id, prospect_property_id = None, None
+    
+    # TODO: Re-enable:
+    # lead_id, property_id = _lookup_existing_lead(from_number)
+    # prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
+    # if not property_id and prospect_property_id:
+    #     property_id = prospect_property_id
 
     # Create comprehensive opt-out conversation record
     now_timestamp = iso_timestamp()
@@ -1301,7 +1307,12 @@ def process_optout(payload: dict):
         record["Prospect Record ID"] = prospect_id
         record["Prospect"] = [prospect_id]  # Linked field format
 
-    log_conversation(record)
+    # TEMPORARILY DISABLED: Skip conversation logging in optout to avoid hanging
+    print("⚠️ EMERGENCY MODE: Skipping log_conversation in optout")
+    print(f"📊 Would log optout record: {record}")
+    
+    # TODO: Re-enable:
+    # log_conversation(record)
     if lead_id:
         update_lead_activity(lead_id, body, "IN")
 
