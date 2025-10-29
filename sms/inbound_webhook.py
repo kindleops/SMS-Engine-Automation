@@ -1173,20 +1173,32 @@ def handle_inbound(payload: dict):
             overrides["stage"] = str(payload[key])
             break
 
-    stage, intent, ai_intent = _classify_message(body, overrides)
+    # TEMPORARILY DISABLED: Simplify classification to avoid any hanging
+    print("⚠️ EMERGENCY MODE: Using simplified message classification")
+    stage, intent, ai_intent = "Contact Attempt", "Neutral", "neutral"
+    
+    # TODO: Re-enable once issue resolved:
+    # stage, intent, ai_intent = _classify_message(body, overrides)
 
-    lead_id, property_id = _lookup_existing_lead(from_number)
+    # TEMPORARILY DISABLED: All Airtable lookups disabled due to hanging
+    print("⚠️ EMERGENCY MODE: Skipping all Airtable lookups")
+    lead_id, property_id = None, None
     promoted = False
-    if not lead_id and _should_promote(intent, ai_intent, stage):
-        lead_id, property_id = promote_prospect_to_lead(from_number)
-        promoted = bool(lead_id)
-    elif lead_id:
-        promoted = _should_promote(intent, ai_intent, stage)
+    prospect_id, prospect_property_id = None, None
+    
+    # TODO: Re-enable once hanging issue resolved:
+    # lead_id, property_id = _lookup_existing_lead(from_number)
+    # promoted = False
+    # if not lead_id and _should_promote(intent, ai_intent, stage):
+    #     lead_id, property_id = promote_prospect_to_lead(from_number)
+    #     promoted = bool(lead_id)
+    # elif lead_id:
+    #     promoted = _should_promote(intent, ai_intent, stage)
 
-    # Lookup prospect information for linking
-    prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
-    if not property_id and prospect_property_id:
-        property_id = prospect_property_id
+    # # Lookup prospect information for linking
+    # prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
+    # if not property_id and prospect_property_id:
+    #     property_id = prospect_property_id
 
     # Create comprehensive conversation record with all available fields
     now_timestamp = iso_timestamp()
