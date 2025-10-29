@@ -82,44 +82,6 @@ def _is_authorized(header_token: Optional[str], query_token: Optional[str]) -> b
     return (header_token == WEBHOOK_TOKEN) or (query_token == WEBHOOK_TOKEN)
 
 
-# === TEXTGRID ID EXTRACTION ===
-def extract_textgrid_id(payload: dict) -> Optional[str]:
-    """
-    Extract TextGrid message ID from webhook payload.
-    Tries multiple field names to handle different webhook formats.
-    """
-    # Try different field names in order of preference
-    id_fields = [
-        "MessageSid",      # Twilio-style (most common)
-        "TextGridId",      # TextGrid-specific  
-        "Id",              # Generic ID
-        "MessageId",       # Alternative message ID
-        "SmsId",           # SMS-specific ID
-        "message_id",      # Snake case variants
-        "id",              # Lowercase generic
-        "textgrid_id",     # Lowercase TextGrid
-        "sms_id"           # Lowercase SMS
-    ]
-    
-    for field in id_fields:
-        value = payload.get(field)
-        if value:
-            print(f"🔍 TextGrid ID found in field '{field}': {value}")
-            return str(value)
-    
-    # Log available fields for debugging
-    available_fields = list(payload.keys())
-    print(f"⚠️  No TextGrid ID found. Available fields: {available_fields}")
-    
-    # Try to find any field that looks like an ID
-    for key, value in payload.items():
-        if value and ("id" in key.lower() or "sid" in key.lower()):
-            print(f"🔍 Potential ID field '{key}': {value}")
-            return str(value)
-    
-    return None
-
-
 # === ENHANCED IDEMPOTENCY STORE ===
 class IdempotencyStore:
     """Redis / Upstash idempotency with local fallback for message deduplication."""
@@ -1184,9 +1146,7 @@ def handle_inbound(payload: dict):
     from_number = payload.get("From")
     to_number = payload.get("To")
     body = payload.get("Body")
-    
-    # Extract TextGrid ID using centralized helper
-    msg_id = extract_textgrid_id(payload)
+    msg_id = payload.get("MessageSid") or payload.get("TextGridId")
 
     if not from_number or not body:
         print(f"❌ Missing required fields - From: {bool(from_number)}, Body: {bool(body)}")
@@ -1281,10 +1241,7 @@ def process_optout(payload: dict):
     """Handles STOP/unsubscribe messages for tests + webhook."""
     from_number = payload.get("From")
     raw_body = payload.get("Body")
-    
-    # Extract TextGrid ID using centralized helper
-    msg_id = extract_textgrid_id(payload)
-    
+    msg_id = payload.get("MessageSid") or payload.get("TextGridId")
     body = "" if raw_body is None else str(raw_body)
 
     if not from_number or not body:
@@ -1352,9 +1309,7 @@ def process_optout(payload: dict):
 # === TESTABLE STATUS HANDLER ===
 def process_status(payload: dict):
     """Testable delivery status handler used by CI and webhook."""
-    # Extract TextGrid ID using centralized helper
-    msg_id = extract_textgrid_id(payload)
-    
+    msg_id = payload.get("MessageSid")
     status = (payload.get("MessageStatus") or "").lower()
     to = payload.get("To")
     from_num = payload.get("From")
