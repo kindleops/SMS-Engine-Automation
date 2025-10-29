@@ -183,7 +183,18 @@ def _sync_to_campaign_control_base(campaign_data: Dict[str, Any]):
             
         # Search for existing campaign in control base
         formula = f"{{Campaign Name}}='{_escape_quotes(campaign_name)}'"
-        existing = control_campaigns.all(formula=formula, max_records=1)
+        
+        try:
+            existing = control_campaigns.all(formula=formula, max_records=1)
+        except Exception as api_error:
+            # Handle specific access/permission errors gracefully
+            error_msg = str(api_error).lower()
+            if any(x in error_msg for x in ["403", "forbidden", "permission", "not found"]):
+                log.debug(f"Campaign Control Base access denied - skipping sync for '{campaign_name}'")
+                return
+            else:
+                # Re-raise other unexpected errors
+                raise
         
         metrics_update = {
             "Total Sent": campaign_data.get("total_sent", 0),

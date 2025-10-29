@@ -29,6 +29,8 @@ from sms.dispatcher import get_policy  # provides quiet hours + rate caps
 # Schema + config
 # ──────────────────────────────────────────────────────────────────────────────
 from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
+
+# Import safe conversation logging from inbound webhook
 try:
     from sms.status_utils import _sanitize_status  # type: ignore
 except Exception:
@@ -621,7 +623,7 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
 
         delivered = False
         # Extract prospect ID for updates
-        prospect_id = _extract_prospect_id_from_drip(rec)
+        prospect_id = _extract_prospect_id_from_drip(r)
 
         try:
             if MessageProcessor is None:

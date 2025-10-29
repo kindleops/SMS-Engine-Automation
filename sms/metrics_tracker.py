@@ -43,7 +43,18 @@ def _sync_to_campaign_control_base(campaign_name: str, metrics_data: Dict[str, A
         
         # Search for existing campaign in control base
         formula = f"{{Campaign Name}}='{campaign_name.replace("'", "\\'")}'"
-        existing = control_campaigns.all(formula=formula, max_records=1)
+        
+        try:
+            existing = control_campaigns.all(formula=formula, max_records=1)
+        except Exception as api_error:
+            # Handle specific access/permission errors gracefully
+            error_msg = str(api_error).lower()
+            if any(x in error_msg for x in ["403", "forbidden", "permission", "not found"]):
+                logger.debug(f"Campaign Control Base access denied - skipping metrics sync for '{campaign_name}'")
+                return
+            else:
+                # Re-raise other unexpected errors
+                raise
         
         # Map metrics to control base fields
         control_metrics = {

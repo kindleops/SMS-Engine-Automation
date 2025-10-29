@@ -741,16 +741,14 @@ def safe_log_message(direction: str, to: str, from_: str, body: str, status="SEN
     try:
         tbl = CONNECTOR.conversations().table  # reuse same table if no separate Messages table
         rec = tbl.create({
-            "fields": {
-                "Direction": direction,
-                "TextGrid Phone Number": to,
-                "Seller Phone Number": from_,
-                "Message": body or "",
-                "Status": status,
-                "TextGrid ID": sid or "",
-                "Error": error or "",
-                "Timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            "Direction": direction,
+            "TextGrid Phone Number": to,
+            "Seller Phone Number": from_,
+            "Message": body or "",
+            "Delivery Status": status,  # Fixed: use "Delivery Status" instead of "Status"
+            "TextGrid ID": sid or "",
+            # "Error": error or "",  # Removed: not in valid schema
+            "Received Time": datetime.now(timezone.utc).isoformat(),
         })
         logger.info(f"📩 Logged {direction} message → {to}")
         return rec
