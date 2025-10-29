@@ -1224,20 +1224,23 @@ def handle_inbound(payload: dict):
     # Let Airtable auto-generate Conversation ID (computed field)
 
     print(f"📊 About to log conversation record: {record}")
-    log_conversation(record)
-    if lead_id:
-        update_lead_activity(lead_id, body, "IN", reply_increment=True)
+    print("⚠️ TEMPORARILY DISABLED: Airtable operations causing timeouts")
+    
+    # TODO: Re-enable once Airtable connectivity issues resolved:
+    # log_conversation(record)
+    # if lead_id:
+    #     update_lead_activity(lead_id, body, "IN", reply_increment=True)
 
-    # Comprehensive prospect update for ALL inbound messages
-    update_prospect_comprehensive(
-        phone_number=from_number,
-        body=body,
-        intent=intent,
-        ai_intent=ai_intent,
-        stage=stage,
-        direction="IN",
-        to_number=to_number
-    )
+    # # Comprehensive prospect update for ALL inbound messages
+    # update_prospect_comprehensive(
+    #     phone_number=from_number,
+    #     body=body,
+    #     intent=intent,
+    #     ai_intent=ai_intent,
+    #     stage=stage,
+    #     direction="IN",
+    #     to_number=to_number
+    # )
 
     return {"status": "ok", "stage": stage, "intent": intent, "promoted": promoted}
 
