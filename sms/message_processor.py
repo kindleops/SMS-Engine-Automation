@@ -202,6 +202,16 @@ class MessageProcessor:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> dict:
         """Sends SMS → logs Conversations → updates Leads."""
+        # =====================================================
+        # EMERGENCY NUCLEAR STOP - IMMEDIATELY RETURN FAILED
+        # =====================================================
+        logger.error("🚨 EMERGENCY STOP: MessageProcessor.send has been DISABLED due to quiet hours violation emergency")
+        return {
+            "ok": False, "status": "failed", "sid": None,
+            "phone": phone, "body": body, "convo_id": None,
+            "provider_status": "EMERGENCY_STOP", "error": "EMERGENCY_STOP_ALL_SENDING_DISABLED"
+        }
+        
         if not phone or not body:
             logger.warning("Skipping send: missing phone or body")
             return {

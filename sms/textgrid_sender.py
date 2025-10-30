@@ -286,6 +286,12 @@ def send_message(
     Signature kept compatible with MessageProcessor.
     Returns minimal normalized envelope: {"status": "sent"|"failed", "sid": ..., "raw": ...}
     """
+    # =====================================================
+    # EMERGENCY NUCLEAR STOP - IMMEDIATELY RETURN FAILED
+    # =====================================================
+    logger.error("🚨 EMERGENCY STOP: All SMS sending has been DISABLED due to quiet hours violation emergency")
+    return {"status": "failed", "error": "EMERGENCY_STOP_ALL_SENDING_DISABLED"}
+    
     if not to or not message:
         return {"status": "failed", "error": "missing to/message"}
 
