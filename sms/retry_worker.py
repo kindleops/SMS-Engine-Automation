@@ -46,6 +46,14 @@ try:
 except Exception:
     _send_direct = None
 
+# Import quiet hours checking - CRITICAL FIX for 1:11 AM sending bug
+try:
+    from sms.main import is_quiet_hours_local
+except Exception:
+    # Fallback - assume always quiet during import issues
+    def is_quiet_hours_local():
+        return True
+
 # ----------------- pyairtable compatibility -----------------
 _PyTable = _PyApi = None
 try:
@@ -169,6 +177,10 @@ def _is_permanent_error(err: str) -> bool:
 
 
 def _send(phone: str, body: str, from_number: Optional[str]) -> None:
+    # CRITICAL FIX: Check quiet hours before sending any retry messages
+    if is_quiet_hours_local():
+        raise RuntimeError("quiet_hours_blocked")
+    
     if not from_number:
         raise RuntimeError("missing_from_number")
     if _MP:

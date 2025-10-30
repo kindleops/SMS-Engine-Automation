@@ -29,6 +29,14 @@ try:
 except Exception:
     _Processor = None  # fallback
 
+# Import quiet hours checking
+try:
+    from sms.main import is_quiet_hours_local
+except Exception:
+    # Fallback - assume always quiet during import issues
+    def is_quiet_hours_local():
+        return True
+
 try:
     from sms.logger import log_run
 except Exception:
@@ -212,6 +220,10 @@ class RetryRunner:
                 self.summary["rescheduled"] += 1
 
     def _send(self, phone, body, from_number, template_id, campaign_id, lead_id) -> Dict[str, Any]:
+        # CRITICAL FIX: Check quiet hours before sending any retry messages
+        if is_quiet_hours_local():
+            return {"status": "failed", "error": "quiet_hours_blocked"}
+        
         if not from_number:
             return {"status": "failed", "error": "missing_from_number"}
         if _Processor:
