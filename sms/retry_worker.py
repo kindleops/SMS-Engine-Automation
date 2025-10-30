@@ -101,6 +101,11 @@ PERMANENT_FAIL_FIELD = CONVERSATIONS_FIELDS.get("PERMANENT_FAIL", "permanent_fai
 
 FAILED_STATES = {"FAILED", "DELIVERY_FAILED", "UNDELIVERED", "UNDELIVERABLE", "THROTTLED", "NEEDS_RETRY"}
 
+# Get default from number
+def _get_default_from_number() -> str:
+    """Get default from number from environment variables."""
+    return os.getenv("DEFAULT_FROM_NUMBER", "+18329063669")  # fallback to env default
+
 
 # ----------------- helpers -----------------
 def _now() -> datetime:
@@ -231,6 +236,10 @@ def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
         phone = f.get(PHONE_FIELD) or f.get("From")
         body = f.get(MESSAGE_FIELD) or f.get("Body")
         from_number = f.get(TO_FIELD) or f.get("TextGrid Phone Number") or f.get("To")
+        # FIX: Provide default from_number if missing
+        if not from_number:
+            from_number = _get_default_from_number()
+            
         retries_prev = int(f.get(RETRY_COUNT_FIELD) or 0)
         if not (rid and phone and body):
             continue

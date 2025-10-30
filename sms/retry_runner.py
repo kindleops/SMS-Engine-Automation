@@ -19,6 +19,7 @@ from sms.airtable_schema import (
     ConversationDirection,
     conversations_field_map,
 )
+from sms.config import DEFAULT_FROM_NUMBER
 from sms.datastore import CONNECTOR, list_records, update_record
 from sms.dispatcher import get_policy
 from sms.runtime import get_logger, iso_now
@@ -201,6 +202,12 @@ class RetryRunner:
             return
 
         from_number = f.get(CONV_TO_FIELD)
+        # FIX: Provide default from_number if missing
+        if not from_number:
+            from_number = DEFAULT_FROM_NUMBER
+            self.summary.setdefault("from_number_fixes", 0)
+            self.summary["from_number_fixes"] += 1
+            
         template_id = _link_id(f.get(CONV_TEMPLATE_LINK_FIELD))
         campaign_id = _link_id(f.get(CONV_CAMPAIGN_LINK_FIELD))
         lead_id = _link_id(f.get(CONV_LEAD_LINK_FIELD))
