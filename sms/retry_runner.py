@@ -86,6 +86,46 @@ FAILED_STATUSES = {
     "NEEDS_RETRY",
 }
 
+def _is_valid_from_number(from_number: str) -> bool:
+    """Validate that from_number is a known good number."""
+    if not from_number:
+        return False
+    
+    # Known good numbers (current valid TextGrid DIDs)
+    valid_numbers = {
+        "+18329063669",  # Current default
+        "+19045124117",  # Known valid 904 number
+        "+19045124118",  # Known valid 904 number
+    }
+    
+    return from_number in valid_numbers
+
+
+def _qualifies(fields: Dict[str, Any]) -> bool:
+    """Check if a conversation record qualifies for retry."""
+    status = (fields.get(CONV_STATUS_FIELD) or "").upper()
+    direction = (fields.get(CONV_DIRECTION_FIELD) or "").upper()
+    retries = int(fields.get(RETRY_COUNT_FIELD) or 0)
+    
+    if direction not in ("OUT", "OUTBOUND"):
+        return False
+    if status not in FAILED_STATUSES:
+        return False
+    if retries >= MAX_RETRIES:
+        return False
+        
+    retry_after = fields.get(RETRY_AFTER_FIELD)
+    if retry_after:
+        try:
+            retry_time = datetime.fromisoformat(retry_after.replace("Z", "+00:00"))
+            if retry_time > datetime.now(timezone.utc):
+                return False
+        except (ValueError, AttributeError):
+            pass
+    
+    return True
+
+
 POLICY = get_policy()
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", str(getattr(POLICY, "retry_limit", 3))))
 BASE_BACKOFF_MINUTES = int(os.getenv("BASE_BACKOFF_MINUTES", "30"))
@@ -202,11 +242,16 @@ class RetryRunner:
             return
 
         from_number = f.get(CONV_TO_FIELD)
-        # FIX: Provide default from_number if missing
-        if not from_number:
+        # FIX: Validate and correct from_number - don't trust old/wrong data
+        if not from_number or not _is_valid_from_number(from_number):
+            if from_number:
+                self.summary.setdefault("invalid_from_number_fixes", 0)
+                self.summary["invalid_from_number_fixes"] += 1
+                logger.warning(f"Replacing invalid from_number '{from_number}' with default")
+            else:
+                self.summary.setdefault("from_number_fixes", 0)
+                self.summary["from_number_fixes"] += 1
             from_number = DEFAULT_FROM_NUMBER
-            self.summary.setdefault("from_number_fixes", 0)
-            self.summary["from_number_fixes"] += 1
             
         template_id = _link_id(f.get(CONV_TEMPLATE_LINK_FIELD))
         campaign_id = _link_id(f.get(CONV_CAMPAIGN_LINK_FIELD))

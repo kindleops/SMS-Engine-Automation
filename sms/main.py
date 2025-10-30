@@ -372,11 +372,6 @@ async def send_endpoint(
     limit: int = Query(500),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
-    # =====================================================
-    # EMERGENCY NUCLEAR STOP - OVERRIDE ALL OTHER LOGIC
-    # =====================================================
-    return {"ok": False, "error": "EMERGENCY_STOP_ALL_SENDING_DISABLED", "emergency": True}
-    
     if TEST_MODE:
         return {"ok": True, "status": "mock_send", "campaign": campaign_id}
     if is_quiet_hours_local():
@@ -404,10 +399,6 @@ async def run_campaigns_endpoint(
       - Else → skip entirely
     """
     _require_token(request, token, x_webhook_token, x_cron_token)
-    # =====================================================
-    # EMERGENCY NUCLEAR STOP - OVERRIDE ALL OTHER LOGIC
-    # =====================================================
-    return {"ok": False, "error": "EMERGENCY_STOP_ALL_CAMPAIGNS_DISABLED", "emergency": True}
     
     if not _run_campaigns:
         return {"ok": False, "error": "campaign runner unavailable"}
@@ -504,10 +495,6 @@ async def campaign_kick(
     Honors quiet hours (will queue-only or block accordingly).
     """
     _require_token(request, token, x_webhook_token, x_cron_token)
-    # =====================================================
-    # EMERGENCY NUCLEAR STOP - OVERRIDE ALL OTHER LOGIC
-    # =====================================================
-    return {"ok": False, "error": "EMERGENCY_STOP_ALL_CAMPAIGN_KICKS_DISABLED", "emergency": True}
     
     tbl = _get_campaigns_tbl()
     if not tbl:
@@ -584,10 +571,6 @@ async def retry_endpoint(
     token: Optional[str] = Query(None),
 ):
     _require_token(request, token, x_webhook_token, x_cron_token)
-    # =====================================================
-    # EMERGENCY NUCLEAR STOP - OVERRIDE ALL OTHER LOGIC
-    # =====================================================
-    return {"ok": False, "error": "EMERGENCY_STOP_ALL_RETRIES_DISABLED", "emergency": True}
     
     if TEST_MODE:
         return {"ok": True, "status": "mock_retry"}

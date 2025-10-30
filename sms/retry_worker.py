@@ -106,6 +106,20 @@ def _get_default_from_number() -> str:
     """Get default from number from environment variables."""
     return os.getenv("DEFAULT_FROM_NUMBER", "+18329063669")  # fallback to env default
 
+def _is_valid_from_number(from_number: str) -> bool:
+    """Validate that from_number is a known good number."""
+    if not from_number:
+        return False
+    
+    # Known good numbers (current valid TextGrid DIDs)
+    valid_numbers = {
+        "+18329063669",  # Current default
+        "+19045124117",  # Known valid 904 number
+        "+19045124118",  # Known valid 904 number
+    }
+    
+    return from_number in valid_numbers
+
 
 # ----------------- helpers -----------------
 def _now() -> datetime:
@@ -236,8 +250,10 @@ def run_retry(limit: int = 100, view: Optional[str] = None) -> Dict[str, Any]:
         phone = f.get(PHONE_FIELD) or f.get("From")
         body = f.get(MESSAGE_FIELD) or f.get("Body")
         from_number = f.get(TO_FIELD) or f.get("TextGrid Phone Number") or f.get("To")
-        # FIX: Provide default from_number if missing
-        if not from_number:
+        # FIX: Validate and correct from_number - don't trust old/wrong data
+        if not from_number or not _is_valid_from_number(from_number):
+            if from_number:
+                log.warning(f"Replacing invalid from_number '{from_number}' with default")
             from_number = _get_default_from_number()
             
         retries_prev = int(f.get(RETRY_COUNT_FIELD) or 0)
