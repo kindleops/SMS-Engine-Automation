@@ -112,6 +112,7 @@ DEFAULT_FROM_NUMBER = (
     env_str("TEXTGRID_DEFAULT_FROM_NUMBER")
     or env_str("TEXTGRID_DEFAULT_FROM")
     or env_str("DEFAULT_FROM_NUMBER")
+    or "+19045124117"  # Hardcoded fallback for production
 )
 MESSAGING_SERVICE_SID = env_str("TEXTGRID_MESSAGING_SERVICE_SID") or env_str("MESSAGING_SERVICE_SID")
 
@@ -235,6 +236,7 @@ RUNS_TABLE_NAME = env_str("RUNS_TABLE_NAME", "Logs")
 class Settings:
     AIRTABLE_API_KEY: Optional[str]
     AIRTABLE_REPORTING_KEY: Optional[str]
+    AIRTABLE_COMPLIANCE_KEY: Optional[str]
     LEADS_CONVOS_BASE: Optional[str]
     CAMPAIGN_CONTROL_BASE: Optional[str]
     PERFORMANCE_BASE: Optional[str]
@@ -282,6 +284,7 @@ def settings() -> Settings:
     return Settings(
         AIRTABLE_API_KEY=env_str("AIRTABLE_API_KEY"),
         AIRTABLE_REPORTING_KEY=env_str("AIRTABLE_REPORTING_KEY"),
+        AIRTABLE_COMPLIANCE_KEY=env_str("AIRTABLE_COMPLIANCE_KEY") or env_str("AIRTABLE_API_KEY"),  # Fallback to main key
         LEADS_CONVOS_BASE=env_str("LEADS_CONVOS_BASE") or env_str("AIRTABLE_LEADS_CONVOS_BASE_ID"),
         CAMPAIGN_CONTROL_BASE=env_str("CAMPAIGN_CONTROL_BASE") or env_str("AIRTABLE_CAMPAIGN_CONTROL_BASE_ID"),
         PERFORMANCE_BASE=env_str("PERFORMANCE_BASE") or env_str("AIRTABLE_PERFORMANCE_BASE_ID"),

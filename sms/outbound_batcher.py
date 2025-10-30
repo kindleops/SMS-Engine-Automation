@@ -28,7 +28,10 @@ from sms.dispatcher import get_policy  # provides quiet hours + rate caps
 # ──────────────────────────────────────────────────────────────────────────────
 # Schema + config
 # ──────────────────────────────────────────────────────────────────────────────
-from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS
+from sms.config import DRIP_FIELD_MAP as DRIP_FIELDS, DEFAULT_FROM_NUMBER
+
+# Airtable client functions
+from sms.airtable_client import get_numbers
 
 # Import safe conversation logging from inbound webhook
 try:
@@ -353,11 +356,17 @@ def is_quiet_hours_local() -> bool:
 def _pick_number_for_market(market: Optional[str]) -> Optional[str]:
     """
     Pick an active sender DID from Numbers table, preferring the specified market.
-    Falls back to any active number if none found for the market.
+    Falls back to any active number if none found for the market, then DEFAULT_FROM_NUMBER.
     """
-    tbl = get_table(LEADS_BASE_ENV, NUMBERS_TABLE_NAME)
-    if not tbl:
-        return None
+    # Use get_numbers() to access the Numbers table in Campaign Control Base
+    try:
+        tbl = get_numbers()
+        if not tbl:
+            log.warning("Numbers table not available - falling back to DEFAULT_FROM_NUMBER")
+            return DEFAULT_FROM_NUMBER
+    except Exception as e:
+        log.warning(f"Number pick failed accessing table: {e} - falling back to DEFAULT_FROM_NUMBER")
+        return DEFAULT_FROM_NUMBER
 
     def _first_or_none(records: List[Dict[str, Any]]) -> Optional[str]:
         for r in records or []:
@@ -378,14 +387,23 @@ def _pick_number_for_market(market: Optional[str]) -> Optional[str]:
             recs = tbl.all(formula=f"LOWER({{Market}}) = '{str(market).strip().lower()}'")
             did = _first_or_none(recs)
             if did:
+                log.info(f"Selected market-specific number for {market}: {did}")
                 return did
 
         # Fallback: any active
         recs = tbl.all(formula="OR({Active} = 1, LOWER({Status}) = 'active')")
-        return _first_or_none(recs)
+        fallback_number = _first_or_none(recs)
+        if fallback_number:
+            log.info(f"Selected fallback number: {fallback_number}")
+            return fallback_number
+            
+        # If no active numbers found, use DEFAULT_FROM_NUMBER
+        log.warning("No active numbers found in Numbers table - using DEFAULT_FROM_NUMBER")
+        return DEFAULT_FROM_NUMBER
+        
     except Exception as e:  # pragma: no cover
-        log.warning(f"Number pick failed: {e}")
-        return None
+        log.warning(f"Number pick failed during query: {e} - falling back to DEFAULT_FROM_NUMBER")
+        return DEFAULT_FROM_NUMBER
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Core batch sender
@@ -587,6 +605,12 @@ def send_batch(campaign_id: Optional[str] = None, limit: int = 500) -> Dict[str,
         if not did and AUTO_BACKFILL_FROM_NUMBER:
             did = _pick_number_for_market(market)
             did = _to_e164(did) if did else None
+            
+            # If number picking failed, use DEFAULT_FROM_NUMBER as fallback
+            if not did and DEFAULT_FROM_NUMBER:
+                did = _to_e164(DEFAULT_FROM_NUMBER)
+                log.info(f"Using DEFAULT_FROM_NUMBER fallback: {did}")
+            
             if did:
                 _safe_update(drip_tbl, rid, {"FROM_NUMBER": did})
 

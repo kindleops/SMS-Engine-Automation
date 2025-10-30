@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request, Header, Query
 from pyairtable import Table
 
 from sms.number_pools import increment_delivered, increment_failed, increment_opt_out
+from sms.datastore import CONNECTOR
 
 router = APIRouter()
 
@@ -1160,7 +1161,7 @@ def timeout_context(seconds):
 
 def safe_log_conversation(payload: dict, timeout_seconds: int = 3):
     """
-    Safely log conversation to Airtable with timeout protection.
+    Safely log conversation to Airtable with timeout protection and comprehensive field mapping.
     
     Args:
         payload: Conversation data to log
@@ -1173,34 +1174,56 @@ def safe_log_conversation(payload: dict, timeout_seconds: int = 3):
         print(f"⚠️ Conversations table not initialized. AIRTABLE_API_KEY: {'SET' if AIRTABLE_API_KEY else 'NOT SET'}, BASE_ID: {'SET' if BASE_ID else 'NOT SET'}")
         return False
 
-    # Define valid Airtable fields
+    # Get the proper field mappings from schema
+    from sms.config import CONV_FIELDS
+    
+    # Enhance payload with proper logic based on direction
+    enhanced_payload = enhance_conversation_payload(payload)
+    
+    # Define valid Airtable fields based on conversations schema
     valid_fields = {
-        "AI Intent",
-        "AI Summary", 
-        "Bulk Campaign",
-        # "Conversation ID",  # Let Airtable auto-generate for now
-        "Date Received",
-        "Delivery Status",
-        "Direction",
+        "Stage",
+        "Processed By", 
         "Intent Detected",
-        "Lead Record ID",
-        "Message",
-        "Processed By",
-        "Processed Time",
-        "Prospect",
-        "Prospect Record ID", 
-        "Prospects copy",
-        "Received Time",
-        "Record ID",
-        # "Response Time (Minutes)",  # Skipping - computed field
-        "Seller Phone Number",
+        "Direction",
+        "Delivery Status",
+        "AI Intent",
+        "TextGrid Phone Number",
         "TextGrid ID",
-        "TextGrid Phone Number"
+        "Template Record ID",
+        "Seller Phone Number",
+        "Message",
+        "Message Summary (AI)",
+        "Received Time",
+        "Processed Time", 
+        "Last Sent Time",
+        "Last Reply Time",
+        "Last Retry Time",
+        "AI Response Trigger",
+        "Prospect Record ID",
+        "Lead Record ID",
+        "Campaign Record ID",
+        "Campaign",
+        "Template",
+        "Prospect",
+        "Prospects",
+        "Drip Queue",
+        "Lead",
+        "Property Record ID",
+        "Conversation ID",
+        "Record ID",
+        "Sent Count",
+        "Reply Count",
+        "Retry Count",
+        "Retry After",
+        "Last Error",
+        "Permanent Fail Reason",
+        "Response Time (Minutes)",
     }
     
     # Create a filtered payload with only valid fields
     filtered_payload = {}
-    for key, value in payload.items():
+    for key, value in enhanced_payload.items():
         if key in valid_fields:
             filtered_payload[key] = value
         else:
@@ -1223,6 +1246,189 @@ def safe_log_conversation(payload: dict, timeout_seconds: int = 3):
         print(f"🔍 Filtered payload keys: {list(filtered_payload.keys())}")
         traceback.print_exc()
         return False
+
+
+def enhance_conversation_payload(payload: dict) -> dict:
+    """
+    Enhance conversation payload with proper field logic, counts, and stage management.
+    
+    Args:
+        payload: Original conversation data
+        
+    Returns:
+        dict: Enhanced payload with all required fields properly set
+    """
+    from sms.config import CONV_FIELDS
+    from datetime import datetime, timezone
+    
+    enhanced = payload.copy()
+    direction = enhanced.get("Direction", "").upper()
+    is_inbound = direction == "INBOUND"
+    is_outbound = direction == "OUTBOUND"
+    
+    # Current timestamp
+    now_iso = datetime.now(timezone.utc).isoformat()
+    
+    # === DELIVERY STATUS LOGIC ===
+    # Only set delivery status for outbound messages
+    if is_outbound and not enhanced.get("Delivery Status"):
+        enhanced["Delivery Status"] = "sent"  # Default for outbound
+    elif is_inbound:
+        # Remove delivery status for inbound messages
+        enhanced.pop("Delivery Status", None)
+    
+    # === PROCESSED BY AND PROCESSED TIME ===
+    # These fields indicate when our system processed and responded to a message
+    if not enhanced.get("Processed By"):
+        if is_inbound:
+            enhanced["Processed By"] = "Autoresponder"  # AI processed the inbound message
+        else:
+            enhanced["Processed By"] = "Campaign Runner"  # Campaign system sent outbound
+    
+    if not enhanced.get("Processed Time"):
+        enhanced["Processed Time"] = now_iso
+    
+    # === STAGE MANAGEMENT ===
+    # Set appropriate stage based on message content and direction
+    if not enhanced.get("Stage"):
+        if is_inbound:
+            intent = enhanced.get("Intent Detected", "").lower()
+            if "interested" in intent or "yes" in intent:
+                enhanced["Stage"] = "interested"
+            elif "not interested" in intent or "no" in intent:
+                enhanced["Stage"] = "not interested"
+            else:
+                enhanced["Stage"] = "engaged"  # They replied
+        else:
+            enhanced["Stage"] = "Stage 1 - Ownership Confirmation"  # Default for outbound
+    
+    # === RESPONSE TIME CALCULATION ===
+    # Only calculate for inbound messages (response to our outbound)
+    if is_inbound and enhanced.get("Received Time"):
+        try:
+            # Get the last outbound message time for this prospect
+            seller_phone = enhanced.get("Seller Phone Number")
+            if seller_phone:
+                response_time_minutes = calculate_response_time(seller_phone, enhanced.get("Received Time"))
+                if response_time_minutes is not None:
+                    enhanced["Response Time (Minutes)"] = response_time_minutes
+        except Exception as e:
+            print(f"⚠️ Failed to calculate response time: {e}")
+    
+    # === TOTAL COUNTS FOR PROSPECT ===
+    # Calculate total sent and reply counts for this prospect
+    seller_phone = enhanced.get("Seller Phone Number")
+    if seller_phone:
+        try:
+            sent_count, reply_count = get_prospect_message_counts(seller_phone)
+            
+            # Increment based on current message
+            if is_outbound:
+                sent_count += 1
+            else:
+                reply_count += 1
+                
+            enhanced["Sent Count"] = sent_count
+            enhanced["Reply Count"] = reply_count
+        except Exception as e:
+            print(f"⚠️ Failed to calculate message counts: {e}")
+            # Set defaults
+            enhanced["Sent Count"] = 1 if is_outbound else 0
+            enhanced["Reply Count"] = 1 if is_inbound else 0
+    
+    # === LINKING ENHANCEMENTS ===
+    # Ensure proper linking to Lead and Drip Queue records
+    if enhanced.get("Lead Record ID") and not enhanced.get("Lead"):
+        enhanced["Lead"] = [enhanced["Lead Record ID"]]
+    
+    if enhanced.get("Drip Queue") and isinstance(enhanced["Drip Queue"], str):
+        enhanced["Drip Queue"] = [enhanced["Drip Queue"]]
+    
+    # === TIME FIELD STANDARDIZATION ===
+    if not enhanced.get("Received Time"):
+        enhanced["Received Time"] = now_iso
+    
+    if is_outbound and not enhanced.get("Last Sent Time"):
+        enhanced["Last Sent Time"] = now_iso
+    elif is_inbound and not enhanced.get("Last Reply Time"):
+        enhanced["Last Reply Time"] = now_iso
+    
+    return enhanced
+
+
+def calculate_response_time(seller_phone: str, received_time: str) -> Optional[int]:
+    """
+    Calculate response time in minutes from last outbound message to this inbound reply.
+    
+    Args:
+        seller_phone: The prospect's phone number
+        received_time: When the inbound message was received (ISO format)
+        
+    Returns:
+        int: Response time in minutes, or None if calculation fails
+    """
+    try:
+        if not convos:
+            return None
+            
+        # Get the most recent outbound message to this prospect
+        from datetime import datetime
+        
+        recent_outbound = convos.all(
+            formula=f"AND({{Seller Phone Number}} = '{seller_phone}', {{Direction}} = 'OUTBOUND')",
+            sort=["-Last Sent Time"],
+            max_records=1
+        )
+        
+        if not recent_outbound:
+            return None
+            
+        last_sent_time = recent_outbound[0]["fields"].get("Last Sent Time")
+        if not last_sent_time:
+            return None
+        
+        # Parse timestamps and calculate difference
+        received_dt = datetime.fromisoformat(received_time.replace('Z', '+00:00'))
+        sent_dt = datetime.fromisoformat(last_sent_time.replace('Z', '+00:00'))
+        
+        diff_minutes = int((received_dt - sent_dt).total_seconds() / 60)
+        return max(0, diff_minutes)  # Ensure non-negative
+        
+    except Exception as e:
+        print(f"⚠️ Error calculating response time: {e}")
+        return None
+
+
+def get_prospect_message_counts(seller_phone: str) -> tuple[int, int]:
+    """
+    Get total sent and reply counts for a prospect across all conversations.
+    
+    Args:
+        seller_phone: The prospect's phone number
+        
+    Returns:
+        tuple: (sent_count, reply_count)
+    """
+    try:
+        if not convos:
+            return (0, 0)
+        
+        # Get all messages for this prospect
+        all_messages = convos.all(
+            formula=f"{{Seller Phone Number}} = '{seller_phone}'",
+            fields=["Direction"]
+        )
+        
+        sent_count = sum(1 for msg in all_messages 
+                        if msg["fields"].get("Direction") == "OUTBOUND")
+        reply_count = sum(1 for msg in all_messages 
+                         if msg["fields"].get("Direction") == "INBOUND")
+        
+        return (sent_count, reply_count)
+        
+    except Exception as e:
+        print(f"⚠️ Error getting message counts: {e}")
+        return (0, 0)
 
 
 # === TESTABLE HANDLER (used by CI) ===
@@ -1273,25 +1479,39 @@ def handle_inbound(payload: dict):
 
     stage, intent, ai_intent = _classify_message(body, overrides)
 
-    # TEMPORARILY DISABLED: All Airtable lookups causing timeouts
-    print("⚠️ TEMPORARILY DISABLED: Skipping all Airtable lookups due to timeouts")
-    lead_id, property_id = None, None
-    promoted = False
-    prospect_id, prospect_property_id = None, None
-    
-    # TODO: Re-enable once Airtable performance issues resolved:
-    # lead_id, property_id = _lookup_existing_lead(from_number)
-    # promoted = False
-    # if not lead_id and _should_promote(intent, ai_intent, stage):
-    #     lead_id, property_id = promote_prospect_to_lead(from_number)
-    #     promoted = bool(lead_id)
-    # elif lead_id:
-    #     promoted = _should_promote(intent, ai_intent, stage)
-
-    # # Lookup prospect information for linking
-    # prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
-    # if not property_id and prospect_property_id:
-    #     property_id = prospect_property_id
+    # Re-enable prospect lookups with timeout protection for proper linking
+    print("🔍 Looking up prospect and lead information...")
+    try:
+        with timeout_context(5):  # 5 second timeout for lookups
+            # Lookup prospect information for linking
+            prospect_id, prospect_property_id = _lookup_prospect_info(from_number)
+            print(f"Found prospect: {prospect_id}, property: {prospect_property_id}")
+            
+            # Lookup existing lead
+            lead_id, property_id = _lookup_existing_lead(from_number)
+            print(f"Found lead: {lead_id}, property: {property_id}")
+            
+            # Use prospect property if we don't have lead property
+            if not property_id and prospect_property_id:
+                property_id = prospect_property_id
+                
+            # Check if we should promote to lead
+            promoted = False
+            if not lead_id and _should_promote(intent, ai_intent, stage):
+                try:
+                    lead_id, property_id = promote_prospect_to_lead(from_number)
+                    promoted = bool(lead_id)
+                    print(f"Promoted to lead: {lead_id}")
+                except Exception as promote_err:
+                    print(f"Promotion failed: {promote_err}")
+            elif lead_id:
+                promoted = _should_promote(intent, ai_intent, stage)
+                
+    except Exception as lookup_err:
+        print(f"⚠️ Lookup failed with timeout/error: {lookup_err}")
+        lead_id, property_id = None, None
+        promoted = False
+        prospect_id, prospect_property_id = None, None
 
     # Create comprehensive conversation record with all available fields
     now_timestamp = iso_timestamp()
@@ -1305,11 +1525,21 @@ def handle_inbound(payload: dict):
         TG_ID_FIELD: msg_id,  # "TextGrid ID"
         RECEIVED_AT: now_timestamp,  # "Received Time"
         
-        # Processing metadata
-        "Delivery Status": "DELIVERED",  # Mark as delivered since we received it
-        "Processed Time": now_timestamp,
-        "Processed By": "Campaign Runner",  # Use existing allowed value
-        "Intent Detected": intent,
+        # Processing metadata using proper field mappings
+        STATUS_FIELD: "DELIVERED",  # Mark as delivered since we received it
+        SENT_AT: now_timestamp,  # For compatibility
+        CONV_FIELDS.get("PROCESSED_AT", "Processed Time"): now_timestamp,  # "Processed Time" field
+        CONV_FIELDS.get("PROCESSED_BY", "Processed By"): "Campaign Runner",  # Valid processor option
+        INTENT_FIELD: intent,  # "Intent Detected"
+        CONV_FIELDS.get("AI_INTENT", "AI Intent"): ai_intent,  # "AI Intent"
+        CONV_FIELDS.get("STAGE", "Stage"): stage,  # "Stage"
+        
+        # Additional timestamp fields with proper mappings
+        CONV_FIELDS.get("RECEIVED_AT", "Received Time"): now_timestamp,
+        
+        # Initialize counters using proper field mappings
+        CONV_FIELDS.get("SENT_COUNT", "Sent Count"): 0,  # This is an inbound message
+        CONV_FIELDS.get("REPLY_COUNT", "Reply Count"): 1,  # This is a reply
     }
 
     # Add linking fields if we have the data
@@ -1319,6 +1549,46 @@ def handle_inbound(payload: dict):
     if prospect_id:
         record["Prospect Record ID"] = prospect_id
         record["Prospect"] = [prospect_id]  # Linked field format
+        
+        # Try to get additional prospect data for county, campaign, template, drip queue
+        try:
+            with timeout_context(3):
+                prospects_tbl = CONNECTOR.prospects().table
+                if prospects_tbl and not CONNECTOR.prospects().in_memory:
+                    prospect_data = prospects_tbl.get(prospect_id)
+                    if prospect_data:
+                        fields = prospect_data.get('fields', {})
+                        
+                        # Add county if available
+                        if fields.get('County'):
+                            record["County"] = fields['County']
+                            
+                        # Add campaign linking if available
+                        if fields.get('Campaign'):
+                            campaigns = fields['Campaign']
+                            if isinstance(campaigns, list) and campaigns:
+                                record["Bulk Campaign"] = campaigns
+                            elif campaigns:
+                                record["Bulk Campaign"] = [campaigns]
+                                
+                        # Add template linking if available  
+                        if fields.get('Template'):
+                            templates = fields['Template']
+                            if isinstance(templates, list) and templates:
+                                record["Template"] = templates
+                            elif templates:
+                                record["Template"] = [templates]
+                                
+                        # Add drip queue linking if available
+                        if fields.get('Drip Queue'):
+                            drip_queues = fields['Drip Queue']
+                            if isinstance(drip_queues, list) and drip_queues:
+                                record["Drip Queue"] = drip_queues
+                            elif drip_queues:
+                                record["Drip Queue"] = [drip_queues]
+                                
+        except Exception as prospect_err:
+            print(f"⚠️ Failed to get additional prospect data: {prospect_err}")
 
     # Let Airtable auto-generate Conversation ID (computed field)
 

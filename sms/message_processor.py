@@ -111,12 +111,38 @@ def _norm(s: Any) -> str:
 
 
 def _auto_field_map(tbl: Any) -> Dict[str, str]:
+    # Get comprehensive field mapping from schema instead of just sampling existing records
+    from sms.config import CONV_FIELDS
+    
+    # Start with schema-based field mappings  
+    schema_fields = dict(CONV_FIELDS)
+    
+    # Add common linking fields that might be present
+    common_fields = {
+        "Campaign": "Campaign",
+        "Template": "Template", 
+        "Prospect": "Prospect",
+        "Lead": "Lead",
+        "Lead Record ID": "Lead Record ID",
+        "Prospect Record ID": "Prospect Record ID",
+        "County": "County",
+        # Remove Drip Queue as it doesn't exist in conversations table
+    }
+    
+    # Try to get existing fields from sample record as fallback
     try:
         probe = tbl.all(max_records=1)
-        keys = list(probe[0].get("fields", {}).keys()) if probe else []
+        existing_keys = list(probe[0].get("fields", {}).keys()) if probe else []
+        for key in existing_keys:
+            common_fields[key] = key
     except Exception:
-        keys = []
-    return {_norm(k): k for k in keys}
+        pass
+    
+    # Combine schema fields with common/existing fields
+    all_fields = {**schema_fields, **common_fields}
+    
+    # Create normalized mapping
+    return {_norm(k): k for k in all_fields.values()}
 
 
 def _remap_existing_only(tbl: Any, payload: Dict) -> Dict:
@@ -344,6 +370,9 @@ class MessageProcessor:
             "OPT OUT": ConversationDeliveryStatus.OPT_OUT.value,
         }
         canonical_status = status_map.get(status.upper(), status)
+        
+        # Get current timestamp for multiple time fields
+        now_iso = utcnow_iso()
 
         payload = _compact({
             FROM_FIELD: phone,
@@ -351,16 +380,66 @@ class MessageProcessor:
             MSG_FIELD: body,
             DIR_FIELD: canonical_dir,
             STATUS_FIELD: canonical_status,
-            SENT_AT_FIELD: utcnow_iso(),
+            SENT_AT_FIELD: now_iso,
             TEXTGRID_ID_FIELD: sid,
             CAMPAIGN_LINK_FIELD: [campaign_id] if campaign_id else None,
             TEMPLATE_LINK_FIELD: [template_id] if template_id else None,
             DRIP_QUEUE_LINK_FIELD: [drip_queue_id] if drip_queue_id else None,
+            
+            # Enhanced field mapping - delivery status only for outbound
+            CONV_FIELDS.get("DELIVERY_STATUS", "Delivery Status"): canonical_status if canonical_dir == "OUTBOUND" else None,
+            
+            # Processing fields with proper logic
+            CONV_FIELDS.get("RECEIVED_AT", "Received Time"): now_iso,
+            CONV_FIELDS.get("PROCESSED_AT", "Processed Time"): now_iso,
+            CONV_FIELDS.get("PROCESSED_BY", "Processed By"): "Campaign Runner" if canonical_dir == "OUTBOUND" else "Autoresponder",
+            
+            # Get total message counts for this prospect
+            **MessageProcessor._get_enhanced_counts(phone, canonical_dir),
+            
+            # Stage management based on message content and direction
+            CONV_FIELDS.get("STAGE", "Stage"): MessageProcessor._determine_stage(phone, canonical_dir, metadata),
+            
+            # Add metadata fields with proper field mapping
             **(metadata or {}),
         })
+        
+        # Add prospect linking if available in metadata
+        meta = metadata or {}
+        if meta.get("prospect_id"):
+            payload["Prospect Record ID"] = meta["prospect_id"]
+            payload["Prospect"] = [meta["prospect_id"]]
+            
+        # Add AI analysis fields if available in metadata using proper field mappings
+        if meta.get("ai_intent"):
+            payload[CONV_FIELDS.get("AI_INTENT", "AI Intent")] = meta["ai_intent"]
+        if meta.get("intent_detected"):
+            payload[CONV_FIELDS.get("INTENT", "Intent Detected")] = meta["intent_detected"]
+        if meta.get("stage"):
+            payload[CONV_FIELDS.get("STAGE", "Stage")] = meta["stage"]
 
-        # ✅ Always log a local copy first (guaranteed visibility)
-        safe_log_message("OUTBOUND", phone, from_number or "", body, status=canonical_status, sid=sid)
+        # Link to Lead record
+        try:
+            from sms.airtable_client import get_leads
+            leads = get_leads()
+            if leads:
+                lead_matches = leads.all(
+                    formula=f"{{Seller Phone Number}} = '{phone}'",
+                    max_records=1,
+                    fields=["Record ID"]
+                )
+                if lead_matches:
+                    payload[CONV_FIELDS.get("LEAD", "Lead")] = [lead_matches[0]["id"]]
+                    logger.info(f"Linked conversation to lead: {lead_matches[0]['id']}")
+        except Exception as e:
+            logger.warning(f"Error linking to lead: {e}")
+
+        # Link to Drip Queue record if applicable
+        if drip_queue_id:
+            payload[CONV_FIELDS.get("DRIP_QUEUE", "Drip Queue")] = [drip_queue_id]
+
+        # ✅ Conversation logging handled by main convos.create() below - no need for duplicate safe_log_message
+        # safe_log_message("OUTBOUND", phone, from_number or "", body, status=canonical_status, sid=sid)
 
         if not convos:
             logger.info(f"[MOCK] Conversations ← {payload}")
@@ -384,6 +463,68 @@ class MessageProcessor:
                 "Sent At": datetime.now(timezone.utc).isoformat(),
             })
             return None
+
+    @staticmethod
+    def _get_enhanced_counts(phone: str, direction: str) -> Dict[str, int]:
+        """Get enhanced message counts for this prospect."""
+        try:
+            sent_count, reply_count = get_prospect_total_counts(phone)
+            
+            # Include the current message in counts
+            if direction == "OUTBOUND":
+                sent_count += 1
+            else:
+                reply_count += 1
+                
+            return {
+                CONV_FIELDS.get("SENT_COUNT", "Sent Count"): 1 if direction == "OUTBOUND" else 0,
+                CONV_FIELDS.get("REPLY_COUNT", "Reply Count"): 1 if direction == "INBOUND" else 0,
+            }
+        except Exception as e:
+            logger.warning(f"Error getting enhanced counts for {phone}: {e}")
+            return {
+                CONV_FIELDS.get("SENT_COUNT", "Sent Count"): 1 if direction == "OUTBOUND" else 0,
+                CONV_FIELDS.get("REPLY_COUNT", "Reply Count"): 1 if direction == "INBOUND" else 0,
+            }
+
+    @staticmethod
+    def _determine_stage(phone: str, direction: str, metadata: Optional[Dict[str, Any]]) -> str:
+        """Determine conversation stage based on message history and content."""
+        try:
+            # Check metadata first for explicit stage
+            meta = metadata or {}
+            if meta.get("stage"):
+                return meta["stage"]
+            
+            # Get total counts to determine stage
+            sent_count, reply_count = get_prospect_total_counts(phone)
+            
+            # Include current message in counts
+            if direction == "OUTBOUND":
+                sent_count += 1
+            else:
+                reply_count += 1
+            
+            # Stage logic based on conversation flow
+            if reply_count == 0 and sent_count == 1:
+                return "Stage 1 - Ownership Confirmation"
+            elif reply_count > 0:
+                # Check AI intent for more specific staging
+                ai_intent = meta.get("ai_intent", "").lower()
+                if "interested" in ai_intent or "qualified" in ai_intent:
+                    return "Stage 3 - Price Qualification"
+                elif "not interested" in ai_intent or "unqualified" in ai_intent:
+                    return "Opt-Out"
+                else:
+                    return "Stage 2 - Interest Filter"
+            elif sent_count > 3:
+                return "Stage 2 - Interest Filter"
+            else:
+                return "Stage 1 - Ownership Confirmation"
+                
+        except Exception as e:
+            logger.warning(f"Error determining stage for {phone}: {e}")
+            return "Stage 1 - Ownership Confirmation"
 
     # -----------------------------------------------------------
     @staticmethod
@@ -418,3 +559,37 @@ class MessageProcessor:
             handle_retry(convo_id, error)
         except Exception as e:
             logger.warning(f"handle_retry failed for {convo_id}: {e}", exc_info=True)
+
+
+def get_prospect_total_counts(phone: str) -> tuple[int, int]:
+    """
+    Get total sent and reply counts for a prospect across all conversations.
+    
+    Args:
+        phone: The prospect's phone number
+        
+    Returns:
+        tuple: (sent_count, reply_count)
+    """
+    try:
+        from sms.airtable_client import get_convos
+        convos = get_convos()
+        if not convos:
+            return (0, 0)
+        
+        # Get all messages for this prospect
+        all_messages = convos.all(
+            formula=f"{{Seller Phone Number}} = '{phone}'",
+            fields=["Direction"]
+        )
+        
+        sent_count = sum(1 for msg in all_messages 
+                        if msg["fields"].get("Direction") == "OUTBOUND")
+        reply_count = sum(1 for msg in all_messages 
+                         if msg["fields"].get("Direction") == "INBOUND")
+        
+        return (sent_count, reply_count)
+        
+    except Exception as e:
+        logger.warning(f"Error getting message counts for {phone}: {e}")
+        return (0, 0)

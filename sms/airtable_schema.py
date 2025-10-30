@@ -475,18 +475,21 @@ def conversations_field_map() -> Dict[str, str]:
 
     fields = CONVERSATIONS_TABLE.fields
     return {
-        "FROM": fields["SELLER_PHONE"].resolve(),
-        "TO": fields["TEXTGRID_PHONE"].resolve(),
-        "BODY": fields["MESSAGE"].resolve(),
-        "STATUS": fields["STATUS"].resolve(),
-        "DIRECTION": fields["DIRECTION"].resolve(),
-        "TEXTGRID_ID": fields["TEXTGRID_ID"].resolve(),
-        "RECEIVED_AT": fields["RECEIVED_AT"].resolve(),
-        "INTENT": fields["INTENT"].resolve(),
-        "PROCESSED_BY": fields["PROCESSED_BY"].resolve(),
-        "SENT_AT": fields["SENT_AT"].resolve(),
-        "STAGE": fields["STAGE"].resolve(),
-        "AI_INTENT": fields["AI_INTENT"].resolve(),
+        "FROM": fields["SELLER_PHONE"].default,
+        "TO": fields["TEXTGRID_PHONE"].default,
+        "BODY": fields["MESSAGE"].default,
+        "STATUS": fields["STATUS"].default,
+        "DIRECTION": fields["DIRECTION"].default,
+        "TEXTGRID_ID": fields["TEXTGRID_ID"].default,
+        "RECEIVED_AT": fields["RECEIVED_AT"].default,
+        "PROCESSED_AT": fields["PROCESSED_AT"].default,
+        "INTENT": fields["INTENT"].default,
+        "PROCESSED_BY": fields["PROCESSED_BY"].default,
+        "SENT_AT": fields["SENT_AT"].default,
+        "STAGE": fields["STAGE"].default,
+        "AI_INTENT": fields["AI_INTENT"].default,
+        "SENT_COUNT": fields["SENT_COUNT"].default,
+        "REPLY_COUNT": fields["REPLY_COUNT"].default,
     }
 
 
