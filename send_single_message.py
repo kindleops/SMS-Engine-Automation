@@ -35,12 +35,14 @@ def send_text_message(from_number, to_number, message):
         return False
 
 if __name__ == "__main__":
-    # Message details - corrected phone numbers
-    from_number = "+16127469639"  # Sending FROM this number
-    to_number = "+16512760269"    # Sending TO this number
-    message = "Do you have an asking price in mind?"
+    # Message details - Tony response message (using default SMS number)
+    from_number = "+18329063669"  # Default SMS-enabled number from .env
+    to_number = "+19043868085"    # To number  
+    message = "Thanks for your response Tony. I am not looking to waste your time and am a serious investor. Are you open to an offer on the property?"
     
     print(f"📱 Attempting to send from {from_number} to {to_number}")
+    print(f"📝 Message: {message}")
+    print(f"⚠️  Note: Using default SMS number instead of +19045124091 due to blacklist rule")
     
     # Send the message
     success = send_text_message(from_number, to_number, message)

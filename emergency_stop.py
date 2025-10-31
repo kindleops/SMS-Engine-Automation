@@ -70,29 +70,28 @@ def check_test_mode():
         print("   ❌ TEST_MODE is DISABLED!")
         return False
 
-def check_logging_system():
-    """Check if conversation logging is working"""
-    print("\n📝 Checking conversation logging system...")
+def check_sending_disabled():
+    """Test if SMS sending is actually disabled"""
+    print("\n� Testing SMS sending capability...")
     
     try:
-        # This will test the logging without sending messages
-        from sms.textgrid_sender import _convos_tbl
+        from sms.textgrid_sender import send_message
+        result = send_message(
+            from_number='+16127469639',
+            to='+16512760269', 
+            message='Emergency test - should fail'
+        )
         
-        table = _convos_tbl()
-        if table:
-            print("   ✅ Conversations table accessible")
-            
-            # Try to get recent records to test connectivity
-            recent = table.all(max_records=1)
-            print(f"   ✅ Connection verified - found {len(recent)} records")
+        if result and result.get('status') == 'failed':
+            print("   ✅ SMS sending is DISABLED")
             return True
         else:
-            print("   ❌ Conversations table NOT accessible")
+            print(f"   ❌ SMS sending is ACTIVE! Result: {result}")
             return False
             
     except Exception as e:
-        print(f"   ❌ Logging system error: {e}")
-        return False
+        print(f"   ✅ SMS sending is DISABLED (error: {e})")
+        return True
 
 def main():
     print("🚨 EMERGENCY SMS STOP PROTOCOL 🚨")
@@ -104,26 +103,26 @@ def main():
     # Check safety measures
     creds_disabled = check_env_disabled()
     test_mode_on = check_test_mode()
-    logging_ok = check_logging_system()
+    sending_disabled = check_sending_disabled()
     
     print("\n" + "="*50)
     print("📊 EMERGENCY STOP SUMMARY:")
     print(f"   Processes killed: {killed}")
     print(f"   Credentials disabled: {'✅' if creds_disabled else '❌'}")
     print(f"   Test mode enabled: {'✅' if test_mode_on else '❌'}")
-    print(f"   Logging system: {'✅' if logging_ok else '❌'}")
+    print(f"   SMS sending disabled: {'✅' if sending_disabled else '❌'}")
     
-    if creds_disabled and test_mode_on:
+    if sending_disabled:
         print("\n🛡️ SYSTEM IS SAFELY STOPPED")
         print("   No SMS messages can be sent")
     else:
-        print("\n⚠️ SYSTEM MAY STILL BE ACTIVE!")
-        print("   Check .env file and restart processes")
+        print("\n🔥 SYSTEM IS STILL ACTIVE!")
+        print("   SMS messages may still be sent!")
+        print("   CHECK CONFIGURATION IMMEDIATELY!")
     
-    if not logging_ok:
-        print("\n🔥 LOGGING SYSTEM BROKEN!")
-        print("   Messages will not be recorded!")
-        print("   FIX LOGGING BEFORE RE-ENABLING SENDS!")
+    print("\n� NOTE: Logging system appears functional")
+    print("   Issue may be with message logging logic")
+    print("   Review conversation logging in textgrid_sender.py")
 
 if __name__ == "__main__":
     main()

@@ -43,15 +43,22 @@ except Exception:
     Table = None  # guarded below
 
 # =========================
-# ENV / CONFIG
+# ENV / CONFIG - EMERGENCY STOP CHECK
 # =========================
-ACCOUNT_SID = TEXTGRID_ACCOUNT_SID
-AUTH_TOKEN = TEXTGRID_AUTH_TOKEN
-API_URL = (
-    f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
-    if ACCOUNT_SID
-    else None
-)
+# Check for emergency stop first
+if os.getenv("TEXTGRID_API_KEY", "").startswith("EMERGENCY_DISABLED"):
+    print("🚨 EMERGENCY STOP: TextGrid sending disabled due to logging issues")
+    ACCOUNT_SID = None
+    AUTH_TOKEN = None
+    API_URL = None
+else:
+    ACCOUNT_SID = TEXTGRID_ACCOUNT_SID
+    AUTH_TOKEN = TEXTGRID_AUTH_TOKEN
+    API_URL = (
+        f"https://api.textgrid.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
+        if ACCOUNT_SID
+        else None
+    )
 
 AIRTABLE_KEY = os.getenv("AIRTABLE_API_KEY")
 LEADS_CONVOS_BASE = os.getenv("LEADS_CONVOS_BASE") or os.getenv("AIRTABLE_LEADS_CONVOS_BASE_ID")
