@@ -1,0 +1,106 @@
+{
+  "app": "Zip Codes",
+  "description": "Intelligence-layer app for market, demographic, and risk metrics. No deal-stage fields.",
+  "auth": {
+    "required_env": ["APP_ID", "APP_TOKEN"],
+    "mode": "podio_app_token"
+  },
+  "unique_key": {
+    "external_id": "zip_code",
+    "type": "text",
+    "required": true,
+    "status": "pending_confirmation"
+  },
+  "fields": [
+    {
+      "name": "zip_code",
+      "label": "Zip Code",
+      "type": "text",
+      "required": true,
+      "domain": "identity"
+    },
+    {
+      "name": "market_grade",
+      "label": "Market Grade",
+      "type": "category",
+      "required": false,
+      "domain": "market_intelligence",
+      "options_source": "podio-ops/podio/category_maps/zip_codes.options.json"
+    },
+    {
+      "name": "crime_index",
+      "label": "Crime Index",
+      "type": "number",
+      "required": false,
+      "domain": "crime_data"
+    },
+    {
+      "name": "median_rent",
+      "label": "Median Rent",
+      "type": "number",
+      "required": false,
+      "domain": "rent_metrics"
+    },
+    {
+      "name": "rent_to_income_ratio",
+      "label": "Rent to Income Ratio",
+      "type": "number",
+      "required": false,
+      "domain": "rent_metrics"
+    },
+    {
+      "name": "appreciation_yoy_pct",
+      "label": "YoY Appreciation %",
+      "type": "number",
+      "required": false,
+      "domain": "appreciation"
+    },
+    {
+      "name": "distress_ratio",
+      "label": "Distress Ratio",
+      "type": "number",
+      "required": false,
+      "domain": "distress_metrics"
+    },
+    {
+      "name": "foreclosure_rate",
+      "label": "Foreclosure Rate",
+      "type": "number",
+      "required": false,
+      "domain": "distress_metrics"
+    },
+    {
+      "name": "population",
+      "label": "Population",
+      "type": "number",
+      "required": false,
+      "domain": "population_data"
+    },
+    {
+      "name": "population_growth_yoy_pct",
+      "label": "Population Growth YoY %",
+      "type": "number",
+      "required": false,
+      "domain": "population_data"
+    },
+    {
+      "name": "median_household_income",
+      "label": "Median Household Income",
+      "type": "number",
+      "required": false,
+      "domain": "economic_indicators"
+    },
+    {
+      "name": "unemployment_rate",
+      "label": "Unemployment Rate",
+      "type": "number",
+      "required": false,
+      "domain": "economic_indicators"
+    }
+  ],
+  "constraints": {
+    "no_deal_stage_fields": true,
+    "upsert_required": true,
+    "duplicate_prevention": true
+  }
+}
