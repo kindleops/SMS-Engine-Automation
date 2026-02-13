@@ -1,0 +1,14 @@
+{
+  "app": "Zip Codes",
+  "generated_at": null,
+  "categories": {
+    "market_grade": {
+      "external_id": "TBD",
+      "options": {}
+    }
+  },
+  "notes": [
+    "Populate via get_category_options.pf in Phase 2.",
+    "Use option IDs for all category writes."
+  ]
+}
